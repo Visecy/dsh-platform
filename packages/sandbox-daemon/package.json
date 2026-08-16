@@ -4,7 +4,11 @@
   "type": "module",
   "private": true,
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./framing": "./src/framing.ts",
+    "./framing.js": "./src/framing.ts",
+    "./protocol": "./src/protocol.ts",
+    "./protocol.js": "./src/protocol.ts"
   },
   "scripts": {
     "test": "vitest run",

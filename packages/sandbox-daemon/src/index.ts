@@ -117,9 +117,39 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartedDaemon> {
       }
 
       // ── commands ─────────────────────────────────────────────────────────
+      if (path === '/commands/resolve-executable' && method === 'POST') {
+        const b = JSON.parse(await readBody(req))
+        const { execFileSync } = await import('node:child_process')
+        const cmd = b.command as string
+        let resolved: string
+        if (cmd.includes('/')) {
+          try {
+            execFileSync('test', ['-f', cmd, '-a', '-x', cmd])
+            resolved = cmd
+          } catch {
+            json(res, 400, { ok: false, data: { error: { code: 'NOT_FOUND', message: `executable not found: ${cmd}` } } })
+            return
+          }
+        } else {
+          // type -P resolves only PATH executables (command -v would return
+          // shell builtins like 'echo', which cannot be exec'd).
+          try {
+            resolved = execFileSync('bash', ['-c', `type -P -- ${JSON.stringify(cmd)}`], { encoding: 'utf8' }).trim()
+          } catch {
+            json(res, 400, { ok: false, data: { error: { code: 'NOT_FOUND', message: `executable not found in PATH: ${cmd}` } } })
+            return
+          }
+        }
+        ok(res, { path: resolved })
+        return
+      }
       if (path === '/commands/run' && method === 'POST') {
         const b = JSON.parse(await readBody(req))
-        const info = await commands.run(b.spec as CommandSpec)
+        const spec = b.spec as CommandSpec
+        if (typeof spec.stdin === 'string') {
+          spec.stdin = Buffer.from(spec.stdin, 'base64')
+        }
+        const info = await commands.run(spec)
         ok(res, info)
         return
       }
@@ -184,6 +214,11 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartedDaemon> {
         const b = JSON.parse(await readBody(req))
         ptys.signal(m[1], b.sig)
         ok(res, {})
+        return
+      }
+      m = path.match(/^\/ptys\/([^/]+)\/status$/)
+      if (m !== null && method === 'GET') {
+        ok(res, { phase: ptys.status(m[1]) })
         return
       }
       m = path.match(/^\/ptys\/([^/]+)\/output$/)
