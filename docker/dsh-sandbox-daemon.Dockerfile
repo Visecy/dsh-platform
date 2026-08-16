@@ -14,7 +14,8 @@ WORKDIR /app
 COPY --from=builder /app/node_modules ./node_modules
 COPY packages/sandbox-daemon/package.json ./
 COPY packages/sandbox-daemon/src ./src
-RUN useradd -u 1000 -m sandbox && mkdir -p /workspace && chown -R sandbox /workspace /app
+# node:24-slim already has uid 1000 (the node user); reuse it
+RUN mkdir -p /workspace && chown -R 1000:1000 /workspace /app
 USER 1000
 EXPOSE 4390
 ENV DAEMON_ROOT=/workspace DAEMON_PORT=4390
