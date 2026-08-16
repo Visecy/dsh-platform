@@ -7,10 +7,10 @@ import { mkdir, writeFile, appendFile, readFile, rm, readdir } from 'node:fs/pro
 import { createWriteStream, type WriteStream } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { CommandSpec, CommandHandleInfo, CommandExit } from './protocol.js'
-import { encodeFrame } from './framing.js'
-import { scrubEnv, mergeEnv } from './env.js'
-import { launchGroup, readGroupExit, terminateGroup, groupAlive } from './process-groups.js'
+import type { CommandSpec, CommandHandleInfo, CommandExit } from './protocol.ts'
+import { encodeFrame } from './framing.ts'
+import { scrubEnv, mergeEnv } from './env.ts'
+import { launchGroup, readGroupExit, terminateGroup, groupAlive } from './process-groups.ts'
 
 export type CommandPhase = 'starting' | 'running' | 'exited' | 'killed'
 
@@ -46,7 +46,9 @@ interface Record {
 export class CommandRegistry {
   private records = new Map<string, Record>()
   private timer?: NodeJS.Timeout
-  constructor(private opts: { runtimeRoot: string; defaultGraceMs: number; pollMs?: number }) {
+  readonly opts: { runtimeRoot: string; defaultGraceMs: number; pollMs?: number }
+  constructor(opts: { runtimeRoot: string; defaultGraceMs: number; pollMs?: number }) {
+    this.opts = opts
     this.timer = setInterval(() => this.scan(), opts.pollMs ?? 200)
     this.timer.unref()
   }

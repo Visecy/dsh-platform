@@ -1,8 +1,8 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { CommandRegistry } from '../src/commands.js'
-import { scrubEnv } from '../src/env.js'
+import { CommandRegistry } from '../src/commands.ts'
+import { scrubEnv } from '../src/env.ts'
 
 let root: string
 let reg: CommandRegistry

@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import { mkdtemp, rm, writeFile, readFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FilesService, FilesError } from '../src/files.js'
+import { FilesService, FilesError } from '../src/files.ts'
 
 let root: string
 let svc: FilesService

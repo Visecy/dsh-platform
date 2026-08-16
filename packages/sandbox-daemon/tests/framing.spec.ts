@@ -3,8 +3,8 @@ import {
   decodeFrames,
   encodeFrame,
   FrameDecoder,
-} from '../src/framing.js'
-import { EOF_MARKER } from '../src/protocol.js'
+} from '../src/framing.ts'
+import { EOF_MARKER } from '../src/protocol.ts'
 
 describe('framing', () => {
   it('round-trips a single chunk across arbitrary split points', () => {

@@ -9,8 +9,8 @@ import { mkdir, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import * as nodePty from 'node-pty'
-import type { PtySpec } from './protocol.js'
-import { encodeFrame } from './framing.js'
+import type { PtySpec } from './protocol.ts'
+import { encodeFrame } from './framing.ts'
 
 export type PtyPhase = 'running' | 'killed' | 'exited'
 
@@ -34,7 +34,10 @@ interface Record {
 
 export class PtyRegistry {
   private records = new Map<string, Record>()
-  constructor(private opts: { runtimeRoot: string }) {}
+  readonly opts: { runtimeRoot: string }
+  constructor(opts: { runtimeRoot: string }) {
+    this.opts = opts
+  }
 
   async create(spec: PtySpec): Promise<PtyInfo> {
     const ptyId = randomUUID()

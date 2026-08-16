@@ -4,7 +4,7 @@
  * EOF_MARKER line signals end-of-stream. Mirrors the E2B POC framing so the
  * k8s adapters can reuse the same decoder semantics.
  */
-import { EOF_MARKER } from './protocol.js'
+import { EOF_MARKER } from './protocol.ts'
 
 const BASE64_LINE = /^[A-Za-z0-9+/]*={0,2}$/
 

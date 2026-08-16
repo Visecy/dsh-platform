@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process'
 import { Transform } from 'node:stream'
 import { mkdir, writeFile, rm, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { encodeFrame } from './framing.js'
+import { encodeFrame } from './framing.ts'
 
 export interface GroupStatus {
   pid: number
@@ -80,10 +80,18 @@ export async function launchGroup(opts: {
     )
   })
 
+  // A spawn failure (missing cwd, missing binary) surfaces as an 'error'
+  // event; surface it through the pid wait so callers see the real cause.
+  let spawnError: Error | undefined
+  child.on('error', (err) => {
+    spawnError = err
+  })
+
   // pid publication: setsid forks once, so $$ inside the script is the group leader.
   let pid = -1
   const deadline = Date.now() + 5000
   while (Date.now() < deadline) {
+    if (spawnError !== undefined) throw spawnError
     try {
       pid = Number.parseInt(await readFile(join(dir, 'pid'), 'utf8'), 10)
       if (Number.isFinite(pid) && pid > 0) break

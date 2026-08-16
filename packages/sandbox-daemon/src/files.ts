@@ -21,7 +21,7 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
-import type { DirEntry, EntryInfo, FileType, FilesApi, WriteIntent, WriteOutcome } from './protocol.js'
+import type { DirEntry, EntryInfo, FileType, FilesApi, WriteIntent, WriteOutcome } from './protocol.ts'
 
 export type FilesErrorCode =
   | 'NOT_FOUND'

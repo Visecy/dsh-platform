@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
-import { PtyRegistry } from '../src/pty.js'
+import { PtyRegistry } from '../src/pty.ts'
 
 let root: string
 let reg: PtyRegistry
