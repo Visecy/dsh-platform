@@ -45,6 +45,15 @@ class MockController implements PodController {
     this.pods.delete(`dsh-ws-${workspaceId}`)
   }
   async waitReady(): Promise<void> { /* instant */ }
+  pvcs = new Set<string>()
+  async ensurePvc(workspaceId: string): Promise<string> {
+    const n = `dsh-ws-${workspaceId}-data`
+    this.pvcs.add(n)
+    return n
+  }
+  async deletePvc(workspaceId: string): Promise<void> {
+    this.pvcs.delete(`dsh-ws-${workspaceId}-data`)
+  }
   endpoint(): string { return 'http://daemon' }
 }
 
@@ -130,4 +139,23 @@ describe('WorkspaceLifecycleManager', () => {
     await new Promise((r) => setTimeout(r, 10))
     expect(mgr.stateOf('ws-1')?.phase).toBe('running') // active, not slept
   })
+  it('sleep keeps the PVC; delete removes pod and PVC', async () => {
+    mgr.attach('ws-pvc')
+    await new Promise((r) => setTimeout(r, 10))
+    expect(ctrl.pvcs.has('dsh-ws-ws-pvc-data')).toBe(true)
+    // idle -> grace -> sleep keeps PVC
+    mgr.handleSessionEvent('ws-pvc', { type: 'session-created' })
+    mgr.handleSessionEvent('ws-pvc', { type: 'session-disposed' })
+    clock.advance(3 * 60 * 60 * 1000)
+    await new Promise((r) => setTimeout(r, 10))
+    expect(mgr.stateOf('ws-pvc')?.phase).toBe('sleep')
+    expect(ctrl.pvcs.has('dsh-ws-ws-pvc-data')).toBe(true)
+    // explicit delete removes PVC too
+    mgr.delete('ws-pvc')
+    await new Promise((r) => setTimeout(r, 10))
+    expect(mgr.stateOf('ws-pvc')?.phase).toBe('deleted')
+    expect(ctrl.pvcs.has('dsh-ws-ws-pvc-data')).toBe(false)
+  })
+
 })
+

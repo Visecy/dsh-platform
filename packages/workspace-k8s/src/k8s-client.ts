@@ -11,6 +11,13 @@ export interface WorkspacePodSpec {
   daemonPort: number
   pvcName?: string
   resources?: { cpu?: string; memory?: string }
+  storageClassName?: string
+  storageSize?: string
+}
+
+export interface PvcOptions {
+  storageClassName?: string
+  storageSize?: string
 }
 
 export interface PodController {
@@ -18,10 +25,15 @@ export interface PodController {
   deletePod(namespace: string, name: string): Promise<void>
   waitReady(namespace: string, name: string, timeoutMs?: number): Promise<void>
   endpoint(namespace: string, name: string, port: number): string
+  ensurePvc(workspaceId: string): Promise<string>
+  deletePvc(workspaceId: string): Promise<void>
 }
 
 export class K8sPodController implements PodController {
-  constructor(private kc: k8s.KubeConfig) {}
+  constructor(
+    private kc: k8s.KubeConfig,
+    private pvc: PvcOptions = {},
+  ) {}
 
   podName(workspaceId: string): string {
     // sanitize: dsh-ws-<uuid-ish> (max 63 chars, lowercase alnum + '-')
@@ -133,5 +145,38 @@ export class K8sPodController implements PodController {
 
   endpoint(namespace: string, workspaceId: string, port: number): string {
     return `http://${this.svcName(workspaceId)}.${namespace}.svc.cluster.local:${port}`
+  }
+
+  pvcName(workspaceId: string): string {
+    return `dsh-ws-${workspaceId}-data`
+  }
+
+  async ensurePvc(workspaceId: string): Promise<string> {
+    const core = this.kc.makeApiClient(k8s.CoreV1Api)
+    const name = this.pvcName(workspaceId)
+    const pvc: k8s.V1PersistentVolumeClaim = {
+      metadata: { name, namespace: this.namespace },
+      spec: {
+        accessModes: ['ReadWriteOnce'],
+        resources: { requests: { storage: this.pvc.storageSize ?? '10Gi' } },
+        storageClassName: this.pvc.storageClassName,
+      },
+    }
+    try {
+      await core.createNamespacedPersistentVolumeClaim(this.namespace, pvc)
+    } catch (e: unknown) {
+      const status = (e as { body?: { message?: string } }).body?.message ?? String(e)
+      if (!status.includes('already exists')) throw e
+    }
+    return name
+  }
+
+  async deletePvc(workspaceId: string): Promise<void> {
+    const core = this.kc.makeApiClient(k8s.CoreV1Api)
+    try {
+      await core.deleteNamespacedPersistentVolumeClaim(this.pvcName(workspaceId), this.namespace)
+    } catch {
+      // already gone
+    }
   }
 }

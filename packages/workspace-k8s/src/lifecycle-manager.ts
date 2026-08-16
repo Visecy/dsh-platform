@@ -17,6 +17,8 @@ export interface LifecycleOptions {
   daemonPort?: number
   pvcName?: string
   resources?: { cpu?: string; memory?: string }
+  storageClassName?: string
+  storageSize?: string
   graceMs?: number
   now?: () => number
   timer?: Timer
@@ -101,12 +103,13 @@ export class WorkspaceLifecycleManager {
         if (this.ensureInflight.has(workspaceId)) return
         this.ensureInflight.add(workspaceId)
         try {
+          const pvcName = await this.controller.ensurePvc(workspaceId)
           const spec: WorkspacePodSpec = {
             namespace: this.opts.namespace,
             workspaceId,
             image: this.opts.image,
             daemonPort: this.opts.daemonPort,
-            pvcName: undefined,
+            pvcName,
             resources: undefined,
           }
           const name = await this.controller.ensurePod(spec)
@@ -121,7 +124,19 @@ export class WorkspaceLifecycleManager {
         return
       }
       case 'dispose': {
+        // sleep: pod goes away, PVC survives
         await this.controller.deletePod(this.opts.namespace, workspaceId)
+        const t = this.timers.get(workspaceId)
+        if (t !== undefined) {
+          this.timer.clearTimeout(t)
+          this.timers.delete(workspaceId)
+        }
+        return
+      }
+      case 'delete': {
+        // workspace deletion: pod AND PVC go away
+        await this.controller.deletePod(this.opts.namespace, workspaceId)
+        await this.controller.deletePvc(workspaceId)
         const t = this.timers.get(workspaceId)
         if (t !== undefined) {
           this.timer.clearTimeout(t)

@@ -72,11 +72,11 @@ describe('state machine', () => {
     expect(t.state.phase).toBe('provision')
   })
 
-  it('dispose-requested from any phase -> deleted', () => {
+  it('dispose-requested from any phase -> deleted with delete action', () => {
     for (const phase of ['provision', 'running', 'sleep'] as const) {
       const t = transition(ws({ phase, activeSessions: 3 }), { type: 'dispose-requested' })
       expect(t.state.phase).toBe('deleted')
-      expect(t.action).toEqual({ kind: 'dispose' })
+      expect(t.action).toEqual({ kind: 'delete' })
     }
   })
 

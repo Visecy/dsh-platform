@@ -36,7 +36,10 @@ export type WorkspaceEvent =
 export type WorkspaceAction =
   | { kind: 'none' }
   | { kind: 'ensure' }
+  /** Sleep: delete the pod, KEEP the PVC. */
   | { kind: 'dispose' }
+  /** Workspace deletion: delete the pod AND the PVC. */
+  | { kind: 'delete' }
   | { kind: 'start-grace' }
   | { kind: 'cancel-grace' }
 
@@ -76,7 +79,7 @@ export function transition(state: WorkspaceState, event: WorkspaceEvent): Transi
   if (event.type === 'dispose-requested') {
     s.phase = 'deleted'
     s.idleSince = undefined
-    return { state: s, action: { kind: 'dispose' } }
+    return { state: s, action: { kind: 'delete' } }
   }
 
   switch (s.phase) {
