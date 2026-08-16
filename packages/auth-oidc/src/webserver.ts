@@ -36,6 +36,7 @@ export class GateWebServer {
   private prefixes: HttpRoute[] = []
   private upgrades = new Map<string, UpgradeRoute>()
   private fallbackHandler?: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
+  private upgradeFallbackHandler?: UpgradeRoute['handler']
   private server?: Server
 
   constructor(private options: WebServerOptions = {}) {}
@@ -59,6 +60,14 @@ export class GateWebServer {
     this.upgrades.set(route.path, route)
     return () => {
       this.upgrades.delete(route.path)
+    }
+  }
+
+  /** Upgrade fallback (proxy path) for upgrades matching no registered route. */
+  registerUpgradeFallback(handler: UpgradeRoute['handler']): () => void {
+    this.upgradeFallbackHandler = handler
+    return () => {
+      this.upgradeFallbackHandler = undefined
     }
   }
 
@@ -124,6 +133,10 @@ export class GateWebServer {
         const pathname = pathOf(req)
         const route = this.upgrades.get(pathname)
         if (route === undefined) {
+          if (this.upgradeFallbackHandler !== undefined) {
+            this.upgradeFallbackHandler(req, socket, head)
+            return
+          }
           socket.destroy()
           return
         }
