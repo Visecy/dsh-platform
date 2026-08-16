@@ -16,6 +16,8 @@ export interface EntryInfo {
   mode?: number
   modifiedTime?: number
   symlinkTarget?: string
+  /** Content version token (sha256 of identity+size+mode+mtime). */
+  version?: string
 }
 
 /** One directory listing entry. */

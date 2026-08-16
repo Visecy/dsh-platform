@@ -172,6 +172,14 @@ export class FilesService implements FilesApi {
       return undefined
     }
     const type: FileType = lst.isDirectory() ? 'directory' : lst.isSymbolicLink() ? 'symlink' : lst.isFile() ? 'file' : 'other'
+    let version: string | undefined
+    if (lst.isFile()) {
+      try {
+        version = await this.versionOf(abs)
+      } catch {
+        // version token unavailable; leave undefined
+      }
+    }
     return {
       path,
       name: path.split('/').filter(Boolean).pop() ?? '/',
@@ -180,6 +188,7 @@ export class FilesService implements FilesApi {
       mode: lst.mode & 0o777,
       modifiedTime: lst.mtimeMs,
       symlinkTarget: lst.isSymbolicLink() ? (await readlinkSafe(abs)) : undefined,
+      version,
     }
   }
 
