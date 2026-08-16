@@ -1,28 +1,18 @@
-"{n
-\name\:
-\dsh-platform\,n
-\private\:
-true,n
-\type\:
-\module\,n
-\engines\:
-{n
-\node\:
-\>=22.19\n
-},n
-\packageManager\:
-\pnpm@10\,n
-\scripts\:
-{n
-\build\:
-\pnpm -r build\,n
-\test\:
-\pnpm -r test\,n
-\lint\:
-\pnpm -r lint\n
-},n
-\devDependencies\:
-{n
-\typescript\:
-\^5.5\n
-}n}"
+{
+  "name": "dsh-platform",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "typescript": "^5.5"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}
