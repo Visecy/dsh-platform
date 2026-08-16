@@ -3,5 +3,17 @@
   "version": "0.1.0",
   "type": "module",
   "private": true,
-  "dependencies": {}
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-credentials": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-settings": "0.0.1-rc.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2",
+    "vitest": "^2.1.0"
+  },
+  "scripts": {
+    "test": "vitest run"
+  }
 }
