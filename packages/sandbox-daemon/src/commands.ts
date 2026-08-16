@@ -160,6 +160,11 @@ export class CommandRegistry {
     return [...this.records.values()].map((r) => ({ ...r.status }))
   }
 
+  /** Force-terminate every live command (workspace-wide grace expiry). */
+  async killAll(graceMs = 2000): Promise<void> {
+    await Promise.all([...this.records.keys()].map((id) => this.kill(id, { graceMs }).catch(() => undefined)))
+  }
+
   async dispose(): Promise<void> {
     if (this.timer) clearInterval(this.timer)
     await Promise.all([...this.records.keys()].map((id) => this.kill(id, { graceMs: 200 }).catch(() => undefined)))

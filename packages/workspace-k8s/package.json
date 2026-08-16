@@ -9,6 +9,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
+    "@visecy/dsh-sandbox-daemon": "workspace:*",
     "typescript": "^7.0.2",
     "vitest": "^2.1.0"
   },

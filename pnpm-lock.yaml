@@ -94,6 +94,9 @@ importers:
       '@types/node':
         specifier: ^26.2.0
         version: 26.2.0
+      '@visecy/dsh-sandbox-daemon':
+        specifier: workspace:*
+        version: link:../sandbox-daemon
       typescript:
         specifier: ^7.0.2
         version: 7.0.2

@@ -22,11 +22,14 @@ export interface LifecycleOptions {
   graceMs?: number
   now?: () => number
   timer?: Timer
+  /** Called with the daemon endpoint before sleeping: drain/terminate commands. */
+  onBeforeSleep?: (endpoint: string) => Promise<void>
 }
 
 export class WorkspaceLifecycleManager {
   private controller: PodController
   private opts: Required<Pick<LifecycleOptions, 'namespace' | 'image' | 'daemonPort' | 'graceMs'>>
+  private onBeforeSleep: ((endpoint: string) => Promise<void>) | undefined
   private now: () => number
   private timer: Timer
   private states = new Map<string, WorkspaceState>()
@@ -42,6 +45,7 @@ export class WorkspaceLifecycleManager {
       graceMs: opts.graceMs ?? 3 * 60 * 60 * 1000,
     }
     this.now = opts.now ?? Date.now
+    this.onBeforeSleep = opts.onBeforeSleep
     this.timer = opts.timer ?? {
       setTimeout: (fn, ms) => setTimeout(fn, ms),
       clearTimeout: (t) => clearTimeout(t),
@@ -124,7 +128,11 @@ export class WorkspaceLifecycleManager {
         return
       }
       case 'dispose': {
-        // sleep: pod goes away, PVC survives
+        // sleep: drain commands in the pod first, then the pod goes away (PVC survives)
+        if (this.onBeforeSleep !== undefined) {
+          const ep = this.controller.endpoint(this.opts.namespace, workspaceId, this.opts.daemonPort)
+          await this.onBeforeSleep(ep).catch(() => undefined)
+        }
         await this.controller.deletePod(this.opts.namespace, workspaceId)
         const t = this.timers.get(workspaceId)
         if (t !== undefined) {

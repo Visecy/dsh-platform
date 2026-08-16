@@ -188,6 +188,12 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartedDaemon> {
         ok(res, { commands: commands.list() })
         return
       }
+      if (path === '/commands/terminate-all' && method === 'POST') {
+        const b = JSON.parse(await readBody(req))
+        await commands.killAll(b.graceMs ?? 2000)
+        ok(res, { commands: commands.list() })
+        return
+      }
 
       // ── ptys ─────────────────────────────────────────────────────────────
       if (path === '/ptys' && method === 'POST') {
