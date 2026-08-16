@@ -99,6 +99,10 @@ export function transition(state: WorkspaceState, event: WorkspaceEvent): Transi
       if (event.type === 'pod-lost') {
         return { state: s, action: { kind: 'ensure' } }
       }
+      if (event.type === 'user-attach' && s.idleSince !== undefined) {
+        s.idleSince = undefined
+        return { state: s, action: { kind: 'cancel-grace' } }
+      }
       if (event.type === 'grace-expired' && idle) {
         s.phase = 'sleep'
         s.idleSince = undefined
