@@ -30,20 +30,36 @@ const config: AuthConfig = {
   host: '0.0.0.0',
 }
 
-if (config.oidc.issuer === '' || config.oidc.clientId === '') {
-  console.error('OIDC_ISSUER and OIDC_CLIENT_ID are required')
-  process.exit(1)
+// GATE_PASSTHROUGH=1: no auth (authentication happens inside dsh web via the
+// in-process registerGate plugin); this process only reverse-proxies.
+const passthrough = env.GATE_PASSTHROUGH === '1'
+
+let server: ReturnType<typeof createServer>
+if (passthrough) {
+  server = createServer((req, res) => {
+    proxy(req, res)
+  })
+  server.on('upgrade', (req, socket, head) => proxyUpgrade(req, socket, head))
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(Number(env.GATE_PORT ?? '3080'), '0.0.0.0', () => resolve())
+  })
+  console.log(`passthrough gate ready on :${env.GATE_PORT ?? '3080'} -> upstream ${upstream}`)
+} else {
+  if (config.oidc.issuer === '' || config.oidc.clientId === '') {
+    console.error('OIDC_ISSUER and OIDC_CLIENT_ID are required')
+    process.exit(1)
+  }
+  const auth = new AuthPlugin(config)
+  await auth.start()
+  console.log(`auth gate ready at ${auth.baseUrl} -> upstream ${upstream}`)
+
+  // Proxy: everything the gate allows through is forwarded to dsh web,
+  // preserving Host (public authority) and Origin; upgrades (WebSocket) pass
+  // through the same channel.
+  auth.server.registerFallback((req, res) => proxy(req, res))
+  auth.server.registerUpgradeFallback?.((req, socket, head) => proxyUpgrade(req, socket, head))
 }
-
-const auth = new AuthPlugin(config)
-await auth.start()
-console.log(`auth gate ready at ${auth.baseUrl} -> upstream ${upstream}`)
-
-// Proxy: everything the gate allows through is forwarded to dsh web,
-// preserving Host (public authority) and Origin; upgrades (WebSocket) pass
-// through the same channel.
-auth.server.registerFallback((req, res) => proxy(req, res))
-auth.server.registerUpgradeFallback?.((req, socket, head) => proxyUpgrade(req, socket, head))
 
 function proxy(req: IncomingMessage, res: ServerResponse): void {
   const u = new URL(req.url ?? '/', upstream)
