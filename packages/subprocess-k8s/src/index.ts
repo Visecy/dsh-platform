@@ -207,5 +207,7 @@ class RemoteTerminalHandle implements SubprocessTerminalHandle {
 }
 
 export function apply(ctx: Context, config: Config): void {
-  ctx.provide('subprocess', new SubprocessK8s(ctx, config))
+  // SubprocessRuntime base constructor already registers under 'subprocess'
+  // (super(ctx, "subprocess")); providing again would collide.
+  new SubprocessK8s(ctx, config)
 }

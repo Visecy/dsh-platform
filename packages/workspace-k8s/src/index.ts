@@ -85,5 +85,7 @@ export class WorkspaceRuntimeService extends Service implements WorkspaceRuntime
 }
 
 export function apply(ctx: Context, config: Config): void {
-  ctx.provide('workspaceRuntime', new WorkspaceRuntimeService(ctx, config))
+  // Service constructor already registers under 'workspaceRuntime'; providing
+  // again would collide with the auto-registration.
+  new WorkspaceRuntimeService(ctx, config)
 }

@@ -243,5 +243,7 @@ export class FsK8s extends FileSystem {
 }
 
 export function apply(ctx: Context, config: Config): void {
-  ctx.provide('fs', new FsK8s(ctx, config))
+  // FileSystem base constructor already registers under 'fs' (super(ctx, "fs"));
+  // providing again would collide.
+  new FsK8s(ctx, config)
 }
