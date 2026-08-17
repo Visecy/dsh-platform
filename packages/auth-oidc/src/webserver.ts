@@ -39,7 +39,10 @@ export class GateWebServer {
   private upgradeFallbackHandler?: UpgradeRoute['handler']
   private server?: Server
 
-  constructor(private options: WebServerOptions = {}) {}
+  readonly options: WebServerOptions
+  constructor(options: WebServerOptions = {}) {
+    this.options = options
+  }
 
   register(route: HttpRoute): () => void {
     if (route.kind === 'exact') {

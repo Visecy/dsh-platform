@@ -46,7 +46,10 @@ export class OidcClient {
   private discovery?: OidcDiscovery
   private jwks?: { keys: JsonWebKey[] }
 
-  constructor(private config: OidcConfig) {}
+  readonly config: OidcConfig
+  constructor(config: OidcConfig) {
+    this.config = config
+  }
 
   async getDiscovery(): Promise<OidcDiscovery> {
     if (this.discovery !== undefined) return this.discovery

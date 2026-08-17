@@ -48,7 +48,9 @@ export class AuthPlugin {
   private port: number
   private host: string
 
-  constructor(private config: AuthConfig) {
+  readonly config: AuthConfig
+  constructor(config: AuthConfig) {
+    this.config = config
     this.oidc = new OidcClient(config.oidc)
     this.sessions = new SessionCodec(config.sessionSecret)
     this.cookieName = config.cookieName ?? 'dsh_session'
