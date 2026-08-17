@@ -124,6 +124,7 @@ export class AuthPlugin {
     if (req.headers.accept?.includes('text/html') === true || pathname === '/') {
       const url = await this.loginUrl()
       res.writeHead(302, { location: url })
+      res.end()
       return 'responded'
     }
     res.writeHead(401, { 'content-type': 'application/json' })
