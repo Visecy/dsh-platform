@@ -16,7 +16,7 @@ USER root
 
 # 1. privileged-method unlock: patch the official client-connection in place
 #    (image build rootfs is writable — no runtime sed needed)
-RUN sed -i 's/isTrustedApiRequest(request, [])/isTrustedApiRequest(request, trustedHosts)/' \
+RUN sed -i 's/isTrustedApiRequest(request, \[\])/isTrustedApiRequest(request, trustedHosts)/' \
       /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-connection/lib/index.js \
   && grep -c 'isTrustedApiRequest(request, trustedHosts)' \
       /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-connection/lib/index.js
@@ -32,16 +32,16 @@ USER node
 RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
   && dsh --profile headless --dump-config > /dev/null 2>&1 || true \
   && corepack pnpm --dir /home/node/.dsh/profiles/web --store-dir /tmp/pnpm-store add -w \
-       @visecy/dsh-auth-oidc@0.1.0 \
-       @visecy/dsh-fs-k8s@0.1.0 \
-       @visecy/dsh-subprocess-k8s@0.1.0 \
-       @visecy/dsh-workspace-k8s@0.1.0 \
+       @visecy/dsh-auth-oidc \
+       @visecy/dsh-fs-k8s \
+       @visecy/dsh-subprocess-k8s \
+       @visecy/dsh-workspace-k8s \
        dsh-web-auth@0.1.0 \
        @kubernetes/client-node \
   && corepack pnpm --dir /home/node/.dsh/profiles/headless --store-dir /tmp/pnpm-store add -w \
-       @visecy/dsh-fs-k8s@0.1.0 \
-       @visecy/dsh-subprocess-k8s@0.1.0 \
-       @visecy/dsh-workspace-k8s@0.1.0 \
+       @visecy/dsh-fs-k8s \
+       @visecy/dsh-subprocess-k8s \
+       @visecy/dsh-workspace-k8s \
        @kubernetes/client-node
 
 # 3. profile patches (web: gated webserver + OIDC + providers; headless: providers)
