@@ -17,6 +17,10 @@ export interface Config {
   daemonEndpoint: string
   /** Per-call endpoint resolution by workspace id (ensure + getEndpoint). */
   resolveEndpoint?: (workspaceId: string) => Promise<string> | string
+  /** Host-side workspace identifier root, e.g. /workspaces/<id>. */
+  hostRoot?: string
+  /** Pod-side workspace root, default /workspace. */
+  podRoot?: string
 }
 
 export class SubprocessK8s extends SubprocessRuntime {
@@ -32,9 +36,22 @@ export class SubprocessK8s extends SubprocessRuntime {
   }
 
   /** The workspace id from a host path like /workspaces/<id>/... */
+  private hostRoot = '/workspaces'
+  private podRoot = '/workspace'
+
+  /** The workspace id from a host path like /workspaces/<id>/... */
   private workspaceOf(cwd: string): string | undefined {
-    const m = /^\/workspaces\/([^/]+)/.exec(cwd)
+    const esc = this.hostRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const m = new RegExp('^' + esc + '/([^/]+)').exec(cwd)
     return m?.[1]
+  }
+
+  /** Translate a host cwd (/workspaces/<id>/...) to the pod-side path. */
+  private toPod(cwd: string): string {
+    const hostRoot = this.hostRoot
+    if (cwd === hostRoot) return this.podRoot
+    if (!cwd.startsWith(hostRoot + '/')) return cwd
+    return this.podRoot + cwd.slice(hostRoot.length)
   }
 
   /** Resolve the daemon endpoint for a cwd (per-workspace pod) or the static one. */
@@ -52,10 +69,13 @@ export class SubprocessK8s extends SubprocessRuntime {
   }
 
   override spawn(spec: SubprocessSpawnSpec): SubprocessHandle {
-    // endpoint resolution is async; the handle resolves it before starting
+    // endpoint resolution is async; the handle resolves it before starting.
+    // The daemon cwd is the pod-side path; translate the host workspace path.
+    const podCwd = this.toPod(spec.cwd)
+    const translated: SubprocessSpawnSpec = { ...spec, cwd: podCwd }
     const handle = new RemoteHandle(
       () => this.endpointFor(spec.cwd).then((ep) => this.client.withEndpoint(ep)),
-      spec,
+      translated,
       this.spillDir,
     )
     void handle.start()
@@ -65,8 +85,10 @@ export class SubprocessK8s extends SubprocessRuntime {
   override async spawnTerminal(spec: SubprocessTerminalSpawnSpec): Promise<SubprocessTerminalHandle> {
     const ep = await this.endpointFor(spec.cwd)
     const bound = this.client.withEndpoint(ep)
-    const created = await bound.createPty({ argv: spec.argv, cwd: spec.cwd, env: spec.env, rows: spec.rows, cols: spec.cols })
-    return new RemoteTerminalHandle(bound, created.ptyId, created.pid, spec)
+    const podCwd = this.toPod(spec.cwd)
+    const created = await bound.createPty({ argv: spec.argv, cwd: podCwd, env: spec.env, rows: spec.rows, cols: spec.cols })
+    const translated: SubprocessTerminalSpawnSpec = { ...spec, cwd: podCwd }
+    return new RemoteTerminalHandle(bound, created.ptyId, created.pid, translated)
   }
 }
 
