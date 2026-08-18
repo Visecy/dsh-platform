@@ -15,6 +15,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write   # npm Trusted Publisher (OIDC) — no long-lived token
     steps:
       - uses: actions/checkout@v4
 
@@ -38,18 +39,23 @@ jobs:
           node scripts/build-pkg.mjs subprocess-k8s src/index.ts
           node scripts/build-pkg.mjs workspace-k8s src/index.ts
 
-      - name: Test
-        run: pnpm -r test
+      - name: Test published packages
+        run: |
+          cd packages/auth-oidc && pnpm test && cd ../..
+          cd packages/fs-k8s && pnpm test && cd ../..
+          cd packages/subprocess-k8s && pnpm test && cd ../..
+          cd packages/workspace-k8s && pnpm test && cd ../..
 
+      # npm Trusted Publisher: no NPM_TOKEN. The registry verifies our GitHub
+      # Actions OIDC token against the publisher configured on npmjs.com.
+      # --registry pins the official registry (repo .npmrc points at a mirror).
       - name: Publish to npm (@visecy)
         run: |
           for p in auth-oidc fs-k8s subprocess-k8s workspace-k8s; do
             cd packages/$p
-            npm publish --access public
+            npm publish --access public --provenance --registry=https://registry.npmjs.org
             cd ../..
           done
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Build image
         uses: docker/build-push-action@v6
