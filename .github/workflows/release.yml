@@ -32,6 +32,15 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # tag v0.1.2 -> all packages version 0.1.2 (registry already has older
+      # versions from manual publishes; the tag is the single source of truth)
+      - name: Sync versions to tag
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          for p in auth-oidc fs-k8s subprocess-k8s workspace-k8s; do
+            (cd packages/$p && npm version $VER --no-git-tag-version --allow-same-version)
+          done
+
       - name: Build packages
         run: |
           node scripts/build-pkg.mjs auth-oidc src/plugin.ts
@@ -48,7 +57,6 @@ jobs:
 
       # npm Trusted Publisher: no NPM_TOKEN. The registry verifies our GitHub
       # Actions OIDC token against the publisher configured on npmjs.com.
-      # --registry pins the official registry (repo .npmrc points at a mirror).
       - name: Publish to npm (@visecy)
         run: |
           for p in auth-oidc fs-k8s subprocess-k8s workspace-k8s; do
