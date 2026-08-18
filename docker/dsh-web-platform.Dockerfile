@@ -7,10 +7,16 @@
 #   2. @visecy platform plugins pre-installed into the web + headless profiles
 #   3. dsh-web-auth (registerGate webserver fork) pre-installed
 #
-# Build-time context: repo root. The plugin packages are consumed from the
-# npm registry (@visecy scope, published by the release workflow), so this
-# image builds reproducibly without a monorepo copy.
+# Build-time context: repo root.
+#
+# Version pinning: PLUGIN_VERSION is passed by the release workflow from the
+# git tag (e.g. v0.1.5 -> 0.1.5), so the installed plugins always match the
+# npm versions published by the SAME tag — no "latest" drift between the npm
+# registry and the image. When unset (manual builds), pnpm resolves latest.
 FROM runzhliu/deepseek-harness:0.1.0-rc.6
+
+# npm version of the @visecy plugins to install (from the release tag).
+ARG PLUGIN_VERSION
 
 USER root
 
@@ -29,19 +35,21 @@ ENV HOME=/home/node DSH_HOME=/home/node/.dsh \
 RUN mkdir -p /home/node/.dsh && chown -R node:node /home/node/.dsh
 
 USER node
+# pin plugins to PLUGIN_VERSION when set (release builds); dsh-web-auth is a
+# third-party pin; @kubernetes/client-node tracks its own semver
 RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
   && dsh --profile headless --dump-config > /dev/null 2>&1 || true \
   && corepack pnpm --dir /home/node/.dsh/profiles/web --store-dir /tmp/pnpm-store add -w \
-       @visecy/dsh-auth-oidc \
-       @visecy/dsh-fs-k8s \
-       @visecy/dsh-subprocess-k8s \
-       @visecy/dsh-workspace-k8s \
+       @visecy/dsh-auth-oidc@${PLUGIN_VERSION:-latest} \
+       @visecy/dsh-fs-k8s@${PLUGIN_VERSION:-latest} \
+       @visecy/dsh-subprocess-k8s@${PLUGIN_VERSION:-latest} \
+       @visecy/dsh-workspace-k8s@${PLUGIN_VERSION:-latest} \
        dsh-web-auth@0.1.0 \
        @kubernetes/client-node \
   && corepack pnpm --dir /home/node/.dsh/profiles/headless --store-dir /tmp/pnpm-store add -w \
-       @visecy/dsh-fs-k8s \
-       @visecy/dsh-subprocess-k8s \
-       @visecy/dsh-workspace-k8s \
+       @visecy/dsh-fs-k8s@${PLUGIN_VERSION:-latest} \
+       @visecy/dsh-subprocess-k8s@${PLUGIN_VERSION:-latest} \
+       @visecy/dsh-workspace-k8s@${PLUGIN_VERSION:-latest} \
        @kubernetes/client-node
 
 # 3. profile patches (web: gated webserver + OIDC + providers; headless: providers)

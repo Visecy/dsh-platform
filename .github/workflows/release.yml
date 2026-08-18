@@ -32,11 +32,12 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      # tag v0.1.2 -> all packages version 0.1.2 (registry already has older
-      # versions from manual publishes; the tag is the single source of truth)
+      # The tag is the single source of truth: packages are versioned to the
+      # tag before publishing, and the image installs that exact version.
       - name: Sync versions to tag
         run: |
           VER="${GITHUB_REF_NAME#v}"
+          echo "PLUGIN_VERSION=$VER" >> $GITHUB_ENV
           for p in auth-oidc fs-k8s subprocess-k8s workspace-k8s; do
             (cd packages/$p && npm version $VER --no-git-tag-version --allow-same-version)
           done
@@ -79,3 +80,5 @@ jobs:
           file: docker/dsh-web-platform.Dockerfile
           push: true
           tags: ${{ env.IMAGE }}:${{ github.ref_name }},${{ env.IMAGE }}:latest
+          build-args: |
+            PLUGIN_VERSION=${{ env.PLUGIN_VERSION }}
