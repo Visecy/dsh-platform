@@ -49,7 +49,11 @@ export class WorkspaceRuntimeService extends Service implements WorkspaceRuntime
   private makeController(): PodController {
     const kc = new k8s.KubeConfig()
     kc.loadFromDefault()
-    return new K8sPodController(kc)
+    return new K8sPodController(kc, {
+      namespace: this.config.namespace,
+      storageClassName: this.config.storageClassName,
+      storageSize: this.config.storageSize,
+    })
   }
 
   async ensure(workspaceId: string): Promise<string> {

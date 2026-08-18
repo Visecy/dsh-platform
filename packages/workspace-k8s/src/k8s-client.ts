@@ -16,6 +16,7 @@ export interface WorkspacePodSpec {
 }
 
 export interface PvcOptions {
+  namespace?: string
   storageClassName?: string
   storageSize?: string
 }
@@ -90,7 +91,7 @@ export class K8sPodController implements PodController {
     }
 
     try {
-      await core.createNamespacedPod(spec.namespace, pod)
+      await core.createNamespacedPod({ namespace: spec.namespace, body: pod })
     } catch (e: unknown) {
       const status = (e as { body?: { message?: string } }).body?.message ?? String(e)
       if (!status.includes('already exists')) throw e
@@ -106,7 +107,7 @@ export class K8sPodController implements PodController {
       },
     }
     try {
-      await core.createNamespacedService(spec.namespace, svc)
+      await core.createNamespacedService({ namespace: spec.namespace, body: svc })
     } catch (e: unknown) {
       const status = (e as { body?: { message?: string } }).body?.message ?? String(e)
       if (!status.includes('already exists')) throw e
@@ -118,12 +119,12 @@ export class K8sPodController implements PodController {
     const core = this.kc.makeApiClient(k8s.CoreV1Api)
     const name = this.podName(workspaceId)
     try {
-      await core.deleteNamespacedPod(name, namespace)
+      await core.deleteNamespacedPod({ name, namespace })
     } catch {
       // already gone
     }
     try {
-      await core.deleteNamespacedService(this.svcName(workspaceId), namespace)
+      await core.deleteNamespacedService({ name: this.svcName(workspaceId), namespace })
     } catch {
       // already gone
     }
@@ -133,7 +134,7 @@ export class K8sPodController implements PodController {
     const core = this.kc.makeApiClient(k8s.CoreV1Api)
     const deadline = Date.now() + timeoutMs
     for (;;) {
-      const pod = await core.readNamespacedPod(name, namespace)
+      const pod = await core.readNamespacedPod({ name, namespace }) as { body: { status?: { conditions?: Array<{ type: string; status: string }> } } }
       const ready = pod.body.status?.conditions?.some(
         (c) => c.type === 'Ready' && c.status === 'True',
       )
@@ -152,10 +153,11 @@ export class K8sPodController implements PodController {
   }
 
   async ensurePvc(workspaceId: string): Promise<string> {
+    const ns = this.pvc.namespace ?? this.requireNamespace()
     const core = this.kc.makeApiClient(k8s.CoreV1Api)
     const name = this.pvcName(workspaceId)
     const pvc: k8s.V1PersistentVolumeClaim = {
-      metadata: { name, namespace: this.namespace },
+      metadata: { name, namespace: ns },
       spec: {
         accessModes: ['ReadWriteOnce'],
         resources: { requests: { storage: this.pvc.storageSize ?? '10Gi' } },
@@ -163,7 +165,7 @@ export class K8sPodController implements PodController {
       },
     }
     try {
-      await core.createNamespacedPersistentVolumeClaim(this.namespace, pvc)
+      await core.createNamespacedPersistentVolumeClaim({ namespace: ns, body: pvc })
     } catch (e: unknown) {
       const status = (e as { body?: { message?: string } }).body?.message ?? String(e)
       if (!status.includes('already exists')) throw e
@@ -171,10 +173,15 @@ export class K8sPodController implements PodController {
     return name
   }
 
+  private requireNamespace(): string {
+    throw new Error('workspace PVC namespace not configured')
+  }
+
   async deletePvc(workspaceId: string): Promise<void> {
+    const ns = this.pvc.namespace ?? this.requireNamespace()
     const core = this.kc.makeApiClient(k8s.CoreV1Api)
     try {
-      await core.deleteNamespacedPersistentVolumeClaim(this.pvcName(workspaceId), this.namespace)
+      await core.deleteNamespacedPersistentVolumeClaim({ name: this.pvcName(workspaceId), namespace: ns })
     } catch {
       // already gone
     }
