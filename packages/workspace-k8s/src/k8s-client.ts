@@ -134,8 +134,10 @@ export class K8sPodController implements PodController {
     const core = this.kc.makeApiClient(k8s.CoreV1Api)
     const deadline = Date.now() + timeoutMs
     for (;;) {
-      const pod = await core.readNamespacedPod({ name, namespace }) as { body: { status?: { conditions?: Array<{ type: string; status: string }> } } }
-      const ready = pod.body.status?.conditions?.some(
+      const raw = await core.readNamespacedPod({ name, namespace }) as unknown as { body?: { status?: { conditions?: Array<{ type: string; status: string }> } }; status?: { conditions?: Array<{ type: string; status: string }> } }
+      // v2 client returns the V1Pod directly for reads (no body wrapper)
+      const pod = raw.body ?? raw
+      const ready = pod.status?.conditions?.some(
         (c) => c.type === 'Ready' && c.status === 'True',
       )
       if (ready === true) return

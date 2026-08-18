@@ -10,9 +10,12 @@
     "test": "pnpm -r test"
   },
   "devDependencies": {
+    "esbuild": "^0.28.2",
     "typescript": "^5.5"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }
