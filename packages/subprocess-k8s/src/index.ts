@@ -51,7 +51,12 @@ export class SubprocessK8s extends SubprocessRuntime {
     const hostRoot = this.hostRoot
     if (cwd === hostRoot) return this.podRoot
     if (!cwd.startsWith(hostRoot + '/')) return cwd
-    return this.podRoot + cwd.slice(hostRoot.length)
+    // strip the workspace id segment: /workspaces/<id>/x -> /workspace/x
+    const rest = cwd.slice(hostRoot.length + 1)
+    const seg = rest.split('/')
+    seg.shift()
+    const tail = seg.join('/')
+    return tail === '' ? this.podRoot : this.podRoot + '/' + tail
   }
 
   /** Resolve the daemon endpoint for a cwd (per-workspace pod) or the static one. */
