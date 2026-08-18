@@ -29,5 +29,10 @@
   },
   "files": [
     "dist"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Visecy/dsh-platform.git",
+    "directory": "packages/subprocess-k8s"
+  }
 }
