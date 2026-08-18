@@ -30,6 +30,14 @@ class MockController implements PodController {
   endpoint(namespace: string, workspaceId: string, port: number): string {
     return `http://dsh-ws-${workspaceId}-svc.${namespace}.svc.cluster.local:${port}`
   }
+
+  async ensurePvc(workspaceId: string): Promise<string> {
+    return `dsh-ws-${workspaceId}-data`
+  }
+
+  async deletePvc(workspaceId: string): Promise<void> {
+    // no-op in tests
+  }
 }
 
 const config = (ctrl: MockController): Config => ({

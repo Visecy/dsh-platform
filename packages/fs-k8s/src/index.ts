@@ -1,6 +1,11 @@
 /**
  * dsh-fs-k8s: ctx.fs provider routing file operations to a workspace pod's
  * sandbox daemon. Paths translate host workspace id <-> pod /workspace.
+ *
+ * Routing: each call resolves the daemon endpoint from the target's workspace
+ * id via the resolver (typically workspace-k8s's workspaceEndpointResolver:
+ * ensure + getEndpoint), so concurrent sessions on different workspaces reach
+ * their own pod. Without a resolver, the static daemonEndpoint is used.
  */
 import { Context, Service } from '@deepseek-ai/cordis'
 import {
@@ -23,12 +28,14 @@ import { PathTranslator } from './translate.ts'
 export const name = '@visecy/dsh-fs-k8s'
 
 export interface Config {
-  /** Workspace pod daemon base URL. */
+  /** Workspace pod daemon base URL (used when no resolver is configured). */
   daemonEndpoint: string
   /** Host-side workspace identifier root, e.g. /workspaces/<id>. */
   hostRoot: string
   /** Pod-side workspace root, default /workspace. */
   podRoot?: string
+  /** Per-call endpoint resolution by workspace id (ensure + getEndpoint). */
+  resolveEndpoint?: (workspaceId: string) => Promise<string> | string
 }
 
 const BINARY_SAMPLE = 8192
@@ -46,16 +53,41 @@ function isText(bytes: Uint8Array): boolean {
 export class FsK8s extends FileSystem {
   private client: DaemonFilesClient
   private translate: PathTranslator
+  private resolver: ((workspaceId: string) => Promise<string> | string) | undefined
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
     this.client = new DaemonFilesClient(config.daemonEndpoint)
     this.translate = new PathTranslator(config.hostRoot, config.podRoot ?? '/workspace')
+    this.resolver = config.resolveEndpoint
+  }
+
+  /** Attach the per-workspace resolver (from workspace-k8s wiring). */
+  attachResolver(resolver: (workspaceId: string) => Promise<string> | string): void {
+    this.resolver = resolver
   }
 
   private podPathOf(target: FsTarget): string {
     // targetKey encodes the pod path: dsh-k8s:<podPath>
     return target.targetKey.slice('dsh-k8s:'.length)
+  }
+
+  /** The workspace id from a host path like /workspaces/<id>/... */
+  private workspaceOf(displayPath: string): string | undefined {
+    const root = this.translate.hostRoot
+    if (!displayPath.startsWith(root + '/')) return undefined
+    const rest = displayPath.slice(root.length + 1)
+    const seg = rest.split('/')[0]
+    return seg === '' ? undefined : seg
+  }
+
+  private async endpointFor(target: FsTarget): Promise<string> {
+    const resolver = this.resolver
+      ?? (this.ctx as unknown as { workspaceEndpointResolver?: { resolve: (id: string) => Promise<string> | string } }).workspaceEndpointResolver?.resolve
+    if (resolver === undefined) return this.client.defaultEndpoint
+    const ws = this.workspaceOf(target.displayPath)
+    if (ws === undefined) return this.client.defaultEndpoint
+    return resolver(ws)
   }
 
   private mapError(e: unknown): never {
@@ -107,7 +139,7 @@ export class FsK8s extends FileSystem {
 
   override async stat(target: FsTarget, signal?: AbortSignal): Promise<FsInfo | undefined> {
     try {
-      const info = await this.client.info(this.podPathOf(target))
+      const info = await this.client.info(this.podPathOf(target), await this.endpointFor(target))
       if (info === undefined) return undefined
       return {
         version: FsVersion(info.version ?? `v-${info.modifiedTime ?? 0}-${info.size ?? 0}`),
@@ -127,7 +159,7 @@ export class FsK8s extends FileSystem {
 
   override async readText(target: FsTarget, signal?: AbortSignal): Promise<string> {
     try {
-      const bytes = await this.client.read(this.podPathOf(target))
+      const bytes = await this.client.read(this.podPathOf(target), undefined, await this.endpointFor(target))
       if (!isText(bytes)) throw new FsError('binary or invalid UTF-8', 'FS_NOT_TEXT')
       return new TextDecoder('utf-8').decode(bytes)
     } catch (e) {
@@ -146,11 +178,12 @@ export class FsK8s extends FileSystem {
 
   override async readBytes(target: FsTarget, signal: AbortSignal | undefined, maxBytes: number): Promise<Uint8Array> {
     try {
-      const info = await this.client.info(this.podPathOf(target))
+      const endpoint = await this.endpointFor(target)
+      const info = await this.client.info(this.podPathOf(target), endpoint)
       if (info !== undefined && info.size !== undefined && info.size > maxBytes) {
         throw new FsError(`file exceeds ${maxBytes} bytes`, 'FS_TOO_LARGE')
       }
-      return await this.client.read(this.podPathOf(target), { maxBytes })
+      return await this.client.read(this.podPathOf(target), { maxBytes }, endpoint)
     } catch (e) {
       this.mapError(e)
     }
@@ -158,14 +191,15 @@ export class FsK8s extends FileSystem {
 
   override async listDir(target: FsTarget, signal?: AbortSignal): Promise<FsDirEntry[]> {
     try {
-      const entries = await this.client.list(this.podPathOf(target))
+      const endpoint = await this.endpointFor(target)
+      const entries = await this.client.list(this.podPathOf(target), endpoint)
       const out: FsDirEntry[] = []
       for (const e of entries) {
         const podPath = e.path.startsWith('/') ? e.path : this.podPathOf(target) + '/' + e.path
         const childTarget: FsTarget = { targetKey: FsTargetKey(`dsh-k8s:${podPath}`), displayPath: this.translate.toHost(podPath) }
         out.push({
           name: e.name,
-          type: e.type === 'directory' ? 'directory' : e.type === 'symlink' ? 'symlink' : e.type === 'file' ? 'file' : 'other',
+          type: e.type === 'directory' ? 'directory' : e.type === 'file' ? 'file' : 'other',
           target: childTarget,
           size: e.size,
         })
@@ -179,12 +213,14 @@ export class FsK8s extends FileSystem {
   override async writeText(target: FsTarget, content: string, expected?: FsWriteIntent, signal?: AbortSignal, sandboxPolicy?: unknown): Promise<FsWriteOutcome> {
     try {
       const podPath = this.podPathOf(target)
+      const endpoint = await this.endpointFor(target)
       let before: string | null = null
       try {
-        const info = await this.client.info(podPath)
+        const info = await this.client.info(podPath, endpoint)
         if (info !== undefined && info.type === 'file') {
-          const bytes = await this.client.read(podPath)
-          if (isText(bytes)) before = new TextDecoder('utf-8').decode(bytes).replace(/\r\n/g, '\n')
+          const bytes = await this.client.read(podPath, undefined, endpoint)
+          if (isText(bytes)) before = new TextDecoder('utf-8').decode(bytes).replace(/\r\n/g, '\
+')
         }
       } catch {
         // absent
@@ -194,12 +230,13 @@ export class FsK8s extends FileSystem {
         : expected.kind === 'createIfAbsent'
           ? { kind: 'createIfAbsent' as const }
           : { kind: 'replaceIfVersion' as const, version: expected.version }
-      const outcome = await this.client.write(podPath, new TextEncoder().encode(content), intent)
+      const outcome = await this.client.write(podPath, new TextEncoder().encode(content), intent, endpoint)
       return {
         operation: outcome.operation === 'create' ? 'create' : 'update',
         version: FsVersion(outcome.version),
         before: outcome.operation === 'create' ? null : before,
-        after: content.replace(/\r\n/g, '\n'),
+        after: content.replace(/\r\n/g, '\
+'),
       }
     } catch (e) {
       this.mapError(e)
@@ -209,7 +246,8 @@ export class FsK8s extends FileSystem {
   override async editText(target: FsTarget, edit: FsEditRequest, expected?: { version: FsVersion }, signal?: AbortSignal, sandboxPolicy?: unknown): Promise<FsEditOutcome> {
     try {
       const podPath = this.podPathOf(target)
-      const info = await this.client.info(podPath)
+      const endpoint = await this.endpointFor(target)
+      const info = await this.client.info(podPath, endpoint)
       if (info === undefined) throw new FsError('no such file', 'FS_EDIT_NOT_FOUND')
       let currentVersion: FsVersion | undefined
       if (expected !== undefined) {
@@ -219,7 +257,7 @@ export class FsK8s extends FileSystem {
           throw new FsError('stale version', 'FS_STALE_VERSION')
         }
       }
-      const bytes = await this.client.read(podPath)
+      const bytes = await this.client.read(podPath, undefined, endpoint)
       if (!isText(bytes)) throw new FsError('binary file', 'FS_NOT_TEXT')
       const current = new TextDecoder('utf-8').decode(bytes)
       let next: string
@@ -234,8 +272,10 @@ export class FsK8s extends FileSystem {
         next = current.slice(0, idx) + edit.newString + current.slice(idx + edit.oldString.length)
       }
       const st2 = await this.stat(target)
-      const outcome = await this.client.write(podPath, new TextEncoder().encode(next), { kind: 'replaceIfVersion', version: st2?.version ?? '' })
-      return { version: FsVersion(outcome.version), before: current.replace(/\r\n/g, '\n'), after: next.replace(/\r\n/g, '\n') }
+      const outcome = await this.client.write(podPath, new TextEncoder().encode(next), { kind: 'replaceIfVersion', version: st2?.version ?? '' }, endpoint)
+      return { version: FsVersion(outcome.version), before: current.replace(/\r\n/g, '\
+'), after: next.replace(/\r\n/g, '\
+') }
     } catch (e) {
       this.mapError(e)
     }

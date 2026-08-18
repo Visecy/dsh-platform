@@ -1,5 +1,8 @@
 /**
  * HTTP client for the sandbox daemon commands/pty APIs.
+ *
+ * A client can be bound to a specific daemon endpoint with withEndpoint()
+ * (per-workspace routing); unbound clients use the configured baseUrl.
  */
 export class DaemonError extends Error {
   code: string
@@ -25,7 +28,23 @@ export interface DaemonCommandStatus {
 }
 
 export class DaemonSubprocessClient {
-  constructor(private baseUrl: string) {}
+  constructor(
+    private baseUrl: string,
+    private endpointOverride?: string,
+  ) {}
+
+  get defaultEndpoint(): string {
+    return this.baseUrl
+  }
+
+  /** A client pinned to one daemon endpoint (used after per-call resolution). */
+  withEndpoint(endpoint: string): DaemonSubprocessClient {
+    return new DaemonSubprocessClient(this.baseUrl, endpoint)
+  }
+
+  private get endpoint(): string {
+    return this.endpointOverride ?? this.baseUrl
+  }
 
   async resolveExecutable(command: string): Promise<string> {
     const data = await this.post('/commands/resolve-executable', { command })
@@ -108,7 +127,7 @@ export class DaemonSubprocessClient {
   private async post(path: string, body: unknown): Promise<any> {
     let res: Response
     try {
-      res = await fetch(this.baseUrl + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      res = await fetch(this.endpoint + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
     } catch (e) {
       throw new DaemonError('DAEMON_UNREACHABLE', `sandbox daemon unreachable: ${(e as Error).message}`)
     }
@@ -120,7 +139,7 @@ export class DaemonSubprocessClient {
   private async get(path: string): Promise<any> {
     let res: Response
     try {
-      res = await fetch(this.baseUrl + path)
+      res = await fetch(this.endpoint + path)
     } catch (e) {
       throw new DaemonError('DAEMON_UNREACHABLE', `sandbox daemon unreachable: ${(e as Error).message}`)
     }

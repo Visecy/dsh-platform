@@ -15,16 +15,36 @@ export const name = '@visecy/dsh-subprocess-k8s'
 
 export interface Config {
   daemonEndpoint: string
+  /** Per-call endpoint resolution by workspace id (ensure + getEndpoint). */
+  resolveEndpoint?: (workspaceId: string) => Promise<string> | string
 }
 
 export class SubprocessK8s extends SubprocessRuntime {
   private client: DaemonSubprocessClient
   private spillDir: string
+  private resolver: ((workspaceId: string) => Promise<string> | string) | undefined
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
     this.client = new DaemonSubprocessClient(config.daemonEndpoint)
     this.spillDir = mkdtempSync(join(tmpdir(), 'dsh-subprocess-k8s-'))
+    this.resolver = config.resolveEndpoint
+  }
+
+  /** The workspace id from a host path like /workspaces/<id>/... */
+  private workspaceOf(cwd: string): string | undefined {
+    const m = /^\/workspaces\/([^/]+)/.exec(cwd)
+    return m?.[1]
+  }
+
+  /** Resolve the daemon endpoint for a cwd (per-workspace pod) or the static one. */
+  private async endpointFor(cwd: string): Promise<string> {
+    const resolver = this.resolver
+      ?? (this.ctx as unknown as { workspaceEndpointResolver?: { resolve: (id: string) => Promise<string> | string } }).workspaceEndpointResolver?.resolve
+    if (resolver === undefined) return this.client.defaultEndpoint
+    const ws = this.workspaceOf(cwd)
+    if (ws === undefined) return this.client.defaultEndpoint
+    return resolver(ws)
   }
 
   override async resolveExecutable(command: string, env?: Readonly<Record<string, string>>, signal?: AbortSignal): Promise<string> {
@@ -32,14 +52,21 @@ export class SubprocessK8s extends SubprocessRuntime {
   }
 
   override spawn(spec: SubprocessSpawnSpec): SubprocessHandle {
-    const handle = new RemoteHandle(this.client, spec, this.spillDir)
+    // endpoint resolution is async; the handle resolves it before starting
+    const handle = new RemoteHandle(
+      () => this.endpointFor(spec.cwd).then((ep) => this.client.withEndpoint(ep)),
+      spec,
+      this.spillDir,
+    )
     void handle.start()
     return handle
   }
 
   override async spawnTerminal(spec: SubprocessTerminalSpawnSpec): Promise<SubprocessTerminalHandle> {
-    const created = await this.client.createPty({ argv: spec.argv, cwd: spec.cwd, env: spec.env, rows: spec.rows, cols: spec.cols })
-    return new RemoteTerminalHandle(this.client, created.ptyId, created.pid, spec)
+    const ep = await this.endpointFor(spec.cwd)
+    const bound = this.client.withEndpoint(ep)
+    const created = await bound.createPty({ argv: spec.argv, cwd: spec.cwd, env: spec.env, rows: spec.rows, cols: spec.cols })
+    return new RemoteTerminalHandle(bound, created.ptyId, created.pid, spec)
   }
 }
 
@@ -55,11 +82,14 @@ class RemoteHandle implements SubprocessHandle {
   private pollers: Array<{ stop(): void }> = []
   private terminated = false
 
+  private client: DaemonSubprocessClient
+
   constructor(
-    private client: DaemonSubprocessClient,
+    private clientFactory: () => Promise<DaemonSubprocessClient>,
     private spec: SubprocessSpawnSpec,
     spillDir: string,
   ) {
+    this.client = new DaemonSubprocessClient('http://placeholder.invalid:1')
     this.pid = -1
     this.cmdId = ''
     this.done = new Promise((res) => {
@@ -97,6 +127,8 @@ class RemoteHandle implements SubprocessHandle {
 
   async start(): Promise<void> {
     try {
+      // bind the daemon client to the workspace pod before any call
+      this.client = await this.clientFactory()
       const stdinData = this.spec.stdio.stdin !== 'ignore' && this.spec.stdio.stdin !== 'pipe'
         ? new TextEncoder().encode(this.spec.stdio.stdin.data)
         : undefined
