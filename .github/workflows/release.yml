@@ -1,0 +1,60 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/visecy/dsh-web-platform
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages
+        run: |
+          node scripts/build-pkg.mjs auth-oidc src/plugin.ts
+          node scripts/build-pkg.mjs fs-k8s src/index.ts
+          node scripts/build-pkg.mjs subprocess-k8s src/index.ts
+          node scripts/build-pkg.mjs workspace-k8s src/index.ts
+
+      - name: Test
+        run: pnpm -r test
+
+      - name: Publish to npm (@visecy)
+        run: |
+          for p in auth-oidc fs-k8s subprocess-k8s workspace-k8s; do
+            cd packages/$p
+            npm publish --access public
+            cd ../..
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/dsh-web-platform.Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }},${{ env.IMAGE }}:latest

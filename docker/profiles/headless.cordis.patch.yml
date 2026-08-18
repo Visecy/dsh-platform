@@ -1,0 +1,23 @@
+- id: subprocess
+  disabled: true
+- id: fs-sandbox
+  disabled: true
+- insert:
+    - id: workspace-runtime
+      name: '@visecy/dsh-workspace-k8s'
+      config:
+        namespace: !!js process.env.WS_NAMESPACE
+        image: !!js process.env.WS_IMAGE ?? 'ghcr.io/visecy/dsh-sandbox-daemon:0.1.0'
+        daemonPort: 4390
+        storageClassName: !!js process.env.WS_STORAGE_CLASS ?? 'local-path'
+        storageSize: '2Gi'
+    - id: fs-k8s
+      name: '@visecy/dsh-fs-k8s'
+      config:
+        daemonEndpoint: !!js (process.env.WS_DAEMON_ENDPOINT ?? 'http://127.0.0.1:4390')
+        hostRoot: '/workspaces'
+        podRoot: '/workspace'
+    - id: subprocess-k8s
+      name: '@visecy/dsh-subprocess-k8s'
+      config:
+        daemonEndpoint: !!js (process.env.WS_DAEMON_ENDPOINT ?? 'http://127.0.0.1:4390')

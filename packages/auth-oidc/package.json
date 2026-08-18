@@ -2,7 +2,7 @@
   "name": "@visecy/dsh-auth-oidc",
   "version": "0.1.0",
   "type": "module",
-  "private": true,
+  "private": false,
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/schemastery": "^3.18.1"
@@ -13,6 +13,20 @@
     "vitest": "^2.1.0"
   },
   "scripts": {
+    "build": "node ../../scripts/build-pkg.mjs auth-oidc src/plugin.ts",
+    "prepublishOnly": "npm run build",
     "test": "vitest run"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    "types": "./dist/index.d.ts",
+    "default": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ]
 }
