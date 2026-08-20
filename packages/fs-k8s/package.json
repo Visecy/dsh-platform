@@ -1,6 +1,6 @@
 {
   "name": "@visecy/dsh-fs-k8s",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "type": "module",
   "private": false,
   "dependencies": {
