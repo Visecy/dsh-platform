@@ -64,7 +64,11 @@ USER root
 RUN sed -i 's/isTrustedApiRequest(request, \[\])/isTrustedApiRequest(request, trustedHosts)/' \
       /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-connection/lib/index.js \
   && grep -c 'isTrustedApiRequest(request, trustedHosts)' \
-      /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-connection/lib/index.js
+      /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-connection/lib/index.js \
+  && sed -i 's#isLoopback: pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname)#isLoopback: true // platform: remote browser treated as trusted (OIDC-gated)#' \
+      /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-connection/lib/client.js \
+  && grep -c 'isLoopback: true' \
+      /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-connection/lib/client.js
 
 ENV HOME=/home/node DSH_HOME=/opt/dsh-home \
     COREPACK_HOME=/tmp/corepack PNPM_HOME=/tmp/pnpm XDG_DATA_HOME=/tmp/xdg
