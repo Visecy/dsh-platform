@@ -76,10 +76,12 @@ export class WorkspacePicker extends DirectoryPicker {
     const res = await core.listNamespacedPod({
       namespace: this.config.namespace,
       labelSelector: this.config.podLabel ?? 'app=dsh-workspace',
-    })
+    }) as unknown as { body?: { items?: Array<{ metadata?: { name?: string } }> }; items?: Array<{ metadata?: { name?: string } }> }
     signal?.throwIfAborted()
+    // v2 client returns the list object directly for list calls (no body wrapper)
+    const items = res.body?.items ?? res.items ?? []
     const rows: WorkspaceRow[] = []
-    for (const pod of res.body.items ?? []) {
+    for (const pod of items) {
       const name = pod.metadata?.name
       if (!name) continue
       rows.push({
@@ -95,10 +97,12 @@ export class WorkspacePicker extends DirectoryPicker {
   /** List a workspace's daemon directory (pod /workspace subtree). */
   private async listDaemonDir(workspaceId: string, rest: string[], signal?: AbortSignal): Promise<WorkspaceRow[]> {
     const core = this.kc.makeApiClient(k8s.CoreV1Api)
-    const actual = workspaceId.startsWith('dsh-ws-') ? workspaceId : `dsh-ws-${workspaceId}`
-    const pod = await core.readNamespacedPod({ name: actual, namespace: this.config.namespace })
+    // workspaceId is the pod name as listed at the root (dsh-ws-<id> or
+    // dsh-ws<id>); use it directly — never re-prefix it.
+    const actual = workspaceId
+    const pod = await core.readNamespacedPod({ name: actual, namespace: this.config.namespace }) as unknown as { body?: { status?: { podIP?: string } }; status?: { podIP?: string } }
     signal?.throwIfAborted()
-    const podIp = pod.body?.status?.podIP
+    const podIp = pod.body?.status?.podIP ?? pod.status?.podIP
     if (!podIp) throw new DirectoryPickerError('directory-unreadable', `${this.hostRoot}/${workspaceId}`, `workspace pod ${actual} has no IP`)
     const port = this.config.daemonPort ?? 4390
     const base = `http://${podIp}:${port}`
@@ -171,9 +175,11 @@ export class WorkspacePicker extends DirectoryPicker {
       throw new DirectoryPickerError('directory-create-failed', `${path}/${name}`, `"${name}" is not a single path segment`)
     }
     const core = this.kc.makeApiClient(k8s.CoreV1Api)
-    const actual = workspaceId.startsWith('dsh-ws-') ? workspaceId : `dsh-ws-${workspaceId}`
-    const pod = await core.readNamespacedPod({ name: actual, namespace: this.config.namespace })
-    const podIp = pod.body?.status?.podIP
+    // workspaceId is the pod name as listed at the root (dsh-ws-<id> or
+    // dsh-ws<id>); use it directly — never re-prefix it.
+    const actual = workspaceId
+    const pod = await core.readNamespacedPod({ name: actual, namespace: this.config.namespace }) as unknown as { body?: { status?: { podIP?: string } }; status?: { podIP?: string } }
+    const podIp = pod.body?.status?.podIP ?? pod.status?.podIP
     if (!podIp) throw new DirectoryPickerError('directory-create-failed', path, `workspace pod ${actual} has no IP`)
     const daemonPath = '/' + rest.concat(name).join('/')
     const res = await fetch(`http://${podIp}:${this.config.daemonPort ?? 4390}/files/mkdir`, {
