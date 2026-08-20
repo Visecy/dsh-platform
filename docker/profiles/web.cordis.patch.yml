@@ -4,6 +4,8 @@
   disabled: true
 - id: fs-sandbox
   disabled: true
+- id: directory-picker
+  disabled: true
 - insert:
     - id: webserver-gated
       name: 'dsh-web-auth'
@@ -40,3 +42,9 @@
       name: '@visecy/dsh-subprocess-k8s'
       config:
         daemonEndpoint: !!js (process.env.WS_DAEMON_ENDPOINT ?? 'http://127.0.0.1:4390')
+    - id: workspace-picker
+      name: '@visecy/dsh-workspace-picker'
+      config:
+        namespace: !!js process.env.WS_NAMESPACE
+        daemonPort: 4390
+        hostRoot: '/workspaces'

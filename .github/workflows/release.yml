@@ -38,7 +38,7 @@ jobs:
         run: |
           VER="${GITHUB_REF_NAME#v}"
           echo "PLUGIN_VERSION=$VER" >> $GITHUB_ENV
-          for p in auth-oidc fs-k8s subprocess-k8s workspace-k8s; do
+          for p in auth-oidc fs-k8s subprocess-k8s workspace-k8s workspace-picker; do
             (cd packages/$p && npm version $VER --no-git-tag-version --allow-same-version)
           done
 
@@ -48,6 +48,7 @@ jobs:
           node scripts/build-pkg.mjs fs-k8s src/index.ts
           node scripts/build-pkg.mjs subprocess-k8s src/index.ts
           node scripts/build-pkg.mjs workspace-k8s src/index.ts
+          node scripts/build-pkg.mjs workspace-picker src/index.ts
 
       - name: Test published packages
         run: |
@@ -55,12 +56,13 @@ jobs:
           cd packages/fs-k8s && pnpm test && cd ../..
           cd packages/subprocess-k8s && pnpm test && cd ../..
           cd packages/workspace-k8s && pnpm test && cd ../..
+          cd packages/workspace-picker && pnpm test && cd ../..
 
       # npm Trusted Publisher: no NPM_TOKEN. The registry verifies our GitHub
       # Actions OIDC token against the publisher configured on npmjs.com.
       - name: Publish to npm (@visecy)
         run: |
-          for p in auth-oidc fs-k8s subprocess-k8s workspace-k8s; do
+          for p in auth-oidc fs-k8s subprocess-k8s workspace-k8s workspace-picker; do
             cd packages/$p
             npm publish --access public --provenance --registry=https://registry.npmjs.org
             cd ../..

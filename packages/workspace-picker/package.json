@@ -1,0 +1,36 @@
+{
+  "name": "@visecy/dsh-workspace-picker",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    "types": "./dist/index.d.ts",
+    "default": "./dist/index.js"
+  },
+  "files": ["dist"],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Visecy/dsh-platform.git",
+    "directory": "packages/workspace-picker"
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-pkg.mjs workspace-picker src/index.ts",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-host-directory-picker": "0.1.0-rc.8",
+    "@kubernetes/client-node": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2",
+    "vitest": "^2.1.0"
+  }
+}

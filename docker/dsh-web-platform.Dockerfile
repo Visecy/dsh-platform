@@ -79,6 +79,7 @@ RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
        @visecy/dsh-fs-k8s@${PLUGIN_VERSION:-latest} \
        @visecy/dsh-subprocess-k8s@${PLUGIN_VERSION:-latest} \
        @visecy/dsh-workspace-k8s@${PLUGIN_VERSION:-latest} \
+       @visecy/dsh-workspace-picker@${PLUGIN_VERSION:-latest} \
        dsh-web-auth@0.1.0 \
        @kubernetes/client-node \
   && pnpm --dir /opt/dsh-home/profiles/headless --store-dir /tmp/pnpm-store add -w \
