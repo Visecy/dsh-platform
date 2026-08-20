@@ -1,6 +1,6 @@
 {
   "name": "@visecy/dsh-subprocess-k8s",
-  "version": "0.1.0",
+  "version": "0.1.11",
   "type": "module",
   "private": false,
   "dependencies": {

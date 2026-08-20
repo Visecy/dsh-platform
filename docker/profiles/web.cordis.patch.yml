@@ -48,3 +48,9 @@
         namespace: !!js process.env.WS_NAMESPACE
         daemonPort: 4390
         hostRoot: '/workspaces'
+    # the disabled auto picker used to mount the browse UI surface via
+    # ctx.loader.create; with our workspace-picker providing the capability,
+    # mount the browse surface explicitly so the in-app workspace directory
+    # browser renders again.
+    - id: ui-directory-picker-browse
+      name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'
