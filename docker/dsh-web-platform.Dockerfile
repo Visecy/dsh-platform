@@ -61,14 +61,12 @@ RUN ln -s ../lib/node_modules/@deepseek-ai/dsh/lib/bin.js /usr/local/bin/dsh \
 
 USER root
 
-RUN sed -i 's/PRIVILEGED_METHODS.has(method) && !isTrustedApiRequest(request, \[\])/PRIVILEGED_METHODS.has(method) \&\& !isTrustedApiRequest(request, trustedHosts)/' \
-      /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-connection/lib/index.js \
-  && grep -c 'isTrustedApiRequest(request, trustedHosts)' \
-      /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-connection/lib/index.js \
-  && sed -i 's#isLoopback: pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname)#isLoopback: true#' \
-      /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-connection/lib/client.js \
-  && grep -c 'isLoopback: true' \
-      /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-connection/lib/client.js
+# Official loopback pins relaxed via the DECLARATIVE patch script (exact
+# string replacement + assertions + node --check; fails the build on any
+# mismatch — no fragile sed). See scripts/patch-dsh.mjs.
+COPY scripts/patch-dsh.mjs /usr/local/lib/node_modules/patch-dsh.mjs
+RUN node /usr/local/lib/node_modules/patch-dsh.mjs \
+      /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai
 
 ENV HOME=/home/node DSH_HOME=/opt/dsh-home \
     COREPACK_HOME=/tmp/corepack PNPM_HOME=/tmp/pnpm XDG_DATA_HOME=/tmp/xdg
