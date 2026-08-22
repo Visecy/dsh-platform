@@ -8,7 +8,7 @@ on:
 
 env:
   IMAGE: ghcr.io/visecy/dsh-web-platform
-  DAEMON_IMAGE: ghcr.io/visecy/dsh-sandbox-daemon
+  DAEMON_IMAGE: ghcr.io/visecy/dsh-platform/dsh-sandbox-daemon
 
 jobs:
   publish:

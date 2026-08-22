@@ -13,7 +13,7 @@
       name: '@visecy/dsh-workspace-k8s'
       config:
         namespace: !!js process.env.WS_NAMESPACE
-        image: !!js process.env.WS_IMAGE ?? 'ghcr.io/visecy/dsh-sandbox-daemon:0.1.0'
+        image: !!js process.env.WS_IMAGE ?? 'ghcr.io/visecy/dsh-platform/dsh-sandbox-daemon:v0.1.19'
         daemonPort: 4390
         idleTimeoutMs: !!js Number(process.env.WS_IDLE_TIMEOUT_MS ?? (5 * 60 * 1000))
         graceMs: !!js Number(process.env.WS_GRACE_MS ?? (3 * 60 * 60 * 1000))
