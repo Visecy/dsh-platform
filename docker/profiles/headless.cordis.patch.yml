@@ -27,10 +27,6 @@
       config:
         type: sqlite
         path: !!js dshHomePath('storage', 'db.sqlite')
-    - id: storage-domain
-      name: '@deepseek-ai/dsh-storage-domain'
-      config:
-        backend: sqlite
     - id: fs-k8s
       name: '@visecy/dsh-fs-k8s'
       config:
