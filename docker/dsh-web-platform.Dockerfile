@@ -71,7 +71,12 @@ RUN node /usr/local/lib/node_modules/patch-dsh.mjs \
 ENV HOME=/home/node DSH_HOME=/opt/dsh-home \
     COREPACK_HOME=/tmp/corepack PNPM_HOME=/tmp/pnpm XDG_DATA_HOME=/tmp/xdg
 
-RUN mkdir -p /opt/dsh-home /home/node && chown -R node:node /opt/dsh-home /home/node
+RUN mkdir -p /opt/dsh-home /home/node && chown -R node:node /opt/dsh-home /home/node \
+  && mkdir -p /opt/dsh-home/plugins
+
+# Vendored platform DB/session-storage packages (private monorepo code).
+COPY packages/session-persistence-rdb /opt/dsh-home/plugins/session-persistence-rdb
+COPY packages/storage-db /opt/dsh-home/plugins/storage-db
 
 USER node
 RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
@@ -82,12 +87,22 @@ RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
        @visecy/dsh-subprocess-k8s@${PLUGIN_VERSION:-latest} \
        @visecy/dsh-workspace-k8s@${PLUGIN_VERSION:-latest} \
        @visecy/dsh-workspace-picker@${PLUGIN_VERSION:-latest} \
+       file:/opt/dsh-home/plugins/session-persistence-rdb \
+       file:/opt/dsh-home/plugins/storage-db \
+       @deepseek-ai/dsh-storage@${DSH_VERSION} \
+       @deepseek-ai/dsh-storage-domain@${DSH_VERSION} \
+       @deepseek-ai/dsh-session-persistence@${DSH_VERSION} \
        dsh-web-auth@0.1.0 \
        @kubernetes/client-node \
   && pnpm --dir /opt/dsh-home/profiles/headless --store-dir /tmp/pnpm-store add -w \
        @visecy/dsh-fs-k8s@${PLUGIN_VERSION:-latest} \
        @visecy/dsh-subprocess-k8s@${PLUGIN_VERSION:-latest} \
        @visecy/dsh-workspace-k8s@${PLUGIN_VERSION:-latest} \
+       file:/opt/dsh-home/plugins/session-persistence-rdb \
+       file:/opt/dsh-home/plugins/storage-db \
+       @deepseek-ai/dsh-storage@${DSH_VERSION} \
+       @deepseek-ai/dsh-storage-domain@${DSH_VERSION} \
+       @deepseek-ai/dsh-session-persistence@${DSH_VERSION} \
        @kubernetes/client-node
 
 COPY docker/profiles/web.cordis.patch.yml /opt/dsh-home/profiles/web/cordis.patch.yml

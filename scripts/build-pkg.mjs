@@ -25,7 +25,7 @@ await build({
   platform: 'node',
   format: 'esm',
   target: 'node24',
-  external: ['@deepseek-ai/*', '@kubernetes/client-node'],
+  external: ['@deepseek-ai/*', '@kubernetes/client-node', 'drizzle-orm', 'drizzle-orm/*', 'pg'],
   outfile: join(root, 'dist', 'index.js'),
   logLevel: 'warning',
   sourcemap: false,
