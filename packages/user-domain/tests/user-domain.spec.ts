@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { UserStore } from '../src/store.ts'
 import { UserSettingsProvider, UserCredentialsProvider, credentialRef } from '../src/providers.ts'
+import { credentialKey, parseCredentialKey } from '@deepseek-ai/dsh-credentials'
 import { EnvPolicy } from '../src/env-policy.ts'
 import { provideUserContext, type PlatformUser } from '../src/user-context.ts'
 
@@ -86,6 +87,51 @@ describe('per-user credentials', () => {
     const c = new UserCredentialsProvider(ctx, store, () => current)
     expect(await c.resolve(credentialRef('K'))).toBeUndefined()
     await expect(c.set(credentialRef('K'), 'v')).rejects.toThrow(/no authenticated user/)
+  })
+
+  it('stores and lists credential records per user', async () => {
+    const ctx = new Context()
+    const c = new UserCredentialsProvider(ctx, store, () => current)
+    const key = credentialKey('llm-pi-ai', 'openai-codex')
+    const record = { kind: 'grant' as const, payload: { accessToken: 'x' } }
+
+    current = userA
+    await c.modifyRecord(key, async () => record)
+    expect(await c.readRecord(key)).toEqual(record)
+    expect((await c.describeRecord(key)).configured).toBe(true)
+    expect((await c.listRecords()).map((e) => String(e.key))).toEqual([String(key)])
+
+    current = userB
+    expect(await c.readRecord(key)).toBeUndefined()
+    expect(await c.listRecords()).toEqual([])
+  })
+
+  it('modifyRecord declining leaves the record untouched', async () => {
+    const ctx = new Context()
+    const c = new UserCredentialsProvider(ctx, store, () => current)
+    const key = credentialKey('llm-pi-ai', 'route')
+    current = userA
+    await c.modifyRecord(key, async () => ({ kind: 'api-key', key: 'a', env: { A: '1' } }))
+    const before = await c.readRecord(key)
+    await c.modifyRecord(key, async () => undefined)
+    expect(await c.readRecord(key)).toEqual(before)
+  })
+
+  it('deleteRecord removes only the same user record', async () => {
+    const ctx = new Context()
+    const c = new UserCredentialsProvider(ctx, store, () => current)
+    const key = credentialKey('demo', 'id')
+    current = userA
+    await c.modifyRecord(key, async () => ({ kind: 'api-key', key: 'a', env: { A: '1' } }))
+    current = userB
+    await c.modifyRecord(key, async () => ({ kind: 'api-key', key: 'b', env: { B: '1' } }))
+
+    current = userA
+    await c.deleteRecord(key)
+    expect(await c.readRecord(key)).toBeUndefined()
+
+    current = userB
+    expect((await c.readRecord(key))?.kind).toBe('api-key')
   })
 })
 
