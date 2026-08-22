@@ -4,7 +4,7 @@
   "description": "DB-backed ctx.storage backend (SQLite/PostgreSQL) for DeepSeek Harness platform state",
   "type": "module",
   "private": true,
-  "main": "src/index.ts",
+  "main": "dist/index.js",
   "types": "src/index.ts",
   "scripts": {
     "build": "node ../../scripts/build-pkg.mjs storage-db src/index.ts",

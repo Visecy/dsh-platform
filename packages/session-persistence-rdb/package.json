@@ -5,11 +5,11 @@
   "license": "MIT",
   "type": "module",
   "private": true,
-  "main": "src/index.ts",
+  "main": "dist/index.js",
   "types": "src/index.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./invariant": "./src/invariant.ts",
+    ".": "./dist/index.js",
+    "./invariant": "./dist/index.js",
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml"
   },
