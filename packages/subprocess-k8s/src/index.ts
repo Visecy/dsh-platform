@@ -74,7 +74,7 @@ export class SubprocessK8s extends SubprocessRuntime {
   /** Resolve the daemon endpoint for a cwd (per-workspace pod) or the static one. */
   private async endpointFor(cwd: string): Promise<string> {
     const resolver = this.resolver
-      ?? (this.ctx as unknown as { workspaceEndpointResolver?: { resolve: (id: string) => Promise<string> | string } }).workspaceEndpointResolver?.resolve
+      ?? (this.ctx.get('workspaceEndpointResolver') as { resolve?: (id: string) => Promise<string> | string } | undefined)?.resolve
     if (resolver === undefined) return this.client.defaultEndpoint
     const ws = this.workspaceOf(cwd)
     if (ws === undefined) return this.client.defaultEndpoint

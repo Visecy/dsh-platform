@@ -83,7 +83,7 @@ export class FsK8s extends FileSystem {
 
   private async endpointFor(target: FsTarget): Promise<string> {
     const resolver = this.resolver
-      ?? (this.ctx as unknown as { workspaceEndpointResolver?: { resolve: (id: string) => Promise<string> | string } }).workspaceEndpointResolver?.resolve
+      ?? (this.ctx.get('workspaceEndpointResolver') as { resolve?: (id: string) => Promise<string> | string } | undefined)?.resolve
     if (resolver === undefined) return this.client.defaultEndpoint
     const ws = this.workspaceOf(target.displayPath)
     if (ws === undefined) return this.client.defaultEndpoint
