@@ -31,6 +31,8 @@ export interface PodController {
   /** Optional reconciliation support. */
   listPods?(namespace: string): Promise<string[]>
   listPvcs?(namespace: string): Promise<string[]>
+  /** Optional direct pod-IP lookup (used to avoid flaky cluster DNS). */
+  getPodIp?(namespace: string, name: string): Promise<string>
 }
 
 export const MANAGED_ANNOTATION = 'dsh-platform/managed'
@@ -148,6 +150,15 @@ export class K8sPodController implements PodController {
     }) as unknown as { body?: { items?: Array<{ metadata?: { name?: string } }> }; items?: Array<{ metadata?: { name?: string } }> }
     const items = res.body?.items ?? res.items ?? []
     return items.map((pvc) => pvc.metadata?.name).filter((n): n is string => typeof n === 'string')
+  }
+
+  async getPodIp(namespace: string, name: string): Promise<string> {
+    const core = this.kc.makeApiClient(k8s.CoreV1Api)
+    const raw = await core.readNamespacedPod({ name, namespace }) as unknown as { body?: { status?: { podIP?: string } }; status?: { podIP?: string } }
+    const pod = raw.body ?? raw
+    const ip = pod.status?.podIP
+    if (!ip) throw new Error(`workspace pod ${name} has no IP`)
+    return ip
   }
 
   async deletePod(namespace: string, workspaceId: string): Promise<void> {

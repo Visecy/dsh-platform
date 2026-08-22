@@ -43,6 +43,7 @@ export class WorkspaceRuntimeService extends Service implements WorkspaceRuntime
   private controller: PodController
   private running = new Set<string>()
   private inflight = new Map<string, Promise<string>>()
+  private podIps = new Map<string, string>()
 
   constructor(ctx: Context, private config: Config) {
     super(ctx, 'workspaceRuntime')
@@ -91,17 +92,24 @@ export class WorkspaceRuntimeService extends Service implements WorkspaceRuntime
     }
     const name = await this.controller.ensurePod(spec)
     await this.controller.waitReady(this.config.namespace, name)
+    if (this.controller.getPodIp !== undefined) {
+      const ip = await this.controller.getPodIp(this.config.namespace, name)
+      this.podIps.set(workspaceId, ip)
+    }
     this.running.add(workspaceId)
-    return this.controller.endpoint(this.config.namespace, workspaceId, spec.daemonPort)
+    return this.getEndpoint(workspaceId)
   }
 
   async dispose(workspaceId: string): Promise<void> {
     await this.controller.deletePod(this.config.namespace, workspaceId)
     this.running.delete(workspaceId)
+    this.podIps.delete(workspaceId)
   }
 
   getEndpoint(workspaceId: string): string {
-    return this.controller.endpoint(this.config.namespace, workspaceId, this.config.daemonPort ?? 4390)
+    const ip = this.podIps.get(workspaceId)
+    const port = this.config.daemonPort ?? 4390
+    return ip !== undefined ? `http://${ip}:${port}` : this.controller.endpoint(this.config.namespace, workspaceId, port)
   }
 
   isRunning(workspaceId: string): boolean {
