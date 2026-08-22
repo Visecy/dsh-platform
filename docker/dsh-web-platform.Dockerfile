@@ -22,7 +22,7 @@
 ARG NODE_IMAGE=node:24-bookworm-slim
 FROM ${NODE_IMAGE} AS installer
 
-ARG DSH_VERSION=0.1.0-rc.8
+ARG DSH_VERSION=0.1.1-rc.2
 ARG PNPM_VERSION=10.15.1
 
 RUN apt-get update \
@@ -41,7 +41,7 @@ RUN apt-get update \
 
 FROM ${NODE_IMAGE}
 
-ARG DSH_VERSION=0.1.0-rc.8
+ARG DSH_VERSION=0.1.1-rc.2
 ARG PNPM_VERSION=10.15.1
 ARG PLUGIN_VERSION
 

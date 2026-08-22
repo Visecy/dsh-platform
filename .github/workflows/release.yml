@@ -85,7 +85,7 @@ jobs:
           tags: ${{ env.IMAGE }}:${{ github.ref_name }},${{ env.IMAGE }}:latest
           build-args: |
             PLUGIN_VERSION=${{ env.PLUGIN_VERSION }}
-            DSH_VERSION=0.1.0-rc.8
+            DSH_VERSION=0.1.1-rc.2
 
       - name: Build sandbox daemon image
         uses: docker/build-push-action@v6
