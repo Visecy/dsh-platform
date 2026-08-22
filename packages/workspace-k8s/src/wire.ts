@@ -1,8 +1,9 @@
 /**
  * Runtime wiring for dsh-workspace-k8s: subscribes to the dsh session event
- * firehose (session/created + session/disposed), feeds the SessionTracker ->
- * LifecycleManager state machine, and exposes the per-workspace endpoint
- * resolver that the fs-k8s / subprocess-k8s providers call on every operation.
+ * firehose (session/created + session/disposed + session/event turn
+ * boundaries), feeds the SessionTracker -> LifecycleManager state machine,
+ * and exposes the per-workspace endpoint resolver that the fs-k8s /
+ * subprocess-k8s providers call on every operation.
  */
 import { Context } from '@deepseek-ai/cordis'
 import { SessionTracker } from './session-tracker.ts'
@@ -14,8 +15,24 @@ export interface WireOptions {
   runtime: WorkspaceRuntime
 }
 
+/** Service subprocess-k8s can use to report live background command counts. */
+export interface CommandActivityTracker {
+  commandStarted(workspaceId: string): void
+  commandEnded(workspaceId: string): void
+}
+
 type EventBus = {
   on(event: string, listener: (...args: any[]) => void): void
+}
+
+interface SessionLike {
+  id?: unknown
+  header?: { cwd?: string }
+}
+
+interface SessionEventLike {
+  type: string
+  data?: { turn?: unknown }
 }
 
 /**
@@ -23,32 +40,39 @@ type EventBus = {
  *
  * - session/created / session/disposed carry the session (header.cwd ->
  *   /workspaces/<workspaceId>); they drive the tracker and state machine.
- * - Turn-boundary events come through session/event; wired as TODO: the idle
- *   counters still work on session boundaries alone (turns count 0).
+ * - Turn boundaries are published on session/event as `turn/start` and
+ *   `turn/end`; the tracker keeps openTurns so a session with an in-flight
+ *   agent turn is never considered idle.
  * - resolveEndpoint(workspaceId) = runtime.ensure + getEndpoint so fs/
  *   subprocess providers reach a ready pod, creating it on first use.
  */
-export function wireWorkspaceLifecycle(ctx: Context & EventBus, opts: WireOptions): { resolveEndpoint: (workspaceId: string) => Promise<string> } {
+export function wireWorkspaceLifecycle(ctx: Context & EventBus, opts: WireOptions): {
+  resolveEndpoint: (workspaceId: string) => Promise<string>
+  commandTracker: CommandActivityTracker
+  deleteWorkspace: (workspaceId: string) => void
+} {
   const manager = new WorkspaceLifecycleManager(opts.lifecycle)
   const tracker = new SessionTracker(
     {
       onSessionCreated: (cb) => {
-        ctx.on('session/created', (session: { id?: unknown; header?: { cwd?: string } }) => {
+        ctx.on('session/created', (session: SessionLike) => {
           cb(String(session.id ?? ''), session.header?.cwd)
         })
       },
       onSessionDisposed: (cb) => {
-        ctx.on('session/disposed', (session: { id?: unknown }) => {
+        ctx.on('session/disposed', (session: SessionLike) => {
           cb(String(session.id ?? ''))
         })
       },
       onTurnStarted: (cb) => {
-        // TODO(wire): map session/event turn types to the tracker
-        void cb
+        ctx.on('session/event', (session: SessionLike, event: SessionEventLike) => {
+          if (event.type === 'turn/start') cb(String(session.id ?? ''))
+        })
       },
       onTurnEnded: (cb) => {
-        // TODO(wire): map session/event turn types to the tracker
-        void cb
+        ctx.on('session/event', (session: SessionLike, event: SessionEventLike) => {
+          if (event.type === 'turn/end') cb(String(session.id ?? ''))
+        })
       },
     },
     (workspaceId, event) => manager.handleSessionEvent(workspaceId, event),
@@ -61,5 +85,10 @@ export function wireWorkspaceLifecycle(ctx: Context & EventBus, opts: WireOption
       await opts.runtime.ensure(workspaceId)
       return opts.runtime.getEndpoint(workspaceId)
     },
+    commandTracker: {
+      commandStarted: (workspaceId) => manager.commandStarted(workspaceId),
+      commandEnded: (workspaceId) => manager.commandEnded(workspaceId),
+    },
+    deleteWorkspace: (workspaceId) => manager.delete(workspaceId),
   }
 }

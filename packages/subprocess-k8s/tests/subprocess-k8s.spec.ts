@@ -10,14 +10,25 @@ let root: string
 let daemonUrl: string
 let server: import('node:http').Server
 let sub: SubprocessK8s
+let started: string[]
+let ended: string[]
 const ctx = new Context()
 
 beforeAll(async () => {
   root = await mkdtemp(join(process.cwd(), '.tmp-subk8s-'))
-  const started = await startDaemon({ root, port: 0, commandTimeoutMs: 30_000 })
-  server = started.server
-  daemonUrl = started.baseUrl
-  sub = new SubprocessK8s(ctx, { daemonEndpoint: daemonUrl })
+  const daemonStarted = await startDaemon({ root, port: 0, commandTimeoutMs: 30_000 })
+  server = daemonStarted.server
+  daemonUrl = daemonStarted.baseUrl
+  started = []
+  ended = []
+  sub = new SubprocessK8s(ctx, {
+    daemonEndpoint: daemonUrl,
+    podRoot: root,
+    commandTracker: {
+      commandStarted: (id) => started.push(id),
+      commandEnded: (id) => ended.push(id),
+    },
+  })
 })
 
 afterAll(async () => {
@@ -46,6 +57,15 @@ describe('SubprocessK8s', () => {
     const out = h.collected.stdout!.readFrom(0)
     expect(out.text).toContain('out')
     expect(h.collected.stderr!.readFrom(0).text).toContain('err')
+  })
+
+  it('reports workspace command start/end to the lifecycle tracker', async () => {
+    const h = sub.spawn(spec({ cwd: '/workspaces/ws-track', argv: ['echo', 'tracked'] }))
+    const outcome = await h.done
+    expect(outcome.exitCode).toBe(0)
+    expect(started).toEqual(['ws-track'])
+    await new Promise((r) => setTimeout(r, 50))
+    expect(ended).toEqual(['ws-track'])
   })
 
   it('spawn with stdin data feeds the command', async () => {

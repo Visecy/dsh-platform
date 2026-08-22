@@ -4,14 +4,16 @@
  * front-end surface), but the directory tree is mapped:
  *
  *   /workspaces                  root: one row per workspace execution pod
- *   /workspaces/<id>             workspace root: daemon /workspace listing
- *   /workspaces/<id>/<sub>/...   deeper daemon directories
+ *   /workspaces/<id>             workspace detail (empty; no subdirectory
+ *                                selection — a workspace is an atomic unit)
  *
  * Selecting a workspace yields /workspaces/<id>, the host-side logical cwd
  * that the fs-k8s / subprocess-k8s providers route to that workspace's pod.
+ * Creating a directory at the root anchors a new workspace for workspace.create.
  */
 import { Context } from '@deepseek-ai/cordis'
 import * as k8s from '@kubernetes/client-node'
+import { mkdir } from 'node:fs/promises'
 import { DirectoryPicker, DirectoryPickerError } from '@deepseek-ai/dsh-host-directory-picker'
 
 export const name = '@visecy/dsh-workspace-picker'
@@ -94,41 +96,6 @@ export class WorkspacePicker extends DirectoryPicker {
     return rows
   }
 
-  /** List a workspace's daemon directory (pod /workspace subtree). */
-  private async listDaemonDir(workspaceId: string, rest: string[], signal?: AbortSignal): Promise<WorkspaceRow[]> {
-    const core = this.kc.makeApiClient(k8s.CoreV1Api)
-    // workspaceId is the pod name as listed at the root (dsh-ws-<id> or
-    // dsh-ws<id>); use it directly — never re-prefix it.
-    const actual = workspaceId
-    const pod = await core.readNamespacedPod({ name: actual, namespace: this.config.namespace }) as unknown as { body?: { status?: { podIP?: string } }; status?: { podIP?: string } }
-    signal?.throwIfAborted()
-    const podIp = pod.body?.status?.podIP ?? pod.status?.podIP
-    if (!podIp) throw new DirectoryPickerError('directory-unreadable', `${this.hostRoot}/${workspaceId}`, `workspace pod ${actual} has no IP`)
-    const port = this.config.daemonPort ?? 4390
-    const base = `http://${podIp}:${port}`
-    const daemonPath = '/' + rest.join('/')
-    const res = await fetch(base + '/files/list', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path: daemonPath }),
-      signal,
-    })
-    if (!res.ok) throw new DirectoryPickerError('directory-unreadable', `${this.hostRoot}/${workspaceId}`, `daemon list failed: ${res.status}`)
-    const payload = (await res.json()) as { ok: boolean; data: { entries: Array<{ name: string; type: string }> } }
-    if (!payload.ok) throw new DirectoryPickerError('directory-unreadable', `${this.hostRoot}/${workspaceId}`, 'daemon list failed')
-    const rows: WorkspaceRow[] = []
-    for (const e of payload.data.entries ?? []) {
-      if (e.type !== 'directory') continue
-      rows.push({
-        name: e.name,
-        path: `${this.hostRoot}/${workspaceId}/${rest.concat(e.name).join('/')}`,
-        hidden: e.name.startsWith('.'),
-      })
-    }
-    rows.sort((a, b) => a.name.localeCompare(b.name))
-    return rows
-  }
-
   async list(path: string | undefined, signal?: AbortSignal): Promise<{
     path: string
     home: string
@@ -144,7 +111,9 @@ export class WorkspacePicker extends DirectoryPicker {
     if (workspaceId === undefined) {
       entries = await this.listWorkspaces(signal)
     } else {
-      entries = await this.listDaemonDir(workspaceId, rest, signal)
+      // Confirmed UX: a workspace is an atomic unit, not a file tree. The
+      // picker must not let the user select a subdirectory inside a workspace.
+      entries = []
     }
 
     const crumbs: Array<{ name: string; path: string; hidden: boolean }> = [
@@ -169,26 +138,18 @@ export class WorkspacePicker extends DirectoryPicker {
   }
 
   async createDirectory(path: string, name: string): Promise<string> {
-    const { workspaceId, rest } = this.parsePath(path)
-    if (workspaceId === undefined) throw new DirectoryPickerError('directory-create-failed', path, 'cannot create workspace from the picker')
+    const { workspaceId } = this.parsePath(path)
+    // New workspaces are created at the workspace-list root. Creating folders
+    // inside an existing workspace is intentionally disallowed.
+    if (workspaceId !== undefined) throw new DirectoryPickerError('directory-create-failed', path, 'cannot create directories inside a workspace')
     if (name.trim() === '' || name === '.' || name === '..' || /[/\\]/.test(name)) {
       throw new DirectoryPickerError('directory-create-failed', `${path}/${name}`, `"${name}" is not a single path segment`)
     }
-    const core = this.kc.makeApiClient(k8s.CoreV1Api)
-    // workspaceId is the pod name as listed at the root (dsh-ws-<id> or
-    // dsh-ws<id>); use it directly — never re-prefix it.
-    const actual = workspaceId
-    const pod = await core.readNamespacedPod({ name: actual, namespace: this.config.namespace }) as unknown as { body?: { status?: { podIP?: string } }; status?: { podIP?: string } }
-    const podIp = pod.body?.status?.podIP ?? pod.status?.podIP
-    if (!podIp) throw new DirectoryPickerError('directory-create-failed', path, `workspace pod ${actual} has no IP`)
-    const daemonPath = '/' + rest.concat(name).join('/')
-    const res = await fetch(`http://${podIp}:${this.config.daemonPort ?? 4390}/files/mkdir`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path: daemonPath, recursive: true }),
-    })
-    if (!res.ok) throw new DirectoryPickerError('directory-create-failed', `${path}/${name}`, `daemon mkdir failed: ${res.status}`)
-    return `${path}/${name}`
+    const target = `${this.hostRoot}/${name}`
+    // Create the host-side anchor path so a later workspace.create({path})
+    // (which uses fs.realpath) can resolve it.
+    await mkdir(target, { recursive: true })
+    return target
   }
 }
 

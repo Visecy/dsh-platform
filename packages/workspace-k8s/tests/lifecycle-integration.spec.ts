@@ -31,13 +31,13 @@ class EndpointController implements PodController {
   deleted: string[] = []
   constructor(private daemonUrl: string) {}
   async ensurePod(spec: WorkspacePodSpec): Promise<string> {
-    const n = `dsh-ws-${spec.workspaceId}`
+    const n = `${spec.workspaceId}`
     this.pods.add(n)
     return n
   }
   async deletePod(_ns: string, workspaceId: string): Promise<void> {
     this.deleted.push(workspaceId)
-    this.pods.delete(`dsh-ws-${workspaceId}`)
+    this.pods.delete(`${workspaceId}`)
   }
   async waitReady(): Promise<void> {}
   endpoint(): string { return this.daemonUrl }
@@ -85,6 +85,9 @@ describe('lifecycle integration with real daemon', () => {
     })
     const { cmdId } = (await runRes.json()).data
 
+    // The daemon actually has the command running; report it to the state
+    // machine so the 3h lingering-command grace (not the 5m idle timer) applies.
+    mgr.commandStarted('ws-int')
     mgr.attach('ws-int')
     await new Promise((r) => setTimeout(r, 10))
     mgr.handleSessionEvent('ws-int', { type: 'session-created' })

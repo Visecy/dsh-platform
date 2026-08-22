@@ -12,14 +12,14 @@ class MockController implements PodController {
   async ensurePod(spec: WorkspacePodSpec): Promise<string> {
     this.ensureCalls.push(spec)
     if (this.failEnsure) throw new Error('k8s api error')
-    const name = `dsh-ws-${spec.workspaceId}`
+    const name = `${spec.workspaceId}`
     this.pods.add(name)
     return name
   }
 
   async deletePod(namespace: string, workspaceId: string): Promise<void> {
     // mirror the real controller: workspaceId -> pod name conversion happens here
-    this.pods.delete(`dsh-ws-${workspaceId}`)
+    this.pods.delete(`${workspaceId}`)
   }
 
   async waitReady(namespace: string, name: string): Promise<void> {
@@ -28,11 +28,11 @@ class MockController implements PodController {
   }
 
   endpoint(namespace: string, workspaceId: string, port: number): string {
-    return `http://dsh-ws-${workspaceId}-svc.${namespace}.svc.cluster.local:${port}`
+    return `http://${workspaceId}-svc.${namespace}.svc.cluster.local:${port}`
   }
 
   async ensurePvc(workspaceId: string): Promise<string> {
-    return `dsh-ws-${workspaceId}-data`
+    return `${workspaceId}-data`
   }
 
   async deletePvc(workspaceId: string): Promise<void> {
@@ -57,8 +57,8 @@ describe('WorkspaceRuntimeService', () => {
 
   it('ensures a pod and returns its endpoint', async () => {
     const ep = await rt.ensure('ws-1')
-    expect(ep).toContain('dsh-ws-ws-1-svc.dsh.svc.cluster.local:4390')
-    expect(ctrl.pods.has('dsh-ws-ws-1')).toBe(true)
+    expect(ep).toContain('ws-1-svc.dsh.svc.cluster.local:4390')
+    expect(ctrl.pods.has('ws-1')).toBe(true)
     expect(ctrl.ensureCalls[0].image).toBe('visecy/dsh-sandbox-daemon:test')
     expect(ctrl.ensureCalls[0].daemonPort).toBe(4390)
     expect(rt.isRunning('ws-1')).toBe(true)
@@ -74,7 +74,7 @@ describe('WorkspaceRuntimeService', () => {
   it('dispose removes the pod and flips running state', async () => {
     await rt.ensure('ws-3')
     await rt.dispose('ws-3')
-    expect(ctrl.pods.has('dsh-ws-ws-3')).toBe(false)
+    expect(ctrl.pods.has('ws-3')).toBe(false)
     expect(rt.isRunning('ws-3')).toBe(false)
   })
 

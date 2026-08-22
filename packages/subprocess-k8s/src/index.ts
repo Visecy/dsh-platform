@@ -13,6 +13,12 @@ import { CollectPoller, CollectReader, makePipe } from './output.ts'
 
 export const name = '@visecy/dsh-subprocess-k8s'
 
+/** Optional reporter for live workspace command counts (provided by dsh-workspace-k8s). */
+export interface CommandActivityTracker {
+  commandStarted(workspaceId: string): void
+  commandEnded(workspaceId: string): void
+}
+
 export interface Config {
   daemonEndpoint: string
   /** Per-call endpoint resolution by workspace id (ensure + getEndpoint). */
@@ -21,18 +27,24 @@ export interface Config {
   hostRoot?: string
   /** Pod-side workspace root, default /workspace. */
   podRoot?: string
+  /** Live command counter for the workspace lifecycle state machine. */
+  commandTracker?: CommandActivityTracker
 }
 
 export class SubprocessK8s extends SubprocessRuntime {
   private client: DaemonSubprocessClient
   private spillDir: string
   private resolver: ((workspaceId: string) => Promise<string> | string) | undefined
+  private commandTracker: CommandActivityTracker | undefined
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
     this.client = new DaemonSubprocessClient(config.daemonEndpoint)
     this.spillDir = mkdtempSync(join(tmpdir(), 'dsh-subprocess-k8s-'))
     this.resolver = config.resolveEndpoint
+    this.commandTracker = config.commandTracker
+    this.hostRoot = config.hostRoot ?? '/workspaces'
+    this.podRoot = config.podRoot ?? '/workspace'
   }
 
   /** The workspace id from a host path like /workspaces/<id>/... */
@@ -78,10 +90,13 @@ export class SubprocessK8s extends SubprocessRuntime {
     // The daemon cwd is the pod-side path; translate the host workspace path.
     const podCwd = this.toPod(spec.cwd)
     const translated: SubprocessSpawnSpec = { ...spec, cwd: podCwd }
+    const workspaceId = this.workspaceOf(spec.cwd)
     const handle = new RemoteHandle(
       () => this.endpointFor(spec.cwd).then((ep) => this.client.withEndpoint(ep)),
       translated,
       this.spillDir,
+      workspaceId,
+      this.commandTracker,
     )
     void handle.start()
     return handle
@@ -108,6 +123,7 @@ class RemoteHandle implements SubprocessHandle {
   private resolveDone!: (o: SubprocessOutcome) => void
   private pollers: Array<{ stop(): void }> = []
   private terminated = false
+  private counted = false
 
   private client: DaemonSubprocessClient
 
@@ -115,6 +131,8 @@ class RemoteHandle implements SubprocessHandle {
     private clientFactory: () => Promise<DaemonSubprocessClient>,
     private spec: SubprocessSpawnSpec,
     spillDir: string,
+    private workspaceId?: string,
+    private tracker?: CommandActivityTracker,
   ) {
     this.client = new DaemonSubprocessClient('http://placeholder.invalid:1')
     this.pid = -1
@@ -167,6 +185,10 @@ class RemoteHandle implements SubprocessHandle {
       })
       ;(this as unknown as { pid: number }).pid = info.pid
       ;(this as unknown as { cmdId: string }).cmdId = info.cmdId
+      if (this.workspaceId !== undefined && this.tracker !== undefined) {
+        this.counted = true
+        this.tracker.commandStarted(this.workspaceId)
+      }
 
       if (this.spec.stdio.stdout === 'pipe') {
         ;(this as unknown as { stdout: Readable | undefined }).stdout = makePipe(
@@ -194,10 +216,20 @@ class RemoteHandle implements SubprocessHandle {
       })
       for (const p of this.pollers) await p.flush()
       for (const p of this.pollers) p.stop()
+      this.finish()
       this.resolveDone(outcome)
     } catch {
       for (const p of this.pollers) p.stop()
+      this.finish()
       this.resolveDone({ exitCode: -1, signal: null })
+    }
+  }
+
+  private finish(): void {
+    if (!this.counted) return
+    this.counted = false
+    if (this.workspaceId !== undefined && this.tracker !== undefined) {
+      this.tracker.commandEnded(this.workspaceId)
     }
   }
 
@@ -235,7 +267,15 @@ class RemoteTerminalHandle implements SubprocessTerminalHandle {
     this.output = makePipe({ read: (from) => this.client.ptyOutput(ptyId, from) }, () => undefined)
 
     const pollExit = async (): Promise<void> => {
-      const phase = await this.client.ptyStatus(ptyId)
+      let phase: string | undefined
+      try {
+        phase = await this.client.ptyStatus(ptyId)
+      } catch {
+        // Daemon gone (e.g. workspace sleeping right after teardown). Treat
+        // the terminal as closed so no unhandled rejection escapes the poll.
+        this.resolveDone({ exitCode: -1, signal: null })
+        return
+      }
       if (phase === 'exited' || phase === 'killed' || phase === undefined) {
         this.resolveDone({ exitCode: 0, signal: null })
         return
@@ -268,5 +308,6 @@ class RemoteTerminalHandle implements SubprocessTerminalHandle {
 export function apply(ctx: Context, config: Config): void {
   // SubprocessRuntime base constructor already registers under 'subprocess'
   // (super(ctx, "subprocess")); providing again would collide.
-  new SubprocessK8s(ctx, config)
+  const tracker = ctx.get('workspaceCommandTracker') as CommandActivityTracker | undefined
+  new SubprocessK8s(ctx, { ...config, commandTracker: config.commandTracker ?? tracker })
 }

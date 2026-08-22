@@ -28,7 +28,13 @@ export interface PodController {
   endpoint(namespace: string, name: string, port: number): string
   ensurePvc(workspaceId: string): Promise<string>
   deletePvc(workspaceId: string): Promise<void>
+  /** Optional reconciliation support. */
+  listPods?(namespace: string): Promise<string[]>
+  listPvcs?(namespace: string): Promise<string[]>
 }
+
+export const MANAGED_ANNOTATION = 'dsh-platform/managed'
+export const WORKSPACE_LABEL = 'app=dsh-workspace'
 
 export class K8sPodController implements PodController {
   constructor(
@@ -36,10 +42,17 @@ export class K8sPodController implements PodController {
     private pvc: PvcOptions = {},
   ) {}
 
+  /** Sanitize a workspace id into a k8s-compatible resource name (as-is). */
+  private safeName(workspaceId: string): string {
+    // One name throughout: /workspaces/<id> -> pod <id> -> svc <id>-svc ->
+    // pvc <id>-data. Never add a second dsh-ws- prefix.
+    let safe = workspaceId.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '')
+    if (safe === '') safe = 'ws'
+    return safe.slice(0, 50)
+  }
+
   podName(workspaceId: string): string {
-    // sanitize: dsh-ws-<uuid-ish> (max 63 chars, lowercase alnum + '-')
-    const safe = workspaceId.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 50)
-    return `dsh-ws-${safe}`
+    return this.safeName(workspaceId)
   }
 
   svcName(workspaceId: string): string {
@@ -50,11 +63,13 @@ export class K8sPodController implements PodController {
     const core = this.kc.makeApiClient(k8s.CoreV1Api)
     const name = this.podName(spec.workspaceId)
     const labels = { app: 'dsh-workspace', workspace: name }
+    const annotations = { [MANAGED_ANNOTATION]: 'true' }
     const pod: k8s.V1Pod = {
       metadata: {
         name,
         namespace: spec.namespace,
         labels,
+        annotations,
       },
       spec: {
         containers: [
@@ -99,7 +114,7 @@ export class K8sPodController implements PodController {
 
     // headless service for stable in-cluster DNS
     const svc: k8s.V1Service = {
-      metadata: { name: this.svcName(spec.workspaceId), namespace: spec.namespace, labels },
+      metadata: { name: this.svcName(spec.workspaceId), namespace: spec.namespace, labels, annotations },
       spec: {
         clusterIP: 'None',
         selector: labels,
@@ -113,6 +128,26 @@ export class K8sPodController implements PodController {
       if (!status.includes('already exists')) throw e
     }
     return name
+  }
+
+  async listPods(namespace: string): Promise<string[]> {
+    const core = this.kc.makeApiClient(k8s.CoreV1Api)
+    const res = await core.listNamespacedPod({
+      namespace,
+      labelSelector: WORKSPACE_LABEL,
+    }) as unknown as { body?: { items?: Array<{ metadata?: { name?: string } }> }; items?: Array<{ metadata?: { name?: string } }> }
+    const items = res.body?.items ?? res.items ?? []
+    return items.map((pod) => pod.metadata?.name).filter((n): n is string => typeof n === 'string')
+  }
+
+  async listPvcs(namespace: string): Promise<string[]> {
+    const core = this.kc.makeApiClient(k8s.CoreV1Api)
+    const res = await core.listNamespacedPersistentVolumeClaim({
+      namespace,
+      labelSelector: 'app=dsh-workspace',
+    }) as unknown as { body?: { items?: Array<{ metadata?: { name?: string } }> }; items?: Array<{ metadata?: { name?: string } }> }
+    const items = res.body?.items ?? res.items ?? []
+    return items.map((pvc) => pvc.metadata?.name).filter((n): n is string => typeof n === 'string')
   }
 
   async deletePod(namespace: string, workspaceId: string): Promise<void> {
@@ -151,7 +186,7 @@ export class K8sPodController implements PodController {
   }
 
   pvcName(workspaceId: string): string {
-    return `dsh-ws-${workspaceId}-data`
+    return `${this.podName(workspaceId)}-data`
   }
 
   async ensurePvc(workspaceId: string): Promise<string> {
@@ -159,7 +194,12 @@ export class K8sPodController implements PodController {
     const core = this.kc.makeApiClient(k8s.CoreV1Api)
     const name = this.pvcName(workspaceId)
     const pvc: k8s.V1PersistentVolumeClaim = {
-      metadata: { name, namespace: ns },
+      metadata: {
+        name,
+        namespace: ns,
+        labels: { app: 'dsh-workspace' },
+        annotations: { [MANAGED_ANNOTATION]: 'true' },
+      },
       spec: {
         accessModes: ['ReadWriteOnce'],
         resources: { requests: { storage: this.pvc.storageSize ?? '10Gi' } },

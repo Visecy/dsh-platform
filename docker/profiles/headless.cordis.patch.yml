@@ -9,6 +9,9 @@
         namespace: !!js process.env.WS_NAMESPACE
         image: !!js process.env.WS_IMAGE ?? 'ghcr.io/visecy/dsh-sandbox-daemon:0.1.0'
         daemonPort: 4390
+        idleTimeoutMs: !!js Number(process.env.WS_IDLE_TIMEOUT_MS ?? (5 * 60 * 1000))
+        graceMs: !!js Number(process.env.WS_GRACE_MS ?? (3 * 60 * 60 * 1000))
+        reconcileIntervalMs: !!js Number(process.env.WS_RECONCILE_INTERVAL_MS ?? 60000)
         storageClassName: !!js process.env.WS_STORAGE_CLASS ?? 'local-path'
         storageSize: '2Gi'
     - id: fs-k8s

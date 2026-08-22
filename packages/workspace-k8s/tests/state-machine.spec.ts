@@ -23,28 +23,48 @@ describe('state machine', () => {
     expect(t.state.idleSince).toBeUndefined()
   })
 
-  it('provision + pod-ready with no activity starts grace', () => {
+  it('provision + pod-ready with no activity starts idle timer', () => {
     const t = transition(ws({ phase: 'provision' }), { type: 'pod-ready' })
     expect(t.state.phase).toBe('running')
-    expect(t.action).toEqual({ kind: 'start-grace' })
+    expect(t.action).toEqual({ kind: 'start-idle' })
     expect(t.state.idleSince).toBeTypeOf('number')
   })
 
-  it('running + session-created cancels grace', () => {
-    const t = transition(ws({ phase: 'running', idleSince: 100 }), { type: 'session-created' })
-    expect(t.state.idleSince).toBeUndefined()
-    expect(t.action).toEqual({ kind: 'cancel-grace' })
+  it('provision + pod-ready with lingering commands starts grace timer', () => {
+    const t = transition(ws({ phase: 'provision', activeCommands: 1 }), { type: 'pod-ready' })
+    expect(t.state.phase).toBe('running')
+    expect(t.action).toEqual({ kind: 'start-grace' })
   })
 
-  it('running + session-disposed to zero starts grace', () => {
+  it('running + session-created cancels timers', () => {
+    const t = transition(ws({ phase: 'running', idleSince: 100 }), { type: 'session-created' })
+    expect(t.state.idleSince).toBeUndefined()
+    expect(t.action).toEqual({ kind: 'cancel-timers' })
+  })
+
+  it('running + session-disposed to zero starts idle timer', () => {
     const t = transition(ws({ phase: 'running', activeSessions: 1 }), { type: 'session-disposed' })
     expect(t.state.phase).toBe('running')
     expect(t.state.idleSince).toBeTypeOf('number')
+    expect(t.action).toEqual({ kind: 'start-idle' })
+  })
+
+  it('running + session-disposed to zero with lingering commands starts grace timer', () => {
+    const t = transition(ws({ phase: 'running', activeSessions: 1, activeCommands: 2 }), { type: 'session-disposed' })
+    expect(t.state.phase).toBe('running')
+    expect(t.state.idleSince).toBeTypeOf('number')
     expect(t.action).toEqual({ kind: 'start-grace' })
   })
 
-  it('running + grace-expired -> sleep with dispose', () => {
-    const t = transition(ws({ phase: 'running', idleSince: 100 }), { type: 'grace-expired' })
+  it('running + idle-expired -> sleep with dispose', () => {
+    const t = transition(ws({ phase: 'running', idleSince: 100 }), { type: 'idle-expired' })
+    expect(t.state.phase).toBe('sleep')
+    expect(t.state.idleSince).toBeUndefined()
+    expect(t.action).toEqual({ kind: 'dispose' })
+  })
+
+  it('running + grace-expired while commands remain -> sleep with dispose', () => {
+    const t = transition(ws({ phase: 'running', idleSince: 100, activeCommands: 1 }), { type: 'grace-expired' })
     expect(t.state.phase).toBe('sleep')
     expect(t.state.idleSince).toBeUndefined()
     expect(t.action).toEqual({ kind: 'dispose' })
@@ -54,6 +74,24 @@ describe('state machine', () => {
     const t = transition(ws({ phase: 'running', activeSessions: 1 }), { type: 'grace-expired' })
     expect(t.state.phase).toBe('running')
     expect(t.action).toEqual({ kind: 'none' })
+  })
+
+  it('running + idle-expired while active is ignored', () => {
+    const t = transition(ws({ phase: 'running', activeSessions: 1 }), { type: 'idle-expired' })
+    expect(t.state.phase).toBe('running')
+    expect(t.action).toEqual({ kind: 'none' })
+  })
+
+  it('command-started while idle switches idle timer to grace', () => {
+    const t = transition(ws({ phase: 'running', idleSince: 100, activeCommands: 0 }), { type: 'command-started' })
+    expect(t.state.activeCommands).toBe(1)
+    expect(t.action).toEqual({ kind: 'start-grace' })
+  })
+
+  it('command-ended while idle switches grace timer to idle', () => {
+    const t = transition(ws({ phase: 'running', idleSince: 100, activeCommands: 1 }), { type: 'command-ended' })
+    expect(t.state.activeCommands).toBe(0)
+    expect(t.action).toEqual({ kind: 'start-idle' })
   })
 
   it('running + pod-lost -> ensure (auto-rebuild)', () => {
@@ -94,7 +132,9 @@ describe('state machine', () => {
     expect(st.activeSessions).toBe(0)
     expect(st.openTurns).toBe(1)
     expect(st.idleSince).toBeUndefined() // open turn keeps it active
-    st = transition(st, { type: 'turn-ended' }).state
-    expect(st.idleSince).toBeTypeOf('number') // now idle -> grace
+    const ended = transition(st, { type: 'turn-ended' })
+    st = ended.state
+    expect(st.idleSince).toBeTypeOf('number') // now idle -> idle timer (no commands)
+    expect(ended.action).toEqual({ kind: 'start-idle' })
   })
 })

@@ -91,6 +91,21 @@ describe('daemon server', () => {
     expect(['killed', 'exited']).toContain(kill.data.status.phase)
   })
 
+  it('terminate-all drains running commands and rejects new commands', async () => {
+    const run = await post('/commands/run', { spec: { argv: ['sleep', '30'], cwd: '/' } })
+    const cmdId = run.data.cmdId
+    await new Promise((res) => setTimeout(res, 150))
+
+    const drain = await post('/commands/terminate-all', { graceMs: 300 })
+    expect(drain.ok).toBe(true)
+
+    const st = (await get(`/commands/${cmdId}/status`)).data.status
+    expect(['killed', 'exited']).toContain(st.phase)
+
+    const newRun = await post('/commands/run', { spec: { argv: ['echo', 'x'], cwd: '/' } })
+    expect(newRun.ok).toBe(false)
+  })
+
   it('rejects malformed payloads with ok:false', async () => {
     const bad = await post('/files/read', { path: '../../etc/passwd' })
     expect(bad.ok).toBe(false)

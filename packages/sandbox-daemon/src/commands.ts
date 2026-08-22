@@ -46,6 +46,7 @@ interface Record {
 export class CommandRegistry {
   private records = new Map<string, Record>()
   private timer?: NodeJS.Timeout
+  private accepting = true
   readonly opts: { runtimeRoot: string; defaultGraceMs: number; pollMs?: number }
   constructor(opts: { runtimeRoot: string; defaultGraceMs: number; pollMs?: number }) {
     this.opts = opts
@@ -54,6 +55,7 @@ export class CommandRegistry {
   }
 
   async run(spec: CommandSpec): Promise<CommandHandleInfo> {
+    if (!this.accepting) throw new Error('command acceptance disabled (draining)')
     const cmdId = randomUUID()
     const dir = join(this.opts.runtimeRoot, 'commands', cmdId)
     await mkdir(dir, { recursive: true })
@@ -160,6 +162,12 @@ export class CommandRegistry {
     return [...this.records.values()].map((r) => ({ ...r.status }))
   }
 
+  /** Stop accepting new commands, then force-terminate every live command. */
+  async drain(graceMs = 2000): Promise<void> {
+    this.accepting = false
+    await this.killAll(graceMs)
+  }
+
   /** Force-terminate every live command (workspace-wide grace expiry). */
   async killAll(graceMs = 2000): Promise<void> {
     await Promise.all([...this.records.keys()].map((id) => this.kill(id, { graceMs }).catch(() => undefined)))
@@ -167,6 +175,7 @@ export class CommandRegistry {
 
   async dispose(): Promise<void> {
     if (this.timer) clearInterval(this.timer)
+    this.accepting = false
     await Promise.all([...this.records.keys()].map((id) => this.kill(id, { graceMs: 200 }).catch(() => undefined)))
     for (const rec of this.records.values()) {
       rec.stdoutStream.destroy()

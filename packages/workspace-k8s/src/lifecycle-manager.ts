@@ -1,6 +1,10 @@
 /**
  * WorkspaceLifecycleManager: orchestrates the state machine with the pod
- * controller, the 3h grace timer, and session activity events.
+ * controller, idle/grace timers, and session/command activity events.
+ *
+ * Timer policy (user-confirmed):
+ *   - idle without lingering commands -> idleTimeoutMs (default 5min) -> sleep
+ *   - idle with lingering commands   -> graceMs (default 3h) -> drain/force -> sleep
  */
 import { initialState, transition, type WorkspaceAction, type WorkspaceEvent, type WorkspaceState } from './state-machine.ts'
 import type { PodController, WorkspacePodSpec } from './k8s-client.ts'
@@ -19,6 +23,9 @@ export interface LifecycleOptions {
   resources?: { cpu?: string; memory?: string }
   storageClassName?: string
   storageSize?: string
+  /** Idle timeout with no lingering commands. Default 5 minutes. */
+  idleTimeoutMs?: number
+  /** Lingering-command grace before force termination. Default 3 hours. */
   graceMs?: number
   now?: () => number
   timer?: Timer
@@ -28,12 +35,13 @@ export interface LifecycleOptions {
 
 export class WorkspaceLifecycleManager {
   private controller: PodController
-  private opts: Required<Pick<LifecycleOptions, 'namespace' | 'image' | 'daemonPort' | 'graceMs'>>
+  private opts: Required<Pick<LifecycleOptions, 'namespace' | 'image' | 'daemonPort' | 'idleTimeoutMs' | 'graceMs'>>
   private onBeforeSleep: ((endpoint: string) => Promise<void>) | undefined
   private now: () => number
   private timer: Timer
   private states = new Map<string, WorkspaceState>()
-  private timers = new Map<string, NodeJS.Timeout>()
+  private idleTimers = new Map<string, NodeJS.Timeout>()
+  private graceTimers = new Map<string, NodeJS.Timeout>()
   private ensureInflight = new Set<string>()
 
   constructor(opts: LifecycleOptions) {
@@ -42,6 +50,7 @@ export class WorkspaceLifecycleManager {
       namespace: opts.namespace,
       image: opts.image,
       daemonPort: opts.daemonPort ?? 4390,
+      idleTimeoutMs: opts.idleTimeoutMs ?? 5 * 60 * 1000,
       graceMs: opts.graceMs ?? 3 * 60 * 60 * 1000,
     }
     this.now = opts.now ?? Date.now
@@ -56,9 +65,19 @@ export class WorkspaceLifecycleManager {
     return this.states.get(workspaceId)
   }
 
-  /** Session activity from the tracker (session/turn lifecycle). */
+  /** Session/turn activity from the SessionTracker. */
   handleSessionEvent(workspaceId: string, event: WorkspaceEvent): void {
     this.handle(workspaceId, event)
+  }
+
+  /** A background command started in this workspace. */
+  commandStarted(workspaceId: string): void {
+    this.handle(workspaceId, { type: 'command-started' })
+  }
+
+  /** A background command ended in this workspace. */
+  commandEnded(workspaceId: string): void {
+    this.handle(workspaceId, { type: 'command-ended' })
   }
 
   /** User opened/activated the workspace (cancel sleep). */
@@ -83,24 +102,59 @@ export class WorkspaceLifecycleManager {
     void this.runAction(workspaceId, action)
   }
 
+  private clearTimers(workspaceId: string): void {
+    const idle = this.idleTimers.get(workspaceId)
+    if (idle !== undefined) {
+      this.timer.clearTimeout(idle)
+      this.idleTimers.delete(workspaceId)
+    }
+    const grace = this.graceTimers.get(workspaceId)
+    if (grace !== undefined) {
+      this.timer.clearTimeout(grace)
+      this.graceTimers.delete(workspaceId)
+    }
+  }
+
   private async runAction(workspaceId: string, action: WorkspaceAction): Promise<void> {
     switch (action.kind) {
       case 'none':
         return
-      case 'start-grace': {
+      case 'start-idle': {
+        this.clearTimers(workspaceId)
         const timer = this.timer.setTimeout(() => {
-          this.timers.delete(workspaceId)
+          this.idleTimers.delete(workspaceId)
+          this.handle(workspaceId, { type: 'idle-expired' })
+        }, this.opts.idleTimeoutMs)
+        this.idleTimers.set(workspaceId, timer)
+        return
+      }
+      case 'start-grace': {
+        this.clearTimers(workspaceId)
+        const timer = this.timer.setTimeout(() => {
+          this.graceTimers.delete(workspaceId)
           this.handle(workspaceId, { type: 'grace-expired' })
         }, this.opts.graceMs)
-        this.timers.set(workspaceId, timer)
+        this.graceTimers.set(workspaceId, timer)
+        return
+      }
+      case 'cancel-idle': {
+        const t = this.idleTimers.get(workspaceId)
+        if (t !== undefined) {
+          this.timer.clearTimeout(t)
+          this.idleTimers.delete(workspaceId)
+        }
         return
       }
       case 'cancel-grace': {
-        const t = this.timers.get(workspaceId)
+        const t = this.graceTimers.get(workspaceId)
         if (t !== undefined) {
           this.timer.clearTimeout(t)
-          this.timers.delete(workspaceId)
+          this.graceTimers.delete(workspaceId)
         }
+        return
+      }
+      case 'cancel-timers': {
+        this.clearTimers(workspaceId)
         return
       }
       case 'ensure': {
@@ -128,28 +182,21 @@ export class WorkspaceLifecycleManager {
         return
       }
       case 'dispose': {
-        // sleep: drain commands in the pod first, then the pod goes away (PVC survives)
+        // sleep: drain/force-terminate commands in the pod first, then the pod
+        // goes away (PVC survives)
         if (this.onBeforeSleep !== undefined) {
           const ep = this.controller.endpoint(this.opts.namespace, workspaceId, this.opts.daemonPort)
           await this.onBeforeSleep(ep).catch(() => undefined)
         }
         await this.controller.deletePod(this.opts.namespace, workspaceId)
-        const t = this.timers.get(workspaceId)
-        if (t !== undefined) {
-          this.timer.clearTimeout(t)
-          this.timers.delete(workspaceId)
-        }
+        this.clearTimers(workspaceId)
         return
       }
       case 'delete': {
         // workspace deletion: pod AND PVC go away
         await this.controller.deletePod(this.opts.namespace, workspaceId)
         await this.controller.deletePvc(workspaceId)
-        const t = this.timers.get(workspaceId)
-        if (t !== undefined) {
-          this.timer.clearTimeout(t)
-          this.timers.delete(workspaceId)
-        }
+        this.clearTimers(workspaceId)
         return
       }
     }
