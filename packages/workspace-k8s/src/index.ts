@@ -166,7 +166,6 @@ export function apply(ctx: Context, config: Config): void {
     registry,
     namespace: config.namespace,
     hostRoot: '/workspaces',
-    onDelete: (workspaceId) => deleteWorkspace(workspaceId),
   })
   ctx.provide('workspaceReconciler', { reconcile: () => reconciler.reconcile() })
   ctx.provide('workspaceDeleter', {

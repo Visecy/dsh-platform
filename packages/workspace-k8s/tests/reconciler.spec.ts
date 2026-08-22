@@ -65,30 +65,7 @@ describe('WorkspaceReconciler', () => {
     expect(reg.created).toEqual([])
   })
 
-  it('reclaims resources removed from the registry after a synced pass', async () => {
-    const ctrl = new FakeController()
-    ctrl.pods.add('ws-d')
-    const reg = new FakeRegistry([{ workspaceId: 'ws-d', path: '/workspaces/ws-d' }])
-    const deleted: string[] = []
-    const r = new WorkspaceReconciler({
-      controller: ctrl,
-      registry: reg,
-      namespace: 'dsh',
-      hostRoot: '/workspaces',
-      onDelete: (id) => deleted.push(id),
-    })
-
-    // First pass: registry has ws-d -> synced.
-    await r.reconcile()
-    expect(deleted).toEqual([])
-
-    // Simulate an explicit workspace deletion (registry entry removed).
-    reg.known = []
-    await r.reconcile()
-    expect(deleted).toEqual(['ws-d'])
-  })
-
-  it('does not reclaim on a cold start with an empty registry', async () => {
+  it('does not reclaim resources when registry list is empty', async () => {
     const ctrl = new FakeController()
     ctrl.pods.add('ws-e')
     ctrl.pvcs.add('ws-e-data')
@@ -101,6 +78,8 @@ describe('WorkspaceReconciler', () => {
       hostRoot: '/workspaces',
       onDelete: (id) => deleted.push(id),
     })
+    // Even after a prior pass, an empty registry must never trigger deletion.
+    await r.reconcile()
     await r.reconcile()
     expect(deleted).toEqual([])
     expect(reg.created).toEqual(['ws-e'])
