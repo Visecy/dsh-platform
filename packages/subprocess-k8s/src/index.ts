@@ -7,7 +7,7 @@ import { SubprocessRuntime, type SubprocessCollectedOutputs, type SubprocessHand
 import { Writable, Readable } from 'node:stream'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { DaemonSubprocessClient } from './client.ts'
 import { CollectPoller, CollectReader, makePipe } from './output.ts'
 
@@ -177,8 +177,18 @@ class RemoteHandle implements SubprocessHandle {
       const stdinData = this.spec.stdio.stdin !== 'ignore' && this.spec.stdio.stdin !== 'pipe'
         ? new TextEncoder().encode(this.spec.stdio.stdin.data)
         : undefined
+      // The fs-search tool passes a control-plane-hosted ripgrep path. That
+      // binary is installed in the workspace daemon image at /usr/bin/rg, so
+      // translate the absolute host path to the pod-visible executable.
+      let argv = this.spec.argv
+      const first = argv[0]
+      if (typeof first === 'string' && basename(first) === 'rg') {
+        const rgPath = await this.client.resolveExecutable('rg')
+        argv = [rgPath, ...argv.slice(1)]
+      }
+
       const info = await this.client.run({
-        argv: this.spec.argv,
+        argv,
         cwd: this.spec.cwd,
         env: this.spec.env as Record<string, string> | undefined,
         stdin: stdinData,

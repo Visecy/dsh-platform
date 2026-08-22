@@ -8,6 +8,7 @@ on:
 
 env:
   IMAGE: ghcr.io/visecy/dsh-web-platform
+  DAEMON_IMAGE: ghcr.io/visecy/dsh-sandbox-daemon
 
 jobs:
   publish:
@@ -85,3 +86,11 @@ jobs:
           build-args: |
             PLUGIN_VERSION=${{ env.PLUGIN_VERSION }}
             DSH_VERSION=0.1.0-rc.8
+
+      - name: Build sandbox daemon image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/dsh-sandbox-daemon.Dockerfile
+          push: true
+          tags: ${{ env.DAEMON_IMAGE }}:${{ github.ref_name }},${{ env.DAEMON_IMAGE }}:latest

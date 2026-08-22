@@ -9,7 +9,7 @@ COPY packages/sandbox-daemon/src ./src
 RUN npm install --omit=dev
 
 FROM node:24-slim
-RUN apt-get update && apt-get install -y --no-install-recommends tini procps util-linux && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends tini procps util-linux ripgrep && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /app/node_modules ./node_modules
 COPY packages/sandbox-daemon/package.json ./
