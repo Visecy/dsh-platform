@@ -2,6 +2,12 @@
   disabled: true
 - id: subprocess
   disabled: true
+- id: bash-sandbox
+  disabled: true
+- id: permission
+  disabled: true
+- id: permission-presets
+  disabled: true
 - id: fs-sandbox
   disabled: true
 - id: directory-picker
@@ -45,6 +51,10 @@
       name: '@visecy/dsh-subprocess-k8s'
       config:
         daemonEndpoint: !!js (process.env.WS_DAEMON_ENDPOINT ?? 'http://127.0.0.1:4390')
+    - id: bash-local
+      name: '@deepseek-ai/dsh-bash-local'
+      config:
+        cwd: '/workspaces'
     - id: workspace-picker
       name: '@visecy/dsh-workspace-picker'
       config:
