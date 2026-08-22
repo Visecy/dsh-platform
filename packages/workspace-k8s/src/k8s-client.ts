@@ -176,7 +176,7 @@ export class K8sPodController implements PodController {
     }
   }
 
-  async waitReady(namespace: string, name: string, timeoutMs = 60_000): Promise<void> {
+  async waitReady(namespace: string, name: string, timeoutMs = 180_000): Promise<void> {
     const core = this.kc.makeApiClient(k8s.CoreV1Api)
     const deadline = Date.now() + timeoutMs
     for (;;) {
