@@ -6,7 +6,7 @@
  * tables for workspaces, users, settings, and credential records.
  */
 import { Context } from '@deepseek-ai/cordis'
-import { defineDomain, domainTable, type Domain } from '@deepseek-ai/dsh-storage-domain'
+import { DomainFacility, defineDomain, domainTable, type Domain } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 
 export type WorkspacePhase = 'provision' | 'running' | 'sleep' | 'deleted'
@@ -101,17 +101,17 @@ export interface PlatformDomains {
 }
 
 export async function apply(ctx: Context, config: { backend?: string } = {}): Promise<void> {
-  await ctx.inject(['storageDomain'], async (domainCtx) => {
-    const facility = domainCtx.get('storageDomain')
-    const workspaces = await facility.open(workspacesDomain)
-    const users = await facility.open(usersDomain)
-    const settings = await facility.open(settingsDomain)
-    const credentials = await facility.open(credentialsDomain)
-    const domains: PlatformDomains = { workspaces, users, settings, credentials }
+  // Use our own DomainFacility over the DB backend instead of the base
+  // storage-domain plugin (which is routed to json by the default profile).
+  const facility = new DomainFacility(ctx, { backend: config.backend ?? 'sqlite' })
+  const workspaces = await facility.open(workspacesDomain)
+  const users = await facility.open(usersDomain)
+  const settings = await facility.open(settingsDomain)
+  const credentials = await facility.open(credentialsDomain)
+  const domains: PlatformDomains = { workspaces, users, settings, credentials }
 
-    domainCtx.provide('platformDomains', domains)
-    domainCtx.effect(async () => {
-      await Promise.all([workspaces.close(), users.close(), settings.close(), credentials.close()])
-    }, '@visecy/dsh-platform-domain')
-  })
+  ctx.provide('platformDomains', domains)
+  ctx.effect(async () => {
+    await Promise.all([workspaces.close(), users.close(), settings.close(), credentials.close()])
+  }, '@visecy/dsh-platform-domain')
 }

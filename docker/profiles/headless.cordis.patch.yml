@@ -49,6 +49,3 @@
       name: '@deepseek-ai/dsh-bash-local'
       config:
         cwd: '/workspaces'
-- id: storage-domain
-  config:
-    backend: sqlite
