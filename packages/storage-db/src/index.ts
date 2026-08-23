@@ -195,21 +195,16 @@ export function apply(ctx: Context, config: Config): void {
   // The base profile already provides the storage hub; registering on it
   // makes the backend visible to every consumer of ctx.storage.
   const storage = ctx.get('storage')
-  // The plugin can be applied more than once in composed profiles; make the
-  // backend idempotent instead of failing with duplicate-backend.
+  // The plugin can be applied more than once in composed profiles; reuse an
+  // existing backend instead of failing with duplicate-backend. Keep it open
+  // for the process lifetime—closing on a plugin-fiber dispose could close a
+  // backend that another composition/fiber still uses.
   let backend: DbStorageBackend
-  let created = false
   if (storage.backend.names().includes(config.type)) {
     backend = storage.backend.get(config.type) as DbStorageBackend
   } else {
     backend = new DbStorageBackend(createDriver(config))
     storage.backend.register(config.type, backend)
-    created = true
   }
   ctx.provide(storageBackendServiceKey(config.type), backend)
-  if (created) {
-    ctx.effect(async () => {
-      await backend.close()
-    }, '@visecy/dsh-storage-db')
-  }
 }

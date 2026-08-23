@@ -166,20 +166,13 @@ function createDriver(config) {
 function apply(ctx, config) {
   const storage = ctx.get("storage");
   let backend;
-  let created = false;
   if (storage.backend.names().includes(config.type)) {
     backend = storage.backend.get(config.type);
   } else {
     backend = new DbStorageBackend(createDriver(config));
     storage.backend.register(config.type, backend);
-    created = true;
   }
   ctx.provide(storageBackendServiceKey(config.type), backend);
-  if (created) {
-    ctx.effect(async () => {
-      await backend.close();
-    }, "@visecy/dsh-storage-db");
-  }
 }
 export {
   DbStorageBackend,
