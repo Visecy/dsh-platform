@@ -2,7 +2,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createRequire } from "node:module";
-import { storageBackendServiceKey } from "@deepseek-ai/dsh-storage";
+import { Storage, storageBackendServiceKey } from "@deepseek-ai/dsh-storage";
 var require2 = createRequire(import.meta.url);
 var { DatabaseSync } = require2("node:sqlite");
 var inject = ["storage"];
@@ -186,7 +186,12 @@ function createDriver(config) {
   return new PostgresDriver(config.connectionString);
 }
 function apply(ctx, config) {
-  const storage = ctx.get("storage");
+  let storage = ctx.get("storage", false);
+  if (storage === void 0) {
+    new Storage(ctx);
+    storage = ctx.get("storage", false);
+    if (storage === void 0) throw new Error("storage hub did not register");
+  }
   let backend;
   if (storage.backend.names().includes(config.type)) {
     backend = storage.backend.get(config.type);
