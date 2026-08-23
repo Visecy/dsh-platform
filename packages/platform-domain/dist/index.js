@@ -2,6 +2,7 @@
 import { DomainFacility, defineDomain, domainTable } from "@deepseek-ai/dsh-storage-domain";
 import { storageBackendServiceKey } from "@deepseek-ai/dsh-storage";
 import { z } from "zod";
+var inject = ["storage"];
 var workspacesDomain = defineDomain({
   name: "platform_workspaces",
   version: 1,
@@ -73,6 +74,7 @@ async function apply(ctx, config = {}) {
 export {
   apply,
   credentialsDomain,
+  inject,
   settingsDomain,
   usersDomain,
   workspacesDomain

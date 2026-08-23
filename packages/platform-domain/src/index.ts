@@ -10,6 +10,8 @@ import { DomainFacility, defineDomain, domainTable, type Domain } from '@deepsee
 import { storageBackendServiceKey } from '@deepseek-ai/dsh-storage'
 import { z } from 'zod'
 
+export const inject = ['storage'] as const
+
 export type WorkspacePhase = 'provision' | 'running' | 'sleep' | 'deleted'
 
 export const workspacesDomain = defineDomain({
