@@ -108,6 +108,10 @@ RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
        @deepseek-ai/dsh-session-persistence@${DSH_VERSION} \
        @kubernetes/client-node
 
+COPY scripts/patch-web-auth.mjs /usr/local/lib/node_modules/patch-web-auth.mjs
+RUN node /usr/local/lib/node_modules/patch-web-auth.mjs \
+      /home/node/.dsh/profiles/web/node_modules/dsh-web-auth/lib/webserver.js
+
 COPY docker/profiles/web.cordis.patch.yml /opt/dsh-home/profiles/web/cordis.patch.yml
 COPY docker/profiles/headless.cordis.patch.yml /opt/dsh-home/profiles/headless/cordis.patch.yml
 
