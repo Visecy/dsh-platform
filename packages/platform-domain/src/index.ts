@@ -12,7 +12,7 @@ import { z } from 'zod'
 export type WorkspacePhase = 'provision' | 'running' | 'sleep' | 'deleted'
 
 export const workspacesDomain = defineDomain({
-  name: 'platform-workspaces',
+  name: 'platform_workspaces',
   version: 1,
   tables: {
     workspaces: domainTable<string, {
@@ -36,7 +36,7 @@ export const workspacesDomain = defineDomain({
 })
 
 export const usersDomain = defineDomain({
-  name: 'platform-users',
+  name: 'platform_users',
   version: 1,
   tables: {
     users: domainTable<string, {
@@ -56,7 +56,7 @@ export const usersDomain = defineDomain({
 })
 
 export const settingsDomain = defineDomain({
-  name: 'platform-settings',
+  name: 'platform_settings',
   version: 1,
   tables: {
     settings: domainTable<string, {
@@ -74,7 +74,7 @@ export const settingsDomain = defineDomain({
 })
 
 export const credentialsDomain = defineDomain({
-  name: 'platform-credentials',
+  name: 'platform_credentials',
   version: 1,
   tables: {
     credentials: domainTable<string, {

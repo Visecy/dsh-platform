@@ -2,7 +2,7 @@
 import { defineDomain, domainTable } from "@deepseek-ai/dsh-storage-domain";
 import { z } from "zod";
 var workspacesDomain = defineDomain({
-  name: "platform-workspaces",
+  name: "platform_workspaces",
   version: 1,
   tables: {
     workspaces: domainTable(z.object({
@@ -17,7 +17,7 @@ var workspacesDomain = defineDomain({
   }
 });
 var usersDomain = defineDomain({
-  name: "platform-users",
+  name: "platform_users",
   version: 1,
   tables: {
     users: domainTable(z.object({
@@ -30,7 +30,7 @@ var usersDomain = defineDomain({
   }
 });
 var settingsDomain = defineDomain({
-  name: "platform-settings",
+  name: "platform_settings",
   version: 1,
   tables: {
     settings: domainTable(z.object({
@@ -42,7 +42,7 @@ var settingsDomain = defineDomain({
   }
 });
 var credentialsDomain = defineDomain({
-  name: "platform-credentials",
+  name: "platform_credentials",
   version: 1,
   tables: {
     credentials: domainTable(z.object({
