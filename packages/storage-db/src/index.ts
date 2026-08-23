@@ -15,8 +15,6 @@ const require = createRequire(import.meta.url)
 const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite')
 import { Storage, storageBackendServiceKey, type StorageBackend, type KvFacet, type KvUnitDescriptor, type KvUnit } from '@deepseek-ai/dsh-storage'
 
-export const inject = ['storage'] as const
-
 export const name = '@visecy/dsh-storage-db'
 
 export type Config =

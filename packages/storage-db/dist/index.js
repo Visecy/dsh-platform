@@ -5,7 +5,6 @@ import { createRequire } from "node:module";
 import { Storage, storageBackendServiceKey } from "@deepseek-ai/dsh-storage";
 var require2 = createRequire(import.meta.url);
 var { DatabaseSync } = require2("node:sqlite");
-var inject = ["storage"];
 var name = "@visecy/dsh-storage-db";
 var SqliteDriver = class {
   constructor(db) {
@@ -205,6 +204,5 @@ export {
   DbStorageBackend,
   apply,
   createDriver,
-  inject,
   name
 };
