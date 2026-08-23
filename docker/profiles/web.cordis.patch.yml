@@ -46,11 +46,12 @@
     - id: storage-db
       name: '@visecy/dsh-storage-db'
       config:
-        type: sqlite
-        path: !!js dshHomePath('storage', 'db.sqlite')
+        type: postgres
+        connectionString: !!js process.env.DSH_PG_CONNECTION_STRING
     - id: platform-domain
       name: '@visecy/dsh-platform-domain'
-      config: {}
+      config:
+        backend: postgres
     - id: fs-k8s
       name: '@visecy/dsh-fs-k8s'
       config:
@@ -64,8 +65,8 @@
     - id: session-persistence-rdb
       name: '@visecy/dsh-session-persistence-rdb'
       config:
-        type: sqlite
-        path: !!js dshHomePath('sessions', 'sessions.sqlite')
+        type: postgres
+        connectionString: !!js process.env.DSH_PG_CONNECTION_STRING
     - id: bash-local
       name: '@deepseek-ai/dsh-bash-local'
       config:
