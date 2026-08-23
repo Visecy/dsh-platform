@@ -10,7 +10,7 @@ import { DomainFacility, defineDomain, domainTable, type Domain } from '@deepsee
 import { storageBackendServiceKey } from '@deepseek-ai/dsh-storage'
 import { z } from 'zod'
 
-export const inject = ['storage'] as const
+export const inject = ['storageDomain'] as const
 
 export type WorkspacePhase = 'provision' | 'running' | 'sleep' | 'deleted'
 
@@ -104,21 +104,15 @@ export interface PlatformDomains {
 }
 
 export async function apply(ctx: Context, config: { backend?: string } = {}): Promise<void> {
-  const backendName = config.backend ?? 'sqlite'
-  // Wait for our DB backend to register before opening domain units.
-  await ctx.inject(['storage', storageBackendServiceKey(backendName)], async () => {
-    // Use our own DomainFacility over the DB backend instead of the base
-    // storage-domain plugin (which is routed to json by the default profile).
-    const facility = new DomainFacility(ctx, { backend: backendName })
-    const workspaces = await facility.open(workspacesDomain)
-    const users = await facility.open(usersDomain)
-    const settings = await facility.open(settingsDomain)
-    const credentials = await facility.open(credentialsDomain)
-    const domains: PlatformDomains = { workspaces, users, settings, credentials }
+  const facility = ctx.get('storageDomain')
+  const workspaces = await facility.open(workspacesDomain)
+  const users = await facility.open(usersDomain)
+  const settings = await facility.open(settingsDomain)
+  const credentials = await facility.open(credentialsDomain)
+  const domains: PlatformDomains = { workspaces, users, settings, credentials }
 
-    ctx.provide('platformDomains', domains)
-    ctx.effect(async () => {
-      await Promise.all([workspaces.close(), users.close(), settings.close(), credentials.close()])
-    }, '@visecy/dsh-platform-domain')
-  })
+  ctx.provide('platformDomains', domains)
+  ctx.effect(async () => {
+    await Promise.all([workspaces.close(), users.close(), settings.close(), credentials.close()])
+  }, '@visecy/dsh-platform-domain')
 }

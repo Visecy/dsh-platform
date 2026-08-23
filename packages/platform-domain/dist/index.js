@@ -1,8 +1,7 @@
 // packages/platform-domain/src/index.ts
-import { DomainFacility, defineDomain, domainTable } from "@deepseek-ai/dsh-storage-domain";
-import { storageBackendServiceKey } from "@deepseek-ai/dsh-storage";
+import { defineDomain, domainTable } from "@deepseek-ai/dsh-storage-domain";
 import { z } from "zod";
-var inject = ["storage"];
+var inject = ["storageDomain"];
 var workspacesDomain = defineDomain({
   name: "platform_workspaces",
   version: 1,
@@ -57,19 +56,16 @@ var credentialsDomain = defineDomain({
   }
 });
 async function apply(ctx, config = {}) {
-  const backendName = config.backend ?? "sqlite";
-  await ctx.inject(["storage", storageBackendServiceKey(backendName)], async () => {
-    const facility = new DomainFacility(ctx, { backend: backendName });
-    const workspaces = await facility.open(workspacesDomain);
-    const users = await facility.open(usersDomain);
-    const settings = await facility.open(settingsDomain);
-    const credentials = await facility.open(credentialsDomain);
-    const domains = { workspaces, users, settings, credentials };
-    ctx.provide("platformDomains", domains);
-    ctx.effect(async () => {
-      await Promise.all([workspaces.close(), users.close(), settings.close(), credentials.close()]);
-    }, "@visecy/dsh-platform-domain");
-  });
+  const facility = ctx.get("storageDomain");
+  const workspaces = await facility.open(workspacesDomain);
+  const users = await facility.open(usersDomain);
+  const settings = await facility.open(settingsDomain);
+  const credentials = await facility.open(credentialsDomain);
+  const domains = { workspaces, users, settings, credentials };
+  ctx.provide("platformDomains", domains);
+  ctx.effect(async () => {
+    await Promise.all([workspaces.close(), users.close(), settings.close(), credentials.close()]);
+  }, "@visecy/dsh-platform-domain");
 }
 export {
   apply,
