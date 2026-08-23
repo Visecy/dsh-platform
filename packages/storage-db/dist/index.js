@@ -2,9 +2,10 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createRequire } from "node:module";
-import { Storage, storageBackendServiceKey } from "@deepseek-ai/dsh-storage";
+import { storageBackendServiceKey } from "@deepseek-ai/dsh-storage";
 var require2 = createRequire(import.meta.url);
 var { DatabaseSync } = require2("node:sqlite");
+var inject = ["storage"];
 var name = "@visecy/dsh-storage-db";
 var SqliteDriver = class {
   constructor(db) {
@@ -164,12 +165,7 @@ function createDriver(config) {
 }
 function apply(ctx, config) {
   const backend = new DbStorageBackend(createDriver(config));
-  let storage = ctx.get("storage", false);
-  if (storage === void 0) {
-    new Storage(ctx);
-    storage = ctx.get("storage", false);
-    if (storage === void 0) throw new Error("storage hub did not register after construction");
-  }
+  const storage = ctx.get("storage");
   const disposer = storage.backend.register(config.type, backend);
   ctx.provide(storageBackendServiceKey(config.type), backend);
   ctx.effect(async () => {
@@ -181,5 +177,6 @@ export {
   DbStorageBackend,
   apply,
   createDriver,
+  inject,
   name
 };

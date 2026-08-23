@@ -15,6 +15,8 @@ const require = createRequire(import.meta.url)
 const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite')
 import { Storage, storageBackendServiceKey, type StorageBackend, type KvFacet, type KvUnitDescriptor, type KvUnit } from '@deepseek-ai/dsh-storage'
 
+export const inject = ['storage'] as const
+
 export const name = '@visecy/dsh-storage-db'
 
 export type Config =
@@ -191,14 +193,9 @@ export function createDriver(config: Config): DbDriver {
 
 export function apply(ctx: Context, config: Config): void {
   const backend = new DbStorageBackend(createDriver(config))
-  // DSH 0.1.1 ships the Storage service as a class but not as a base profile
-  // plugin. Create the hub here if no other plugin mounted it yet.
-  let storage = ctx.get('storage', false)
-  if (storage === undefined) {
-    new Storage(ctx)
-    storage = ctx.get('storage', false)
-    if (storage === undefined) throw new Error('storage hub did not register after construction')
-  }
+  // The base profile already provides the storage hub; registering on it
+  // makes the backend visible to every consumer of ctx.storage.
+  const storage = ctx.get('storage')
   const disposer = storage.backend.register(config.type, backend)
   ctx.provide(storageBackendServiceKey(config.type), backend)
   ctx.effect(async () => {
