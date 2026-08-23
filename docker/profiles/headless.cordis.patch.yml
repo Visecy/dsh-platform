@@ -22,6 +22,9 @@
         reconcileIntervalMs: !!js Number(process.env.WS_RECONCILE_INTERVAL_MS ?? 60000)
         storageClassName: !!js process.env.WS_STORAGE_CLASS ?? 'local-path'
         storageSize: '2Gi'
+    - id: storage-domain
+      config:
+        backend: sqlite
     - id: storage-db
       name: '@visecy/dsh-storage-db'
       config:
