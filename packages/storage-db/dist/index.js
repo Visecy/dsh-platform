@@ -31,6 +31,8 @@ var SqliteDriver = class {
     `);
   }
   db;
+  async ensureSchema() {
+  }
   async run(sql, ...params) {
     this.db.prepare(sql).run(...params);
   }
@@ -49,6 +51,25 @@ var PostgresDriver = class {
   constructor(connectionString) {
     const { Pool } = require2("pg");
     this.pool = new Pool({ connectionString });
+  }
+  async ensureSchema() {
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS dsh_storage_units (
+      name TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      has_global INTEGER NOT NULL,
+      tables_json TEXT NOT NULL
+    )`);
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS dsh_storage_records (
+      unit TEXT NOT NULL,
+      table_name TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value_json TEXT NOT NULL,
+      PRIMARY KEY (unit, table_name, key)
+    )`);
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS dsh_storage_global (
+      unit TEXT PRIMARY KEY,
+      value_json TEXT NOT NULL
+    )`);
   }
   async run(sql, ...params) {
     await this.pool.query(sql, params);
@@ -76,6 +97,7 @@ var DbStorageBackend = class {
   kv;
   closed = false;
   async ensureUnit(descriptor) {
+    await this.driver.ensureSchema?.();
     const existing = await this.driver.get(
       "SELECT version FROM dsh_storage_units WHERE name = ?",
       descriptor.name

@@ -24,6 +24,7 @@ export type Config =
   | { type: 'postgres'; connectionString: string }
 
 interface DbDriver {
+  ensureSchema?(): Promise<void>
   run(sql: string, ...params: unknown[]): Promise<void>
   get<T = any>(sql: string, ...params: unknown[]): Promise<T | undefined>
   all<T = any>(sql: string, ...params: unknown[]): Promise<T[]>
@@ -53,6 +54,9 @@ class SqliteDriver implements DbDriver {
     `)
   }
 
+  async ensureSchema(): Promise<void> {
+    // Tables are created eagerly in the constructor.
+  }
   async run(sql: string, ...params: unknown[]): Promise<void> {
     this.db.prepare(sql).run(...params)
   }
@@ -73,6 +77,25 @@ class PostgresDriver implements DbDriver {
     // Loaded lazily so SQLite-only deployments don't require pg.
     const { Pool } = require('pg')
     this.pool = new Pool({ connectionString })
+  }
+  async ensureSchema(): Promise<void> {
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS dsh_storage_units (
+      name TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      has_global INTEGER NOT NULL,
+      tables_json TEXT NOT NULL
+    )`)
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS dsh_storage_records (
+      unit TEXT NOT NULL,
+      table_name TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value_json TEXT NOT NULL,
+      PRIMARY KEY (unit, table_name, key)
+    )`)
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS dsh_storage_global (
+      unit TEXT PRIMARY KEY,
+      value_json TEXT NOT NULL
+    )`)
   }
   async run(sql: string, ...params: unknown[]): Promise<void> {
     await this.pool.query(sql, params)
@@ -101,6 +124,7 @@ export class DbStorageBackend implements StorageBackend {
   }
 
   private async ensureUnit(descriptor: KvUnitDescriptor): Promise<void> {
+    await this.driver.ensureSchema?.()
     const existing = await this.driver.get<{ version: number }>(
       'SELECT version FROM dsh_storage_units WHERE name = ?',
       descriptor.name,
