@@ -1,0 +1,50 @@
+{
+  "name": "@visecy/dsh-web-auth",
+  "version": "0.1.22",
+  "description": "Password gate for the DeepSeek Harness Web shell: a webserver fork with the request-gate extension plus a login-page auth plugin. Drop-in replacement for @deepseek-ai/dsh-host-webserver when you need authentication in front of the GUI.",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/webserver.js",
+  "types": "lib/webserver.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/webserver.d.ts",
+      "default": "./lib/webserver.js"
+    },
+    "./web-auth": {
+      "types": "./lib/web-auth.d.ts",
+      "default": "./lib/web-auth.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.0.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.0",
+    "@types/node": "^26.2.0",
+    "typescript": "^5.0.0"
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-pkg.mjs dsh-web-auth lib/webserver.js",
+    "prepublishOnly": "node ../../scripts/build-pkg.mjs dsh-web-auth lib/webserver.js"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "plugin",
+    "auth",
+    "password",
+    "web"
+  ]
+}

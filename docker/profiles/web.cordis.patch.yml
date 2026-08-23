@@ -16,7 +16,7 @@
   disabled: true
 - insert:
     - id: webserver-gated
-      name: 'dsh-web-auth'
+      name: '@visecy/dsh-web-auth'
       inject: [webStartup]
       config:
         host: '0.0.0.0'

@@ -78,6 +78,7 @@ RUN mkdir -p /opt/dsh-home /home/node && chown -R node:node /opt/dsh-home /home/
 COPY packages/session-persistence-rdb /opt/dsh-home/plugins/session-persistence-rdb
 COPY packages/storage-db /opt/dsh-home/plugins/storage-db
 COPY packages/platform-domain /opt/dsh-home/plugins/platform-domain
+COPY vendor/dsh-web-auth /opt/dsh-home/plugins/dsh-web-auth
 
 USER node
 RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
@@ -91,10 +92,10 @@ RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
        file:/opt/dsh-home/plugins/session-persistence-rdb \
        file:/opt/dsh-home/plugins/storage-db \
        file:/opt/dsh-home/plugins/platform-domain \
+       file:/opt/dsh-home/plugins/dsh-web-auth \
        @deepseek-ai/dsh-storage@${DSH_VERSION} \
        @deepseek-ai/dsh-storage-domain@${DSH_VERSION} \
        @deepseek-ai/dsh-session-persistence@${DSH_VERSION} \
-       dsh-web-auth@0.1.0 \
        @kubernetes/client-node \
   && pnpm --dir /opt/dsh-home/profiles/headless --store-dir /tmp/pnpm-store add -w \
        @visecy/dsh-fs-k8s@${PLUGIN_VERSION:-latest} \
@@ -107,10 +108,6 @@ RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
        @deepseek-ai/dsh-storage-domain@${DSH_VERSION} \
        @deepseek-ai/dsh-session-persistence@${DSH_VERSION} \
        @kubernetes/client-node
-
-COPY scripts/patch-web-auth.mjs /usr/local/lib/node_modules/patch-web-auth.mjs
-RUN node /usr/local/lib/node_modules/patch-web-auth.mjs \
-      /opt/dsh-home/profiles/web/node_modules/dsh-web-auth/lib/webserver.js
 
 COPY docker/profiles/web.cordis.patch.yml /opt/dsh-home/profiles/web/cordis.patch.yml
 COPY docker/profiles/headless.cordis.patch.yml /opt/dsh-home/profiles/headless/cordis.patch.yml
