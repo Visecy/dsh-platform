@@ -164,14 +164,22 @@ function createDriver(config) {
   return new PostgresDriver(config.connectionString);
 }
 function apply(ctx, config) {
-  const backend = new DbStorageBackend(createDriver(config));
   const storage = ctx.get("storage");
-  const disposer = storage.backend.register(config.type, backend);
+  let backend;
+  let created = false;
+  if (storage.backend.names().includes(config.type)) {
+    backend = storage.backend.get(config.type);
+  } else {
+    backend = new DbStorageBackend(createDriver(config));
+    storage.backend.register(config.type, backend);
+    created = true;
+  }
   ctx.provide(storageBackendServiceKey(config.type), backend);
-  ctx.effect(async () => {
-    disposer();
-    await backend.close();
-  }, "@visecy/dsh-storage-db");
+  if (created) {
+    ctx.effect(async () => {
+      await backend.close();
+    }, "@visecy/dsh-storage-db");
+  }
 }
 export {
   DbStorageBackend,
