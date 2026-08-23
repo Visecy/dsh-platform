@@ -77,6 +77,7 @@ RUN mkdir -p /opt/dsh-home /home/node && chown -R node:node /opt/dsh-home /home/
 # Vendored platform DB/session-storage packages (private monorepo code).
 COPY packages/session-persistence-rdb /opt/dsh-home/plugins/session-persistence-rdb
 COPY packages/storage-db /opt/dsh-home/plugins/storage-db
+COPY packages/platform-domain /opt/dsh-home/plugins/platform-domain
 
 USER node
 RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
@@ -89,6 +90,7 @@ RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
        @visecy/dsh-workspace-picker@${PLUGIN_VERSION:-latest} \
        file:/opt/dsh-home/plugins/session-persistence-rdb \
        file:/opt/dsh-home/plugins/storage-db \
+       file:/opt/dsh-home/plugins/platform-domain \
        @deepseek-ai/dsh-storage@${DSH_VERSION} \
        @deepseek-ai/dsh-storage-domain@${DSH_VERSION} \
        @deepseek-ai/dsh-session-persistence@${DSH_VERSION} \
@@ -100,6 +102,7 @@ RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
        @visecy/dsh-workspace-k8s@${PLUGIN_VERSION:-latest} \
        file:/opt/dsh-home/plugins/session-persistence-rdb \
        file:/opt/dsh-home/plugins/storage-db \
+       file:/opt/dsh-home/plugins/platform-domain \
        @deepseek-ai/dsh-storage@${DSH_VERSION} \
        @deepseek-ai/dsh-storage-domain@${DSH_VERSION} \
        @deepseek-ai/dsh-session-persistence@${DSH_VERSION} \

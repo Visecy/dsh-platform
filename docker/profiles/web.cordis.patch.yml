@@ -48,6 +48,9 @@
       config:
         type: sqlite
         path: !!js dshHomePath('storage', 'db.sqlite')
+    - id: platform-domain
+      name: '@visecy/dsh-platform-domain'
+      config: {}
     - id: fs-k8s
       name: '@visecy/dsh-fs-k8s'
       config:
