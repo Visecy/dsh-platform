@@ -58,7 +58,7 @@ var credentialsDomain = defineDomain({
 });
 async function apply(ctx, config = {}) {
   const backendName = config.backend ?? "sqlite";
-  await ctx.inject([storageBackendServiceKey(backendName)], async () => {
+  await ctx.inject(["storage", storageBackendServiceKey(backendName)], async () => {
     const facility = new DomainFacility(ctx, { backend: backendName });
     const workspaces = await facility.open(workspacesDomain);
     const users = await facility.open(usersDomain);

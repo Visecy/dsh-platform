@@ -106,7 +106,7 @@ export interface PlatformDomains {
 export async function apply(ctx: Context, config: { backend?: string } = {}): Promise<void> {
   const backendName = config.backend ?? 'sqlite'
   // Wait for our DB backend to register before opening domain units.
-  await ctx.inject([storageBackendServiceKey(backendName)], async () => {
+  await ctx.inject(['storage', storageBackendServiceKey(backendName)], async () => {
     // Use our own DomainFacility over the DB backend instead of the base
     // storage-domain plugin (which is routed to json by the default profile).
     const facility = new DomainFacility(ctx, { backend: backendName })
