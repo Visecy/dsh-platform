@@ -95,15 +95,20 @@ class PostgresDriver implements DbDriver {
       value_json TEXT NOT NULL
     )`)
   }
+  private pgify(sql: string): string {
+    let i = 0
+    return sql.replace(/\?/g, () => `$${++i}`)
+  }
+
   async run(sql: string, ...params: unknown[]): Promise<void> {
-    await this.pool.query(sql, params)
+    await this.pool.query(this.pgify(sql), params)
   }
   async get<T = any>(sql: string, ...params: unknown[]): Promise<T | undefined> {
-    const res = await this.pool.query(sql, params)
+    const res = await this.pool.query(this.pgify(sql), params)
     return res.rows[0] as T | undefined
   }
   async all<T = any>(sql: string, ...params: unknown[]): Promise<T[]> {
-    const res = await this.pool.query(sql, params)
+    const res = await this.pool.query(this.pgify(sql), params)
     return res.rows as T[]
   }
   async close(): Promise<void> {

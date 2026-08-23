@@ -70,15 +70,19 @@ var PostgresDriver = class {
       value_json TEXT NOT NULL
     )`);
   }
+  pgify(sql) {
+    let i = 0;
+    return sql.replace(/\?/g, () => `$${++i}`);
+  }
   async run(sql, ...params) {
-    await this.pool.query(sql, params);
+    await this.pool.query(this.pgify(sql), params);
   }
   async get(sql, ...params) {
-    const res = await this.pool.query(sql, params);
+    const res = await this.pool.query(this.pgify(sql), params);
     return res.rows[0];
   }
   async all(sql, ...params) {
-    const res = await this.pool.query(sql, params);
+    const res = await this.pool.query(this.pgify(sql), params);
     return res.rows;
   }
   async close() {
