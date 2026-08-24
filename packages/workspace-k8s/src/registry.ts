@@ -12,6 +12,8 @@ export interface RegistryWorkspace {
   workspaceId: string
   path: string
   title?: string
+  /** Opaque id used by the official registry API (may differ from the platform id). */
+  internalId?: string
 }
 
 export interface WorkspaceRegistry {
@@ -75,6 +77,11 @@ export class ApiProxyWorkspaceRegistry implements WorkspaceRegistry {
         workspaceId: idOf(item, this.hostRoot),
         path,
         title: item?.title,
+        internalId: typeof item?.workspaceId === 'string' && item.workspaceId !== ''
+          ? item.workspaceId
+          : typeof item?.id === 'string' && item.id !== ''
+            ? item.id
+            : undefined,
       }
     }).filter((ws: RegistryWorkspace) => ws.workspaceId !== '')
   }
@@ -92,7 +99,14 @@ export class ApiProxyWorkspaceRegistry implements WorkspaceRegistry {
   }
 
   async delete(workspaceId: string): Promise<void> {
-    await this.call('delete', { workspaceId })
+    // The official registry keys records by its own opaque internal id. The
+    // platform id is the path segment (/workspaces/<id>), so resolve the
+    // record before deleting; a direct fallback supports non-platform records.
+    let internalId = workspaceId
+    const rows = await this.list().catch(() => [])
+    const row = rows.find((r) => r.workspaceId === workspaceId || r.path.endsWith('/' + workspaceId))
+    if (row?.internalId !== undefined) internalId = row.internalId
+    await this.call('delete', { workspaceId: internalId })
   }
 
   private async call(method: string, payload: unknown): Promise<unknown> {

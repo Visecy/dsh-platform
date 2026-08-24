@@ -19,7 +19,7 @@ describe('ApiProxyWorkspaceRegistry', () => {
         },
       }),
     }), '/workspaces')
-    expect(await reg.list()).toEqual([{ workspaceId: 'ws-a', path: '/workspaces/ws-a', title: 'A' }])
+    expect(await reg.list()).toEqual([{ workspaceId: 'ws-a', path: '/workspaces/ws-a', title: 'A', internalId: 'ws-a' }])
   })
 
   it('uses the stable path segment for platform workspace ids, not the official opaque UUID', async () => {
@@ -35,7 +35,7 @@ describe('ApiProxyWorkspaceRegistry', () => {
         },
       }),
     }), '/workspaces')
-    expect(await reg.list()).toEqual([{ workspaceId: 'ws-abc', path: '/workspaces/ws-abc', title: 'ABC' }])
+    expect(await reg.list()).toEqual([{ workspaceId: 'ws-abc', path: '/workspaces/ws-abc', title: 'ABC', internalId: 'opaque-uuid' }])
   })
 
   it('creates a workspace and normalizes the workspace payload', async () => {
