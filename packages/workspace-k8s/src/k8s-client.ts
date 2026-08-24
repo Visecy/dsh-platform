@@ -57,6 +57,11 @@ export class K8sPodController implements PodController {
     return this.safeName(workspaceId)
   }
 
+  /** Pod-side path that is also the logical host path /workspaces/<id>. */
+  workspacePath(workspaceId: string): string {
+    return `/workspaces/${this.podName(workspaceId)}`
+  }
+
   svcName(workspaceId: string): string {
     return this.podName(workspaceId) + '-svc'
   }
@@ -89,12 +94,15 @@ export class K8sPodController implements PodController {
               allowPrivilegeEscalation: false,
               capabilities: { drop: ['ALL'] },
             },
-            env: [{ name: 'DAEMON_ROOT', value: '/workspace' }, { name: 'DAEMON_PORT', value: String(spec.daemonPort) }],
+            env: [
+              { name: 'DAEMON_ROOT', value: this.workspacePath(spec.workspaceId) },
+              { name: 'DAEMON_PORT', value: String(spec.daemonPort) },
+            ],
             resources: spec.resources !== undefined
               ? { requests: spec.resources, limits: spec.resources }
               : undefined,
             volumeMounts: [
-              { name: 'workspace', mountPath: '/workspace' },
+              { name: 'workspace', mountPath: this.workspacePath(spec.workspaceId) },
             ],
           },
         ],

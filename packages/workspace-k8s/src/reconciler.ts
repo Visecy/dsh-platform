@@ -10,6 +10,7 @@
  * a transient registry-list failure or empty/lost registry must never be
  * interpreted as mass deletion.
  */
+import { mkdir } from 'node:fs/promises'
 import type { PodController } from './k8s-client.ts'
 import type { WorkspaceRegistry } from './registry.ts'
 
@@ -38,12 +39,24 @@ export class WorkspaceReconciler {
     ])
 
     const currentKnown = new Set(registered.map((ws) => ws.workspaceId))
-    const resources = new Set<string>([...pods, ...pvcs.map(pvcToWorkspaceId)])
+    // Only resources backed by a PVC are real workspaces. Pod-only resources
+    // are stale prototypes/orphans and must NOT be auto-adopted; they are
+    // surfaced for manual cleanup instead.
+    const pvcIds = new Set(pvcs.map(pvcToWorkspaceId))
+    const resources = new Set(pvcIds)
+    for (const pod of pods) {
+      if (pvcIds.has(pod)) resources.add(pod)
+    }
 
     // Bridge missing k8s resources back into the official registry.
     for (const id of resources) {
       if (currentKnown.has(id)) continue
       try {
+        // workspace.create validates with fs.realpath, so a missing host-side
+        // anchor would make a legitimately-existing pod/PVC fail forever.
+        // The anchor is best-effort: if the control plane cannot create it,
+        // registry.create will fail and the reconciler will retry later.
+        await mkdir(`${hostRoot}/${id}`, { recursive: true }).catch(() => undefined)
         await registry.create(`${hostRoot}/${id}`)
         currentKnown.add(id)
       } catch {

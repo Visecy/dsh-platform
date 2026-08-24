@@ -8,6 +8,9 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import * as k8s from '@kubernetes/client-node'
 import { K8sPodController, type PodController, type WorkspacePodSpec } from './k8s-client.ts'
+import { registerWorkspaceApi } from './api.ts'
+import { registerWorkspaceUi } from './ui.ts'
+import { WorkspaceManagement } from './management.ts'
 import { ApiProxyWorkspaceRegistry } from './registry.ts'
 import { WorkspaceReconciler } from './reconciler.ts'
 import { wireWorkspaceLifecycle } from './wire.ts'
@@ -138,7 +141,7 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
-  const { resolveEndpoint, commandTracker, deleteWorkspace } = wireWorkspaceLifecycle(ctx, {
+  const { resolveEndpoint, commandTracker, deleteWorkspace, status: workspaceStatus } = wireWorkspaceLifecycle(ctx, {
     lifecycle: {
       controller: runtime.podController,
       namespace: config.namespace,
@@ -154,6 +157,7 @@ export function apply(ctx: Context, config: Config): void {
   })
   ctx.provide('workspaceEndpointResolver', { resolve: resolveEndpoint })
   ctx.provide('workspaceCommandTracker', commandTracker)
+  ctx.provide('workspaceStatus', workspaceStatus)
 
   // Official dsh registry bridge + reconciler: k8s resources are authoritative;
   // the registry is only what the frontend/session.create consume.
@@ -168,13 +172,29 @@ export function apply(ctx: Context, config: Config): void {
     hostRoot: '/workspaces',
   })
   ctx.provide('workspaceReconciler', { reconcile: () => reconciler.reconcile() })
+  const deleteWorkspaceAsync = async (workspaceId: string): Promise<void> => {
+    await registry.delete(workspaceId).catch(() => undefined)
+    deleteWorkspace(workspaceId)
+  }
   ctx.provide('workspaceDeleter', {
-    delete: async (workspaceId: string): Promise<void> => {
-      await registry.delete(workspaceId).catch(() => undefined)
-      deleteWorkspace(workspaceId)
-    },
+    delete: deleteWorkspaceAsync,
   })
-  void reconciler.reconcile()
+
+  const management = new WorkspaceManagement({
+    controller: runtime.podController,
+    registry,
+    status: workspaceStatus,
+    namespace: config.namespace,
+    hostRoot: '/workspaces',
+    deleteWorkspace: deleteWorkspaceAsync,
+  })
+  ctx.provide('workspaceManagement', management)
+
+  const webServer = ctx.get('webServer') as { register(route: { kind: 'prefix' | 'exact'; path: string; handler: (req: unknown, res: unknown) => unknown }): () => void } | undefined
+  if (webServer !== undefined) {
+    ctx.effect(() => registerWorkspaceApi(webServer, management), 'dsh-workspace-k8s: /workspaces/api routes')
+    ctx.effect(() => registerWorkspaceUi(webServer), 'dsh-workspace-k8s: /workspaces/ui page')
+  }
 
   const intervalMs = config.reconcileIntervalMs ?? 60_000
   if (intervalMs > 0) {

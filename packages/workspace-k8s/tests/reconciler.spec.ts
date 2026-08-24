@@ -38,13 +38,23 @@ class FakeRegistry implements WorkspaceRegistry {
 }
 
 describe('WorkspaceReconciler', () => {
-  it('registers pods that are missing from the official registry', async () => {
+  it('registers running workspaces (pod + PVC) that are missing from the official registry', async () => {
     const ctrl = new FakeController()
     ctrl.pods.add('ws-a')
+    ctrl.pvcs.add('ws-a-data')
     const reg = new FakeRegistry()
     const r = new WorkspaceReconciler({ controller: ctrl, registry: reg, namespace: 'dsh', hostRoot: '/workspaces' })
     await r.reconcile()
     expect(reg.created).toEqual(['ws-a'])
+  })
+
+  it('does not auto-adopt pod-only orphan resources', async () => {
+    const ctrl = new FakeController()
+    ctrl.pods.add('ws-orphan')
+    const reg = new FakeRegistry()
+    const r = new WorkspaceReconciler({ controller: ctrl, registry: reg, namespace: 'dsh', hostRoot: '/workspaces' })
+    await r.reconcile()
+    expect(reg.created).toEqual([])
   })
 
   it('registers sleeping workspaces from PVCs', async () => {
@@ -83,5 +93,23 @@ describe('WorkspaceReconciler', () => {
     await r.reconcile()
     expect(deleted).toEqual([])
     expect(reg.created).toEqual(['ws-e'])
+  })
+
+  it('does not reclaim pod-only orphan resources even after repeated passes', async () => {
+    const ctrl = new FakeController()
+    ctrl.pods.add('ws-orphan')
+    const reg = new FakeRegistry([])
+    const deleted: string[] = []
+    const r = new WorkspaceReconciler({
+      controller: ctrl,
+      registry: reg,
+      namespace: 'dsh',
+      hostRoot: '/workspaces',
+      onDelete: (id) => deleted.push(id),
+    })
+    await r.reconcile()
+    await r.reconcile()
+    expect(deleted).toEqual([])
+    expect(reg.created).toEqual([])
   })
 })

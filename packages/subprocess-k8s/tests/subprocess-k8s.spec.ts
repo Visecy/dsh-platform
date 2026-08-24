@@ -68,6 +68,11 @@ describe('SubprocessK8s', () => {
     expect(ended).toEqual(['ws-track'])
   })
 
+  it('rejects an invalid cwd with an actionable daemon error, not exit -1', async () => {
+    const h = sub.spawn(spec({ cwd: '/definitely/not/a/real/dir', argv: ['echo', 'x'] }))
+    await expect(h.done).rejects.toThrow(/cwd does not exist|cwd is not a directory/)
+  })
+
   it('spawn with stdin data feeds the command', async () => {
     const h = sub.spawn(spec({ argv: ['cat'], stdio: { stdin: { data: 'hello-cat' }, stdout: { maxBytes: 4096 }, stderr: { maxBytes: 4096 } } }))
     const outcome = await h.done

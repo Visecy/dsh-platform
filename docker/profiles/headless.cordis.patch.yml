@@ -36,11 +36,12 @@
       config:
         daemonEndpoint: !!js (process.env.WS_DAEMON_ENDPOINT ?? 'http://127.0.0.1:4390')
         hostRoot: '/workspaces'
-        podRoot: '/workspace'
+        podRoot: '/workspaces'
     - id: subprocess-k8s
       name: '@visecy/dsh-subprocess-k8s'
       config:
         daemonEndpoint: !!js (process.env.WS_DAEMON_ENDPOINT ?? 'http://127.0.0.1:4390')
+        podRoot: '/workspaces'
     - id: session-persistence-rdb
       name: '@visecy/dsh-session-persistence-rdb'
       config:

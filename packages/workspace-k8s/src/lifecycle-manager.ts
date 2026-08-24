@@ -65,6 +65,18 @@ export class WorkspaceLifecycleManager {
     return this.states.get(workspaceId)
   }
 
+  /** Full snapshot for status UIs/APIs. */
+  snapshot(workspaceId: string): WorkspaceState | undefined {
+    const state = this.states.get(workspaceId)
+    if (state === undefined) return undefined
+    return { ...state }
+  }
+
+  /** All tracked workspace snapshots. */
+  allStates(): WorkspaceState[] {
+    return [...this.states.values()].map((s) => ({ ...s }))
+  }
+
   /** Session/turn activity from the SessionTracker. */
   handleSessionEvent(workspaceId: string, event: WorkspaceEvent): void {
     this.handle(workspaceId, event)

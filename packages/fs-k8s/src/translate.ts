@@ -1,6 +1,7 @@
 /**
  * Path translation between the host-side workspace identifier
- * (/workspaces/<workspaceId>) and the pod-side workspace root (/workspace).
+ * (/workspaces/<workspaceId>) and the pod-side workspace root. The default
+ * podRoot is '/workspaces', making host and pod views identical.
  * The host side never holds workspace content — cwd is a logical key.
  */
 import { posix } from 'node:path'

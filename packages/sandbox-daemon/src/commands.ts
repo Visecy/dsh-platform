@@ -3,7 +3,7 @@
  * framed output files (offset-readable), stdin plumbing, kill ladder,
  * optional deadlines, and per-command status published to disk.
  */
-import { mkdir, writeFile, appendFile, readFile, rm, readdir } from 'node:fs/promises'
+import { mkdir, writeFile, appendFile, readFile, rm, readdir, stat } from 'node:fs/promises'
 import { createWriteStream, type WriteStream } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -56,6 +56,15 @@ export class CommandRegistry {
 
   async run(spec: CommandSpec): Promise<CommandHandleInfo> {
     if (!this.accepting) throw new Error('command acceptance disabled (draining)')
+    if (spec.cwd !== '') {
+      let st: Awaited<ReturnType<typeof stat>>
+      try {
+        st = await stat(spec.cwd)
+      } catch {
+        throw new Error(`cwd does not exist: ${spec.cwd}`)
+      }
+      if (!st.isDirectory()) throw new Error(`cwd is not a directory: ${spec.cwd}`)
+    }
     const cmdId = randomUUID()
     const dir = join(this.opts.runtimeRoot, 'commands', cmdId)
     await mkdir(dir, { recursive: true })

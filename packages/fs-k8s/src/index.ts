@@ -32,7 +32,7 @@ export interface Config {
   daemonEndpoint: string
   /** Host-side workspace identifier root, e.g. /workspaces/<id>. */
   hostRoot: string
-  /** Pod-side workspace root, default /workspace. */
+  /** Pod-side workspace root. Default '/workspaces' so host and pod paths match. */
   podRoot?: string
   /** Per-call endpoint resolution by workspace id (ensure + getEndpoint). */
   resolveEndpoint?: (workspaceId: string) => Promise<string> | string
@@ -58,7 +58,7 @@ export class FsK8s extends FileSystem {
   constructor(ctx: Context, config: Config) {
     super(ctx)
     this.client = new DaemonFilesClient(config.daemonEndpoint)
-    this.translate = new PathTranslator(config.hostRoot, config.podRoot ?? '/workspace')
+    this.translate = new PathTranslator(config.hostRoot, config.podRoot ?? '/workspaces')
     this.resolver = config.resolveEndpoint
   }
 

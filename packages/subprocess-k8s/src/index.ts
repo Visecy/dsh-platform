@@ -25,7 +25,7 @@ export interface Config {
   resolveEndpoint?: (workspaceId: string) => Promise<string> | string
   /** Host-side workspace identifier root, e.g. /workspaces/<id>. */
   hostRoot?: string
-  /** Pod-side workspace root, default /workspace. */
+  /** Pod-side workspace root. Default '/workspaces' so host and pod paths match. */
   podRoot?: string
   /** Live command counter for the workspace lifecycle state machine. */
   commandTracker?: CommandActivityTracker
@@ -44,12 +44,12 @@ export class SubprocessK8s extends SubprocessRuntime {
     this.resolver = config.resolveEndpoint
     this.commandTracker = config.commandTracker
     this.hostRoot = config.hostRoot ?? '/workspaces'
-    this.podRoot = config.podRoot ?? '/workspace'
+    this.podRoot = config.podRoot ?? '/workspaces'
   }
 
   /** The workspace id from a host path like /workspaces/<id>/... */
   private hostRoot = '/workspaces'
-  private podRoot = '/workspace'
+  private podRoot = '/workspaces'
 
   /** The workspace id from a host path like /workspaces/<id>/... */
   private workspaceOf(cwd: string): string | undefined {
@@ -63,7 +63,11 @@ export class SubprocessK8s extends SubprocessRuntime {
     const hostRoot = this.hostRoot
     if (cwd === hostRoot) return this.podRoot
     if (!cwd.startsWith(hostRoot + '/')) return cwd
-    // strip the workspace id segment: /workspaces/<id>/x -> /workspace/x
+    // When podRoot equals hostRoot the execution world already uses the same
+    // path spelling, so keep the path unchanged (no virtual layer).
+    if (this.podRoot === hostRoot) return cwd
+    // Custom podRoot layout (used by tests): strip the workspace id segment:
+    // /workspaces/<id>/x -> podRoot/x.
     const rest = cwd.slice(hostRoot.length + 1)
     const seg = rest.split('/')
     seg.shift()
@@ -121,6 +125,7 @@ class RemoteHandle implements SubprocessHandle {
   readonly done: Promise<SubprocessOutcome>
   private cmdId: string
   private resolveDone!: (o: SubprocessOutcome) => void
+  private rejectDone!: (e: Error) => void
   private pollers: Array<{ stop(): void }> = []
   private terminated = false
   private counted = false
@@ -137,8 +142,9 @@ class RemoteHandle implements SubprocessHandle {
     this.client = new DaemonSubprocessClient('http://placeholder.invalid:1')
     this.pid = -1
     this.cmdId = ''
-    this.done = new Promise((res) => {
+    this.done = new Promise((res, rej) => {
       this.resolveDone = res
+      this.rejectDone = rej
     })
 
     if (spec.stdio.stdin === 'pipe') {
@@ -228,10 +234,13 @@ class RemoteHandle implements SubprocessHandle {
       for (const p of this.pollers) p.stop()
       this.finish()
       this.resolveDone(outcome)
-    } catch {
+    } catch (e) {
       for (const p of this.pollers) p.stop()
       this.finish()
-      this.resolveDone({ exitCode: -1, signal: null })
+      // Spawn-level failures belong on the done promise (the seam contract);
+      // resolving exit code -1 loses the actionable daemon message (bad cwd,
+      // unknown command, daemon unreachable).
+      this.rejectDone(e instanceof Error ? e : new Error(String(e)))
     }
   }
 

@@ -8,6 +8,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { SessionTracker } from './session-tracker.ts'
 import { WorkspaceLifecycleManager, type LifecycleOptions } from './lifecycle-manager.ts'
+import type { WorkspaceState } from './state-machine.ts'
 import type { WorkspaceRuntime } from './index.ts'
 
 export interface WireOptions {
@@ -46,10 +47,16 @@ interface SessionEventLike {
  * - resolveEndpoint(workspaceId) = runtime.ensure + getEndpoint so fs/
  *   subprocess providers reach a ready pod, creating it on first use.
  */
+export interface WorkspaceStatusService {
+  get(workspaceId: string): WorkspaceState | undefined
+  list(): WorkspaceState[]
+}
+
 export function wireWorkspaceLifecycle(ctx: Context & EventBus, opts: WireOptions): {
   resolveEndpoint: (workspaceId: string) => Promise<string>
   commandTracker: CommandActivityTracker
   deleteWorkspace: (workspaceId: string) => void
+  status: WorkspaceStatusService
 } {
   const manager = new WorkspaceLifecycleManager(opts.lifecycle)
   const tracker = new SessionTracker(
@@ -90,5 +97,9 @@ export function wireWorkspaceLifecycle(ctx: Context & EventBus, opts: WireOption
       commandEnded: (workspaceId) => manager.commandEnded(workspaceId),
     },
     deleteWorkspace: (workspaceId) => manager.delete(workspaceId),
+    status: {
+      get: (workspaceId) => manager.snapshot(workspaceId),
+      list: () => manager.allStates(),
+    },
   }
 }
