@@ -187,6 +187,7 @@ export function apply(ctx: Context, config: Config): void {
     namespace: config.namespace,
     hostRoot: '/workspaces',
     deleteWorkspace: deleteWorkspaceAsync,
+    ensureWorkspace: (workspaceId) => runtime.ensure(workspaceId),
   })
   ctx.provide('workspaceManagement', management)
 

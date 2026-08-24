@@ -56,6 +56,7 @@ describe('WorkspaceManagement', () => {
       namespace: 'dsh',
       hostRoot: root,
       deleteWorkspace: async (id) => { await ctrl.deletePod('dsh', id) },
+      ensureWorkspace: async (id) => { ctrl.pods.add(id); ctrl.pvcs.add(id + '-data'); return 'endpoint' },
     })
   })
 
@@ -87,6 +88,14 @@ describe('WorkspaceManagement', () => {
     await mgr.delete('ws-del')
     expect(reg.deleted).toContain('ws-del')
     expect(ctrl.deletedPods).toContain('ws-del')
+  })
+
+  it('ensure wakes a sleeping workspace and populates pod/PVC state', async () => {
+    reg.rows.push({ workspaceId: 'ws-sleep2', path: `${root}/ws-sleep2` })
+    const entry = await mgr.ensure('ws-sleep2')
+    expect(entry.hasPod).toBe(true)
+    expect(entry.hasPvc).toBe(true)
+    expect(ctrl.pods.has('ws-sleep2')).toBe(true)
   })
 
   it('cleanupOrphan deletes only the pod/service, not registry', async () => {

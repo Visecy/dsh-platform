@@ -33,12 +33,15 @@ export interface WorkspaceManagementOptions {
   hostRoot: string
   /** Delete a fully-managed workspace (registry + pod + PVC). */
   deleteWorkspace: (workspaceId: string) => Promise<void> | void
+  /** Ensure the execution pod is running (wake a sleeping workspace). */
+  ensureWorkspace: (workspaceId: string) => Promise<string>
 }
 
 export interface WorkspaceManagementService {
   create(name: string): Promise<WorkspaceCatalogEntry>
   list(): Promise<WorkspaceCatalogEntry[]>
   get(workspaceId: string): Promise<WorkspaceCatalogEntry | undefined>
+  ensure(workspaceId: string): Promise<WorkspaceCatalogEntry>
   delete(workspaceId: string): Promise<void>
   cleanupOrphan(workspaceId: string): Promise<void>
 }
@@ -98,6 +101,13 @@ export class WorkspaceManagement implements WorkspaceManagementService {
   async get(workspaceId: string): Promise<WorkspaceCatalogEntry | undefined> {
     const rows = await this.list()
     return rows.find((ws) => ws.workspaceId === workspaceId)
+  }
+
+  async ensure(workspaceId: string): Promise<WorkspaceCatalogEntry> {
+    await this.opts.ensureWorkspace(workspaceId)
+    const entry = await this.get(workspaceId)
+    if (entry !== undefined) return entry
+    return this.entry({ workspaceId, path: `${this.opts.hostRoot}/${workspaceId}` }, true, true)
   }
 
   async delete(workspaceId: string): Promise<void> {
