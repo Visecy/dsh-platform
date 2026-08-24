@@ -40,9 +40,18 @@ function unwrap(raw: unknown): any {
 }
 
 function idOf(workspace: any, hostRoot: string): string {
+  // Platform workspaces are identified by the stable path segment
+  // (/workspaces/<id>). The official registry may attach an opaque internal
+  // workspaceId (UUID); we must never let that replace the id that is also
+  // the pod name, cwd segment, and PVC name.
+  const path: unknown = workspace?.path ?? workspace?.cwd
+  if (typeof path === 'string' && path.startsWith(hostRoot + '/')) {
+    const rest = path.slice(hostRoot.length + 1)
+    const id = rest.split('/')[0]
+    if (id !== '') return id
+  }
   const raw = workspace?.workspaceId ?? workspace?.id ?? workspace?.key
   if (typeof raw === 'string' && raw !== '') return raw
-  const path: unknown = workspace?.path ?? workspace?.cwd
   if (typeof path !== 'string') return String(workspace?.name ?? '')
   const m = path.startsWith(hostRoot + '/') ? path.slice(hostRoot.length + 1) : path
   return m.split('/')[0]
