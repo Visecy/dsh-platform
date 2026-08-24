@@ -190,11 +190,15 @@ export function apply(ctx: Context, config: Config): void {
   })
   ctx.provide('workspaceManagement', management)
 
-  const webServer = ctx.get('webServer') as { register(route: { kind: 'prefix' | 'exact'; path: string; handler: (req: unknown, res: unknown) => unknown }): () => void } | undefined
-  if (webServer !== undefined) {
+  // Register routes only when the Web carrier is present. Using ctx.inject
+  // (rather than a load-time ctx.get) lets cordis defer this block until
+  // after the webserver service has actually been constructed.
+  ctx.inject(['webServer'], (webCtx) => {
+    const webServer = webCtx.get('webServer') as { register(route: { kind: 'prefix' | 'exact'; path: string; handler: (req: unknown, res: unknown) => unknown }): () => void } | undefined
+    if (webServer === undefined) return
     ctx.effect(() => registerWorkspaceApi(webServer, management), 'dsh-workspace-k8s: /workspaces/api routes')
     ctx.effect(() => registerWorkspaceUi(webServer), 'dsh-workspace-k8s: /workspaces/ui page')
-  }
+  })
 
   const intervalMs = config.reconcileIntervalMs ?? 60_000
   if (intervalMs > 0) {
