@@ -6,10 +6,15 @@
  */
 import { build } from 'esbuild'
 import { existsSync, mkdirSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const root = resolve(process.cwd(), 'packages/workspace-ui')
-if (printIfMissing(root)) process.exit(1)
+const here = dirname(fileURLToPath(import.meta.url))
+const root = resolve(here, '..', 'packages', 'workspace-ui')
+if (!existsSync(join(root, 'src/index.ts')) || !existsSync(join(root, 'src/client/index.tsx'))) {
+  console.error(`workspace-ui: source missing under ${root}`)
+  process.exit(1)
+}
 mkdirSync(join(root, 'lib'), { recursive: true })
 
 const external = [
@@ -64,18 +69,3 @@ await build({
 })
 
 console.log('built @visecy/dsh-workspace-ui -> lib/index.js + lib/client.js')
-
-function printIfMissing(dir) {
-  const missing = missingFile(dir)
-  if (missing) {
-    console.error(`workspace-ui: source missing: ${missing}`)
-    return true
-  }
-  return false
-}
-function missingFile(dir) {
-  for (const rel of ['src/index.ts', 'src/client/index.tsx']) {
-    if (!existsSync(join(dir, rel))) return rel
-  }
-  return undefined
-}
