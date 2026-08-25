@@ -26,8 +26,67 @@ __export(index_exports, {
 });
 module.exports = __toCommonJS(index_exports);
 
-// packages/workspace-k8s/src/client/WorkspaceBrowser.tsx
+// packages/workspace-k8s/src/client/NewWorkspaceDialog.tsx
 var import_react = require("react");
+function NewWorkspaceDialog(props) {
+  const { open, busy, onCancel, onError, createByName } = props;
+  const [name, setName] = (0, import_react.useState)("");
+  const [error, setError] = (0, import_react.useState)("");
+  (0, import_react.useEffect)(() => {
+    if (open) {
+      setName("");
+      setError("");
+    }
+  }, [open]);
+  if (!open) return null;
+  const submit = async () => {
+    const value = name.trim();
+    if (value === "") return;
+    setError("");
+    try {
+      await createByName(value);
+      onCancel();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      onError?.(message);
+    }
+  };
+  return (0, import_react.createElement)(
+    "div",
+    { className: "dsh-ws-modal-overlay", onClick: (e) => {
+      if (e.target === e.currentTarget) onCancel();
+    } },
+    (0, import_react.createElement)(
+      "div",
+      { className: "dsh-ws-modal" },
+      (0, import_react.createElement)("h3", null, "\u65B0\u5EFA\u5DE5\u4F5C\u533A"),
+      (0, import_react.createElement)("p", { className: "dsh-ws-modal-desc" }, "\u8F93\u5165\u5DE5\u4F5C\u533A\u540D\u79F0\u3002\u521B\u5EFA\u540E\u4F1A\u51FA\u73B0\u5728\u4FA7\u8FB9\u680F\u5DE5\u4F5C\u533A\u7EC4\u4E2D\u3002"),
+      (0, import_react.createElement)("label", { htmlFor: "dsh-ws-name" }, "\u5DE5\u4F5C\u533A\u540D\u79F0"),
+      (0, import_react.createElement)("input", {
+        id: "dsh-ws-name",
+        placeholder: "\u4F8B\u5982\uFF1Amy-project",
+        autoFocus: true,
+        value: name,
+        disabled: busy,
+        onChange: (e) => setName(e.target.value),
+        onKeyDown: (e) => {
+          if (e.key === "Enter") void submit();
+        }
+      }),
+      error === "" ? null : (0, import_react.createElement)("div", { className: "dsh-ws-modal-error" }, error),
+      (0, import_react.createElement)(
+        "div",
+        { className: "dsh-ws-modal-footer" },
+        (0, import_react.createElement)("button", { className: "dsh-ws-btn", onClick: onCancel, disabled: busy }, "\u53D6\u6D88"),
+        (0, import_react.createElement)("button", { className: "dsh-ws-btn primary", onClick: () => void submit(), disabled: busy }, "\u521B\u5EFA")
+      )
+    )
+  );
+}
+
+// packages/workspace-k8s/src/client/WorkspaceStatusDock.tsx
+var import_react2 = require("react");
 
 // packages/workspace-k8s/src/client/api.ts
 async function call(method, body = {}) {
@@ -49,210 +108,8 @@ var workspaceApi = {
   cleanup: (workspaceId) => call("cleanup", { workspaceId })
 };
 
-// packages/workspace-k8s/src/client/WorkspaceBrowser.tsx
-var phaseMap = {
-  running: "\u8FD0\u884C\u4E2D",
-  sleep: "\u4F11\u7720\u4E2D",
-  provision: "\u521B\u5EFA\u4E2D",
-  orphan: "\u5F85\u6E05\u7406",
-  deleted: "\u5DF2\u5220\u9664",
-  unknown: "\u672A\u77E5"
-};
-var visible = (rows) => rows.filter((ws) => ws.path.startsWith("/workspaces/") && ws.path !== "/workspaces");
-function WorkspaceBrowser(props) {
-  const { useWorkspaces } = props;
-  const native = useWorkspaces((s) => s.items);
-  const [rows, setRows] = (0, import_react.useState)([]);
-  const [name, setName] = (0, import_react.useState)("");
-  const [error, setError] = (0, import_react.useState)("");
-  const [loading, setLoading] = (0, import_react.useState)(true);
-  const refresh = async () => {
-    try {
-      setRows(visible(await workspaceApi.list()));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  };
-  (0, import_react.useEffect)(() => {
-    void refresh();
-  }, []);
-  const create = async () => {
-    if (!name.trim()) return;
-    setError("");
-    try {
-      await workspaceApi.create(name.trim());
-      setName("");
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-  return (0, import_react.createElement)(
-    "div",
-    { className: "dsh-workspace-ui" },
-    (0, import_react.createElement)("h3", null, "\u5DE5\u4F5C\u533A"),
-    (0, import_react.createElement)(
-      "div",
-      { className: "dsh-ws-create" },
-      (0, import_react.createElement)("input", {
-        value: name,
-        placeholder: "\u8F93\u5165\u65B0\u5DE5\u4F5C\u533A\u540D\u79F0",
-        onChange: (e) => setName(e.target.value),
-        onKeyDown: (e) => {
-          if (e.key === "Enter") void create();
-        }
-      }),
-      (0, import_react.createElement)("button", { onClick: () => void create() }, "\u521B\u5EFA")
-    ),
-    error === "" ? null : (0, import_react.createElement)("div", { className: "dsh-ws-error" }, error),
-    loading ? (0, import_react.createElement)("div", null, "\u52A0\u8F7D\u4E2D\u2026") : (0, import_react.createElement)(
-      "ul",
-      { className: "dsh-ws-list" },
-      rows.map((ws) => (0, import_react.createElement)(
-        "li",
-        { key: ws.workspaceId, className: "dsh-ws-item" },
-        (0, import_react.createElement)(
-          "div",
-          { className: "dsh-ws-head" },
-          (0, import_react.createElement)("span", { className: "dsh-ws-name" }, ws.workspaceId),
-          (0, import_react.createElement)("span", { className: `dsh-ws-badge ${ws.phase}` }, phaseMap[ws.phase] ?? ws.phase)
-        ),
-        (0, import_react.createElement)(
-          "div",
-          { className: "dsh-ws-actions" },
-          (0, import_react.createElement)("button", {
-            className: "dsh-ws-btn primary",
-            onClick: async () => {
-              try {
-                await workspaceApi.ensure(ws.workspaceId);
-                props.startSession?.(ws.nativeWorkspaceId ?? ws.workspaceId);
-              } catch (e) {
-                setError(e instanceof Error ? e.message : String(e));
-              }
-            }
-          }, ws.phase === "sleep" ? "\u5524\u9192\u5E76\u6253\u5F00" : "\u6253\u5F00"),
-          ws.phase === "orphan" ? (0, import_react.createElement)("button", {
-            className: "dsh-ws-btn",
-            onClick: async () => {
-              try {
-                await workspaceApi.cleanup(ws.workspaceId);
-                await refresh();
-              } catch (e) {
-                setError(e instanceof Error ? e.message : String(e));
-              }
-            }
-          }, "\u6E05\u7406") : null,
-          (0, import_react.createElement)("button", {
-            className: "dsh-ws-btn danger",
-            onClick: async () => {
-              if (!confirm(`\u5220\u9664\u5DE5\u4F5C\u533A ${ws.workspaceId}\uFF1F\u4F1A\u5220\u9664 Pod \u548C PVC\u3002`)) return;
-              try {
-                await workspaceApi.delete(ws.workspaceId);
-                await refresh();
-              } catch (e) {
-                setError(e instanceof Error ? e.message : String(e));
-              }
-            }
-          }, "\u5220\u9664")
-        ),
-        ws.hasPod || ws.hasPvc ? (0, import_react.createElement)(
-          "div",
-          { className: "dsh-ws-meta" },
-          ws.hasPod && ws.hasPvc ? "\u8FD0\u884C\u4E2D" : ws.hasPvc ? "\u6570\u636E\u5DF2\u4FDD\u7559" : "\u6B8B\u7559\u8D44\u6E90"
-        ) : null
-      ))
-    )
-  );
-}
-
-// packages/workspace-k8s/src/client/WorkspacePicker.tsx
-var import_react2 = require("react");
-var phaseMap2 = {
-  running: "\u8FD0\u884C\u4E2D",
-  sleep: "\u4F11\u7720\u4E2D",
-  provision: "\u521B\u5EFA\u4E2D",
-  orphan: "\u5F85\u6E05\u7406",
-  deleted: "\u5DF2\u5220\u9664",
-  unknown: "\u672A\u77E5"
-};
-var visible2 = (rows) => rows.filter((ws) => ws.path.startsWith("/workspaces/") && ws.path !== "/workspaces");
-function WorkspacePicker(props) {
-  const { useWorkspaces } = props;
-  const native = useWorkspaces((s) => s.items);
-  const [rows, setRows] = (0, import_react2.useState)([]);
-  const [name, setName] = (0, import_react2.useState)("");
-  const [error, setError] = (0, import_react2.useState)("");
-  const refresh = async () => {
-    try {
-      setRows(visible2(await workspaceApi.list()));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-  const create = async () => {
-    if (!name.trim()) return;
-    setError("");
-    try {
-      await workspaceApi.create(name.trim());
-      setName("");
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-  (0, import_react2.useEffect)(() => {
-    void refresh();
-  }, []);
-  return (0, import_react2.createElement)(
-    "div",
-    { className: "dsh-workspace-ui dsh-ws-hero" },
-    (0, import_react2.createElement)("h2", null, "\u9009\u62E9\u6216\u65B0\u5EFA\u5DE5\u4F5C\u533A"),
-    (0, import_react2.createElement)(
-      "div",
-      { className: "dsh-ws-create" },
-      (0, import_react2.createElement)("input", {
-        value: name,
-        placeholder: "\u8F93\u5165\u65B0\u5DE5\u4F5C\u533A\u540D\u79F0",
-        onChange: (e) => setName(e.target.value),
-        onKeyDown: (e) => {
-          if (e.key === "Enter") void create();
-        }
-      }),
-      (0, import_react2.createElement)("button", { onClick: () => void create() }, "\u521B\u5EFA")
-    ),
-    error === "" ? null : (0, import_react2.createElement)("div", { className: "dsh-ws-error" }, error),
-    (0, import_react2.createElement)(
-      "ul",
-      { className: "dsh-ws-list" },
-      rows.map((ws) => (0, import_react2.createElement)(
-        "li",
-        { key: ws.workspaceId, className: "dsh-ws-item" },
-        (0, import_react2.createElement)(
-          "div",
-          { className: "dsh-ws-head" },
-          (0, import_react2.createElement)("span", { className: "dsh-ws-name" }, ws.workspaceId),
-          (0, import_react2.createElement)("span", { className: `dsh-ws-badge ${ws.phase}` }, phaseMap2[ws.phase] ?? ws.phase)
-        ),
-        (0, import_react2.createElement)(
-          "div",
-          { className: "dsh-ws-actions" },
-          (0, import_react2.createElement)("button", {
-            className: "dsh-ws-btn primary",
-            onClick: () => {
-              props.startSession?.(ws.nativeWorkspaceId ?? ws.workspaceId);
-            }
-          }, ws.phase === "sleep" ? "\u5524\u9192\u5E76\u6253\u5F00" : "\u6253\u5F00")
-        )
-      ))
-    )
-  );
-}
-
 // packages/workspace-k8s/src/client/WorkspaceStatusDock.tsx
-var import_react3 = require("react");
-var phaseMap3 = {
+var phaseMap = {
   running: "\u8FD0\u884C\u4E2D",
   sleep: "\u4F11\u7720\u4E2D",
   provision: "\u521B\u5EFA\u4E2D",
@@ -262,9 +119,9 @@ var phaseMap3 = {
 };
 function WorkspaceStatusDock(props) {
   const { sessionId } = props;
-  const [row, setRow] = (0, import_react3.useState)();
-  const [error, setError] = (0, import_react3.useState)("");
-  (0, import_react3.useEffect)(() => {
+  const [row, setRow] = (0, import_react2.useState)();
+  const [error, setError] = (0, import_react2.useState)("");
+  (0, import_react2.useEffect)(() => {
     if (!sessionId) return;
     const w = props.useWorkspaces((s) => s.items.find((x) => x.sessionIds.includes(sessionId)));
     const nativeId = w?.workspaceId;
@@ -282,12 +139,12 @@ function WorkspaceStatusDock(props) {
     };
   }, [sessionId, props.useWorkspaces]);
   if (row === void 0) return null;
-  return (0, import_react3.createElement)(
+  return (0, import_react2.createElement)(
     "div",
     { className: "dsh-workspace-ui dsh-ws-status" },
-    (0, import_react3.createElement)("span", null, `\u5DE5\u4F5C\u533A\uFF1A${row.workspaceId}`),
-    (0, import_react3.createElement)("span", { className: `dsh-ws-badge ${row.phase}` }, phaseMap3[row.phase] ?? row.phase),
-    row.phase === "sleep" ? (0, import_react3.createElement)("button", {
+    (0, import_react2.createElement)("span", null, `\u5DE5\u4F5C\u533A\uFF1A${row.workspaceId}`),
+    (0, import_react2.createElement)("span", { className: `dsh-ws-badge ${row.phase}` }, phaseMap[row.phase] ?? row.phase),
+    row.phase === "sleep" ? (0, import_react2.createElement)("button", {
       className: "dsh-ws-btn primary",
       onClick: async () => {
         try {
@@ -297,12 +154,135 @@ function WorkspaceStatusDock(props) {
         }
       }
     }, "\u5524\u9192") : null,
-    error === "" ? null : (0, import_react3.createElement)("span", { className: "dsh-ws-error" }, error)
+    error === "" ? null : (0, import_react2.createElement)("span", { className: "dsh-ws-error" }, error)
+  );
+}
+
+// packages/workspace-k8s/src/client/WorkspaceFooterAction.tsx
+var import_react3 = require("react");
+var phaseMap2 = {
+  running: "\u8FD0\u884C\u4E2D",
+  sleep: "\u4F11\u7720\u4E2D",
+  provision: "\u521B\u5EFA\u4E2D",
+  orphan: "\u5F85\u6E05\u7406",
+  deleted: "\u5DF2\u5220\u9664",
+  unknown: "\u672A\u77E5"
+};
+function WorkspaceFooterAction(props) {
+  const [open, setOpen] = (0, import_react3.useState)(false);
+  const [rows, setRows] = (0, import_react3.useState)([]);
+  const [name, setName] = (0, import_react3.useState)("");
+  const [error, setError] = (0, import_react3.useState)("");
+  const refresh = async () => {
+    try {
+      setRows((await workspaceApi.list()).filter((ws) => ws.path.startsWith("/workspaces/") && ws.path !== "/workspaces"));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  (0, import_react3.useEffect)(() => {
+    if (open) {
+      void refresh();
+      setName("");
+      setError("");
+    }
+  }, [open]);
+  const create = async () => {
+    const value = name.trim();
+    if (!value) return;
+    setError("");
+    try {
+      if (props.createByName) await props.createByName(value);
+      else await workspaceApi.create(value);
+      setName("");
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return (0, import_react3.createElement)(
+    "div",
+    { className: "dsh-workspace-ui" },
+    (0, import_react3.createElement)("button", {
+      className: "dsh-ws-btn",
+      onClick: () => setOpen(true),
+      style: { width: "100%", textAlign: "left" }
+    }, "\u{1F5A5} \u5DE5\u4F5C\u533A\u72B6\u6001"),
+    open ? (0, import_react3.createElement)(
+      "div",
+      { className: "dsh-ws-modal-overlay", onClick: (e) => {
+        if (e.target === e.currentTarget) setOpen(false);
+      } },
+      (0, import_react3.createElement)(
+        "div",
+        { className: "dsh-ws-modal dsh-ws-modal-wide" },
+        (0, import_react3.createElement)("h3", null, "\u5DE5\u4F5C\u533A\u72B6\u6001"),
+        (0, import_react3.createElement)(
+          "div",
+          { className: "dsh-ws-footer-list" },
+          rows.map((ws) => (0, import_react3.createElement)(
+            "div",
+            { key: ws.workspaceId, className: "dsh-ws-item" },
+            (0, import_react3.createElement)(
+              "div",
+              { className: "dsh-ws-head" },
+              (0, import_react3.createElement)("span", { className: "dsh-ws-name" }, ws.workspaceId),
+              (0, import_react3.createElement)("span", { className: `dsh-ws-badge ${ws.phase}` }, phaseMap2[ws.phase] ?? ws.phase)
+            ),
+            (0, import_react3.createElement)(
+              "div",
+              { className: "dsh-ws-actions" },
+              ws.phase === "sleep" ? (0, import_react3.createElement)("button", { className: "dsh-ws-btn primary", onClick: async () => {
+                try {
+                  await workspaceApi.ensure(ws.workspaceId);
+                  await refresh();
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : String(e));
+                }
+              } }, "\u5524\u9192") : null,
+              ws.phase === "orphan" ? (0, import_react3.createElement)("button", { className: "dsh-ws-btn", onClick: async () => {
+                try {
+                  await workspaceApi.cleanup(ws.workspaceId);
+                  await refresh();
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : String(e));
+                }
+              } }, "\u6E05\u7406") : null,
+              (0, import_react3.createElement)("button", { className: "dsh-ws-btn danger", onClick: async () => {
+                if (!confirm(`\u5220\u9664\u5DE5\u4F5C\u533A ${ws.workspaceId}\uFF1F\u4F1A\u5220\u9664 Pod \u548C PVC\u3002`)) return;
+                try {
+                  await workspaceApi.delete(ws.workspaceId);
+                  await refresh();
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : String(e));
+                }
+              } }, "\u5220\u9664")
+            )
+          )),
+          rows.length === 0 ? (0, import_react3.createElement)("div", { className: "dsh-ws-meta" }, "\u6682\u65E0\u5DE5\u4F5C\u533A") : null
+        ),
+        (0, import_react3.createElement)(
+          "div",
+          { className: "dsh-ws-create" },
+          (0, import_react3.createElement)("input", { value: name, placeholder: "\u65B0\u5DE5\u4F5C\u533A\u540D\u79F0", onChange: (e) => setName(e.target.value), onKeyDown: (e) => {
+            if (e.key === "Enter") void create();
+          } }),
+          (0, import_react3.createElement)("button", { className: "dsh-ws-btn primary", onClick: () => void create() }, "\u521B\u5EFA")
+        ),
+        error === "" ? null : (0, import_react3.createElement)("div", { className: "dsh-ws-error" }, error),
+        (0, import_react3.createElement)(
+          "div",
+          { className: "dsh-ws-modal-footer" },
+          (0, import_react3.createElement)("button", { className: "dsh-ws-btn", onClick: () => setOpen(false) }, "\u5173\u95ED")
+        )
+      )
+    ) : null
   );
 }
 
 // packages/workspace-k8s/src/client/styles.ts
 var WORKSPACE_UI_CSS = `
+
 .dsh-workspace-ui { color: #1f2328; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif; }
 .dsh-workspace-ui * { box-sizing: border-box; }
 .dsh-workspace-ui h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
@@ -332,6 +312,17 @@ var WORKSPACE_UI_CSS = `
 .dsh-ws-hero h2 { font-size: 18px; margin: 0 0 12px; }
 .dsh-ws-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 12px; font-size: 12px; color: #57606a; border-top: 1px solid #e5e7eb; }
 .dsh-ws-status .dsh-ws-badge { font-size: 11px; }
+
+.dsh-ws-modal-overlay { position: fixed; inset: 0; background: rgba(31,35,40,.35); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.dsh-ws-modal { width: 380px; background: #fff; border-radius: 12px; box-shadow: 0 16px 48px rgba(0,0,0,.2); padding: 20px; }
+.dsh-ws-modal-wide { width: 460px; }
+.dsh-ws-modal h3 { margin: 0 0 8px; font-size: 16px; }
+.dsh-ws-modal-desc { margin: 0 0 14px; color: #57606a; font-size: 13px; }
+.dsh-ws-modal label { display: block; margin-bottom: 5px; font-size: 13px; font-weight: 600; }
+.dsh-ws-modal input { width: 100%; padding: 7px 9px; border: 1px solid #d0d7de; border-radius: 8px; font-size: 14px; }
+.dsh-ws-modal-error { color: #cf222e; font-size: 12px; margin: 8px 0 0; }
+.dsh-ws-modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.dsh-ws-footer-list { display: flex; flex-direction: column; gap: 6px; max-height: 300px; overflow-y: auto; }
 `;
 
 // packages/workspace-k8s/src/client/index.tsx
@@ -346,23 +337,27 @@ function ensureStyles() {
 }
 function apply(ctx) {
   ensureStyles();
-  ctx.slots.inject("sidebar.workspaces", () => ctx.slots.register({
-    name: "sidebar.workspaces",
-    priority: -100,
-    inject: () => ({
-      startSession: (workspaceId) => ctx.workspaces.startSession(workspaceId)
-    })
-  }, WorkspaceBrowser));
-  ctx.slots.inject("conversation.hero.workspace", () => ctx.slots.register({
-    name: "conversation.hero.workspace",
-    priority: -100,
-    inject: () => ({
-      startSession: (workspaceId) => ctx.workspaces.startSession(workspaceId)
-    })
-  }, WorkspacePicker));
+  const createByName = async (name) => {
+    await workspaceApi.create(name);
+    const workspaces = ctx.workspaces;
+    await workspaces.refresh?.();
+  };
+  const directoryInject = () => ({ createByName });
+  ctx.slots.inject("conversation.hero.workspace.directoryFlow", () => ctx.slots.register({
+    name: "conversation.hero.workspace.directoryFlow",
+    inject: directoryInject
+  }, NewWorkspaceDialog));
+  ctx.slots.inject("sidebar.workspaces.directoryFlow", () => ctx.slots.register({
+    name: "sidebar.workspaces.directoryFlow",
+    inject: directoryInject
+  }, NewWorkspaceDialog));
   ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({
     name: "conversation.input.dock",
     inject: () => ({})
   }, WorkspaceStatusDock));
+  ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({
+    name: "sidebar.footer.action",
+    inject: () => ({ createByName })
+  }, WorkspaceFooterAction));
 }
 return module.exports; } });

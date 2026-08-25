@@ -1,5 +1,5 @@
-/** Plain stylesheet injected by the native workspace UI client plugin. */
 export const WORKSPACE_UI_CSS = `
+
 .dsh-workspace-ui { color: #1f2328; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif; }
 .dsh-workspace-ui * { box-sizing: border-box; }
 .dsh-workspace-ui h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
@@ -29,4 +29,15 @@ export const WORKSPACE_UI_CSS = `
 .dsh-ws-hero h2 { font-size: 18px; margin: 0 0 12px; }
 .dsh-ws-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 12px; font-size: 12px; color: #57606a; border-top: 1px solid #e5e7eb; }
 .dsh-ws-status .dsh-ws-badge { font-size: 11px; }
+
+.dsh-ws-modal-overlay { position: fixed; inset: 0; background: rgba(31,35,40,.35); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.dsh-ws-modal { width: 380px; background: #fff; border-radius: 12px; box-shadow: 0 16px 48px rgba(0,0,0,.2); padding: 20px; }
+.dsh-ws-modal-wide { width: 460px; }
+.dsh-ws-modal h3 { margin: 0 0 8px; font-size: 16px; }
+.dsh-ws-modal-desc { margin: 0 0 14px; color: #57606a; font-size: 13px; }
+.dsh-ws-modal label { display: block; margin-bottom: 5px; font-size: 13px; font-weight: 600; }
+.dsh-ws-modal input { width: 100%; padding: 7px 9px; border: 1px solid #d0d7de; border-radius: 8px; font-size: 14px; }
+.dsh-ws-modal-error { color: #cf222e; font-size: 12px; margin: 8px 0 0; }
+.dsh-ws-modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.dsh-ws-footer-list { display: flex; flex-direction: column; gap: 6px; max-height: 300px; overflow-y: auto; }
 `
