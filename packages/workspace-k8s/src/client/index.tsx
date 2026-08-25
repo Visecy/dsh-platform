@@ -59,12 +59,14 @@ export function apply(ctx: ClientContext): void {
   // In-session workspace status strip.
   ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
     name: 'conversation.input.dock',
+    id: 'workspace-status-dock',
     inject: () => ({}),
   }, WorkspaceStatusDock))
 
   // Sidebar footer management/status action.
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
     name: 'sidebar.footer.action',
+    id: 'workspace-status-action',
     inject: () => ({ createByName }),
   }, WorkspaceFooterAction))
 }
