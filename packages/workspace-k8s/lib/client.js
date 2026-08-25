@@ -266,12 +266,14 @@ var inject = ["slots"];
 function apply(ctx) {
   ctx.slots.inject("sidebar.workspaces", () => ctx.slots.register({
     name: "sidebar.workspaces",
+    priority: -100,
     inject: () => ({
       startSession: (workspaceId) => ctx.workspaces.startSession(workspaceId)
     })
   }, WorkspaceBrowser));
   ctx.slots.inject("conversation.hero.workspace", () => ctx.slots.register({
     name: "conversation.hero.workspace",
+    priority: -100,
     inject: () => ({
       startSession: (workspaceId) => ctx.workspaces.startSession(workspaceId)
     })

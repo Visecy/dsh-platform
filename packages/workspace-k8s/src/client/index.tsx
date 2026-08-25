@@ -25,6 +25,7 @@ interface PickerInject {
 export function apply(ctx: ClientContext): void {
   ctx.slots.inject('sidebar.workspaces', () => ctx.slots.register({
     name: 'sidebar.workspaces',
+    priority: -100,
     inject: (): BrowserInject => ({
       startSession: (workspaceId) => ctx.workspaces.startSession(workspaceId as any),
     }),
@@ -32,6 +33,7 @@ export function apply(ctx: ClientContext): void {
 
   ctx.slots.inject('conversation.hero.workspace', () => ctx.slots.register({
     name: 'conversation.hero.workspace',
+    priority: -100,
     inject: (): PickerInject => ({
       startSession: (workspaceId) => ctx.workspaces.startSession(workspaceId as any),
     }),
