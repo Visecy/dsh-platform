@@ -90,7 +90,6 @@ RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
        @visecy/dsh-subprocess-k8s@${PLUGIN_VERSION:-latest} \
        @visecy/dsh-workspace-k8s@${PLUGIN_VERSION:-latest} \
        @visecy/dsh-workspace-picker@${PLUGIN_VERSION:-latest} \
-       @visecy/dsh-workspace-ui@${PLUGIN_VERSION:-latest} \
        file:/opt/dsh-home/plugins/session-persistence-rdb \
        file:/opt/dsh-home/plugins/storage-db \
        file:/opt/dsh-home/plugins/platform-domain \

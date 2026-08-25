@@ -10,9 +10,10 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const root = resolve(here, '..', 'packages', 'workspace-ui')
-if (!existsSync(join(root, 'src/index.ts')) || !existsSync(join(root, 'src/client/index.tsx'))) {
-  console.error(`workspace-ui: source missing under ${root}`)
+const root = resolve(here, '..', 'packages', 'workspace-k8s')
+const clientSrc = join(root, 'src/client/index.tsx')
+if (!existsSync(clientSrc)) {
+  console.error(`workspace-k8s client UI: source missing: ${clientSrc}`)
   process.exit(1)
 }
 mkdirSync(join(root, 'lib'), { recursive: true })
@@ -38,18 +39,7 @@ const external = [
 ]
 
 await build({
-  entryPoints: [join(root, 'src/index.ts')],
-  outfile: join(root, 'lib/index.js'),
-  bundle: true,
-  platform: 'node',
-  format: 'esm',
-  target: 'node22',
-  external: ['@deepseek-ai/*'],
-  logLevel: 'warning',
-})
-
-await build({
-  entryPoints: [join(root, 'src/client/index.tsx')],
+  entryPoints: [clientSrc],
   outfile: join(root, 'lib/client.js'),
   bundle: true,
   platform: 'browser',
@@ -60,7 +50,7 @@ await build({
     'process.env.NODE_ENV': '"production"',
   },
   banner: {
-    js: 'window.__ModuleLoader__.load({ id: "@visecy/dsh-workspace-ui", factory: (require) => {',
+    js: 'window.__ModuleLoader__.load({ id: "@visecy/dsh-workspace-k8s", factory: (require) => {',
   },
   footer: {
     js: 'return module.exports; } });',
@@ -68,4 +58,4 @@ await build({
   logLevel: 'warning',
 })
 
-console.log('built @visecy/dsh-workspace-ui -> lib/index.js + lib/client.js')
+console.log('built @visecy/dsh-workspace-k8s client UI -> lib/client.js')

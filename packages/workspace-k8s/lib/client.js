@@ -1,5 +1,4 @@
-window.__ModuleLoader__.load({ id: "@visecy/dsh-workspace-ui", factory: (require) => {
-"use strict";
+window.__ModuleLoader__.load({ id: "@visecy/dsh-workspace-k8s", factory: (require) => {
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -18,7 +17,7 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// packages/workspace-ui/src/client/index.tsx
+// packages/workspace-k8s/src/client/index.tsx
 var index_exports = {};
 __export(index_exports, {
   apply: () => apply,
@@ -26,10 +25,10 @@ __export(index_exports, {
 });
 module.exports = __toCommonJS(index_exports);
 
-// packages/workspace-ui/src/client/WorkspaceBrowser.tsx
+// packages/workspace-k8s/src/client/WorkspaceBrowser.tsx
 var import_react = require("react");
 
-// packages/workspace-ui/src/client/api.ts
+// packages/workspace-k8s/src/client/api.ts
 async function call(method, body = {}) {
   const res = await fetch(`/workspaces/api/${method}`, {
     method: "POST",
@@ -49,7 +48,7 @@ var workspaceApi = {
   cleanup: (workspaceId) => call("cleanup", { workspaceId })
 };
 
-// packages/workspace-ui/src/client/WorkspaceBrowser.tsx
+// packages/workspace-k8s/src/client/WorkspaceBrowser.tsx
 var phaseMap = {
   running: "\u8FD0\u884C\u4E2D",
   sleep: "\u4F11\u7720\u4E2D",
@@ -152,7 +151,7 @@ function WorkspaceBrowser(props) {
   );
 }
 
-// packages/workspace-ui/src/client/WorkspacePicker.tsx
+// packages/workspace-k8s/src/client/WorkspacePicker.tsx
 var import_react2 = require("react");
 var phaseMap2 = {
   running: "\u8FD0\u884C\u4E2D",
@@ -213,7 +212,7 @@ function WorkspacePicker(props) {
   );
 }
 
-// packages/workspace-ui/src/client/WorkspaceStatusDock.tsx
+// packages/workspace-k8s/src/client/WorkspaceStatusDock.tsx
 var import_react3 = require("react");
 var phaseMap3 = {
   running: "\u8FD0\u884C\u4E2D",
@@ -261,7 +260,7 @@ function WorkspaceStatusDock(props) {
   );
 }
 
-// packages/workspace-ui/src/client/index.tsx
+// packages/workspace-k8s/src/client/index.tsx
 var inject = ["slots"];
 function apply(ctx) {
   ctx.slots.inject("sidebar.workspaces", () => ctx.slots.register({

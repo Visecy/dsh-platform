@@ -14,7 +14,7 @@
     "vitest": "^2.1.0"
   },
   "scripts": {
-    "build": "node ../../scripts/build-pkg.mjs workspace-k8s src/index.ts",
+    "build": "node ../../scripts/build-pkg.mjs workspace-k8s src/index.ts && node ../../scripts/build-workspace-ui.mjs",
     "prepublishOnly": "npm run build",
     "test": "vitest run"
   },
@@ -24,15 +24,36 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    "types": "./dist/index.d.ts",
-    "default": "./dist/index.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/index.d.ts",
+      "default": "./lib/client.js"
+    }
   },
   "files": [
-    "dist"
+    "dist",
+    "lib/client.js"
   ],
   "repository": {
     "type": "git",
     "url": "https://github.com/Visecy/dsh-platform.git",
     "directory": "packages/workspace-k8s"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
   }
 }
