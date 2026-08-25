@@ -94,6 +94,10 @@ export class WorkspaceManagement implements WorkspaceManagementService {
       const hasPod = podSet.has(id)
       const hasPvc = pvcSet.has(id)
       const path = reg?.path ?? `${this.opts.hostRoot}/${id}`
+      // The official registry may contain a default root row (path '/') or
+      // non-platform workspaces; only /workspaces/<id> rows are real
+      // platform workspaces.
+      if (!path.startsWith(`${this.opts.hostRoot}/`) || path === this.opts.hostRoot) continue
       rows.push(this.entry({ workspaceId: id, path, title: reg?.title }, hasPod, hasPvc))
     }
     rows.sort((a, b) => a.workspaceId.localeCompare(b.workspaceId))

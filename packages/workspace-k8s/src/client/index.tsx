@@ -11,6 +11,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { WorkspaceBrowser } from './WorkspaceBrowser.tsx'
 import { WorkspacePicker } from './WorkspacePicker.tsx'
 import { WorkspaceStatusDock } from './WorkspaceStatusDock.tsx'
+import { WORKSPACE_UI_CSS } from './styles.ts'
 
 export const inject = ['slots']
 
@@ -22,7 +23,18 @@ interface PickerInject {
   startSession: (workspaceId?: string) => void
 }
 
+function ensureStyles(): void {
+  if (typeof document === 'undefined') return
+  if (document.querySelector('style[data-dsh-workspace-ui]') !== null) return
+  const style = document.createElement('style')
+  style.dataset.dshWorkspaceUi = 'true'
+  style.textContent = WORKSPACE_UI_CSS
+  document.head.appendChild(style)
+}
+
 export function apply(ctx: ClientContext): void {
+  ensureStyles()
+
   ctx.slots.inject('sidebar.workspaces', () => ctx.slots.register({
     name: 'sidebar.workspaces',
     priority: -100,

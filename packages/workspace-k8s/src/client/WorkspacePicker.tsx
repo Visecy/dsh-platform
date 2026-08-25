@@ -5,8 +5,10 @@ import { workspaceApi, type CatalogWorkspace } from './api.ts'
 type Props = PropsRuntime<'conversation.hero.workspace'> & { startSession?: (workspaceId?: string) => void }
 
 const phaseMap: Record<CatalogWorkspace['phase'], string> = {
-  running: '运行中', sleep: '休眠中', provision: '创建中', orphan: '异常/待清理', deleted: '已删除', unknown: '未知',
+  running: '运行中', sleep: '休眠中', provision: '创建中', orphan: '待清理', deleted: '已删除', unknown: '未知',
 }
+
+const visible = (rows: CatalogWorkspace[]) => rows.filter((ws) => ws.path.startsWith('/workspaces/') && ws.path !== '/workspaces')
 
 export function WorkspacePicker(props: Props) {
   const { useWorkspaces } = props
@@ -15,12 +17,23 @@ export function WorkspacePicker(props: Props) {
   const [name, setName] = useState('')
   const [error, setError] = useState('')
   const refresh = async () => {
-    try { setRows(await workspaceApi.list()) } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    try { setRows(visible(await workspaceApi.list())) } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+  }
+  const create = async () => {
+    if (!name.trim()) return
+    setError('')
+    try {
+      await workspaceApi.create(name.trim())
+      setName('')
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
   }
   useEffect(() => { void refresh() }, [])
-  return createElement('div', { style: { maxWidth: 520, margin: '0 auto', padding: 20 } },
+  return createElement('div', { className: 'dsh-workspace-ui dsh-ws-hero' },
     createElement('h2', null, '选择或新建工作区'),
-    createElement('div', null,
+    createElement('div', { className: 'dsh-ws-create' },
       createElement('input', {
         value: name,
         placeholder: '输入新工作区名称',
@@ -29,14 +42,20 @@ export function WorkspacePicker(props: Props) {
       }),
       createElement('button', { onClick: () => void create() }, '创建'),
     ),
-    error === '' ? null : createElement('div', { style: { color: 'red' } }, error),
-    createElement('ul', null,
-      rows.map((ws) => createElement('li', { key: ws.workspaceId },
-        createElement('button', {
-          onClick: () => { props.startSession?.(ws.nativeWorkspaceId ?? ws.workspaceId as any) },
-        }, `${ws.workspaceId} · ${phaseMap[ws.phase] ?? ws.phase}`),
+    error === '' ? null : createElement('div', { className: 'dsh-ws-error' }, error),
+    createElement('ul', { className: 'dsh-ws-list' },
+      rows.map((ws) => createElement('li', { key: ws.workspaceId, className: 'dsh-ws-item' },
+        createElement('div', { className: 'dsh-ws-head' },
+          createElement('span', { className: 'dsh-ws-name' }, ws.workspaceId),
+          createElement('span', { className: `dsh-ws-badge ${ws.phase}` }, phaseMap[ws.phase] ?? ws.phase),
+        ),
+        createElement('div', { className: 'dsh-ws-actions' },
+          createElement('button', {
+            className: 'dsh-ws-btn primary',
+            onClick: () => { props.startSession?.(ws.nativeWorkspaceId ?? ws.workspaceId as any) },
+          }, ws.phase === 'sleep' ? '唤醒并打开' : '打开'),
+        ),
       )),
     ),
-    createElement('div', { style: { color: '#666' } }, `原生工作区 ${native.length} 个`),
   )
 }

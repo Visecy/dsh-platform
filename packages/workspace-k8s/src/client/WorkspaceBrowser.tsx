@@ -8,10 +8,12 @@ const phaseMap: Record<CatalogWorkspace['phase'], string> = {
   running: '运行中',
   sleep: '休眠中',
   provision: '创建中',
-  orphan: '异常/待清理',
+  orphan: '待清理',
   deleted: '已删除',
   unknown: '未知',
 }
+
+const visible = (rows: CatalogWorkspace[]) => rows.filter((ws) => ws.path.startsWith('/workspaces/') && ws.path !== '/workspaces')
 
 export function WorkspaceBrowser(props: Props) {
   const { useWorkspaces } = props
@@ -23,8 +25,7 @@ export function WorkspaceBrowser(props: Props) {
 
   const refresh = async () => {
     try {
-      const list = await workspaceApi.list()
-      setRows(list)
+      setRows(visible(await workspaceApi.list()))
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -46,9 +47,9 @@ export function WorkspaceBrowser(props: Props) {
     }
   }
 
-  return createElement('div', { style: { padding: 12 } },
+  return createElement('div', { className: 'dsh-workspace-ui' },
     createElement('h3', null, '工作区'),
-    createElement('div', null,
+    createElement('div', { className: 'dsh-ws-create' },
       createElement('input', {
         value: name,
         placeholder: '输入新工作区名称',
@@ -57,32 +58,41 @@ export function WorkspaceBrowser(props: Props) {
       }),
       createElement('button', { onClick: () => void create() }, '创建'),
     ),
-    error === '' ? null : createElement('div', { style: { color: 'red' } }, error),
-    loading ? createElement('div', null, '加载中…') : createElement('ul', null,
-      rows.map((ws) => createElement('li', { key: ws.workspaceId, style: { margin: '4px 0' } },
-        createElement('span', null, `${ws.workspaceId} · ${phaseMap[ws.phase] ?? ws.phase}`),
-        createElement('br'),
-        createElement('button', {
-          onClick: async () => {
-            try {
-              await workspaceApi.ensure(ws.workspaceId)
-              props.startSession?.(ws.nativeWorkspaceId ?? ws.workspaceId as any)
-            } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
-          },
-        }, ws.phase === 'sleep' ? '唤醒并打开' : '打开'),
-        createElement('button', {
-          onClick: async () => {
-            if (!confirm(`删除工作区 ${ws.workspaceId}？会删除 Pod 和 PVC。`)) return
-            try { await workspaceApi.delete(ws.workspaceId); await refresh() } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
-          },
-        }, '删除'),
-        ws.phase === 'orphan' ? createElement('button', {
-          onClick: async () => {
-            try { await workspaceApi.cleanup(ws.workspaceId); await refresh() } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
-          },
-        }, '清理') : null,
+    error === '' ? null : createElement('div', { className: 'dsh-ws-error' }, error),
+    loading ? createElement('div', null, '加载中…') : createElement('ul', { className: 'dsh-ws-list' },
+      rows.map((ws) => createElement('li', { key: ws.workspaceId, className: 'dsh-ws-item' },
+        createElement('div', { className: 'dsh-ws-head' },
+          createElement('span', { className: 'dsh-ws-name' }, ws.workspaceId),
+          createElement('span', { className: `dsh-ws-badge ${ws.phase}` }, phaseMap[ws.phase] ?? ws.phase),
+        ),
+        createElement('div', { className: 'dsh-ws-actions' },
+          createElement('button', {
+            className: 'dsh-ws-btn primary',
+            onClick: async () => {
+              try {
+                await workspaceApi.ensure(ws.workspaceId)
+                props.startSession?.(ws.nativeWorkspaceId ?? ws.workspaceId as any)
+              } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+            },
+          }, ws.phase === 'sleep' ? '唤醒并打开' : '打开'),
+          ws.phase === 'orphan' ? createElement('button', {
+            className: 'dsh-ws-btn',
+            onClick: async () => {
+              try { await workspaceApi.cleanup(ws.workspaceId); await refresh() } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+            },
+          }, '清理') : null,
+          createElement('button', {
+            className: 'dsh-ws-btn danger',
+            onClick: async () => {
+              if (!confirm(`删除工作区 ${ws.workspaceId}？会删除 Pod 和 PVC。`)) return
+              try { await workspaceApi.delete(ws.workspaceId); await refresh() } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+            },
+          }, '删除'),
+        ),
+        ws.hasPod || ws.hasPvc ? createElement('div', { className: 'dsh-ws-meta' },
+          ws.hasPod && ws.hasPvc ? '运行中' : ws.hasPvc ? '数据已保留' : '残留资源'
+        ) : null,
       )),
     ),
-    createElement('div', { style: { color: '#666' } }, `原生工作区 ${native.length} 个`),
   )
 }
