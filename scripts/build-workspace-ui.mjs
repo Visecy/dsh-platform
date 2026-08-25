@@ -50,7 +50,7 @@ await build({
     'process.env.NODE_ENV': '"production"',
   },
   banner: {
-    js: 'window.__ModuleLoader__.load({ id: "@visecy/dsh-workspace-k8s", factory: (require) => {',
+    js: 'window.__ModuleLoader__.load({ id: "@visecy/dsh-workspace-k8s", factory: (require) => {\nvar module = { exports: {} }; var exports = module.exports;',
   },
   footer: {
     js: 'return module.exports; } });',
