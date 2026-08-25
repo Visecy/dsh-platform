@@ -120,6 +120,10 @@ export class WorkspaceRuntimeService extends Service implements WorkspaceRuntime
 }
 
 export function apply(ctx: Context, config: Config): void {
+  // The same package is mounted twice in the web profile: once as the host
+  // workspace-runtime row and once as the client bundle row (workspace-ui).
+  // The second mount must not re-create workspaceRuntime/management services.
+  if (ctx.get('workspaceRuntime') !== undefined) return
   // Service constructor already registers under 'workspaceRuntime'; providing
   // again would collide with the auto-registration.
   const runtime = new WorkspaceRuntimeService(ctx, config)

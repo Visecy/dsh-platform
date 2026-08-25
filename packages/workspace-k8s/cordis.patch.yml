@@ -1,0 +1,8 @@
+# Native workspace UI client mounted through the official bundle system.
+# The workspace-k8s host row (workspace-runtime) is provided by
+# docker/profiles/web.cordis.patch.yml; this row mounts the same package as a
+# client-plugin bundle. The host apply is idempotent, so this extra row does
+# not duplicate the workspaceRuntime service.
+- insert:
+    - id: workspace-ui
+      name: '@visecy/dsh-workspace-k8s'

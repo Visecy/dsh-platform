@@ -35,7 +35,8 @@
   },
   "files": [
     "dist",
-    "lib/client.js"
+    "lib/client.js",
+    "cordis.patch.yml"
   ],
   "repository": {
     "type": "git",
@@ -43,6 +44,9 @@
     "directory": "packages/workspace-k8s"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-connection",
