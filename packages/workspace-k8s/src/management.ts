@@ -16,6 +16,8 @@ export interface WorkspaceCatalogEntry {
   workspaceId: string
   path: string
   title?: string
+  /** Opaque id used by the official DSH client/Host workspace APIs. */
+  nativeWorkspaceId?: string
   phase: CatalogPhase
   hasPod: boolean
   hasPvc: boolean
@@ -144,6 +146,7 @@ export class WorkspaceManagement implements WorkspaceManagementService {
       workspaceId: reg.workspaceId,
       path: reg.path,
       title: reg.title,
+      nativeWorkspaceId: reg.internalId,
       phase,
       hasPod,
       hasPvc,

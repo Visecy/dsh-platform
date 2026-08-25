@@ -9,7 +9,6 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import * as k8s from '@kubernetes/client-node'
 import { K8sPodController, type PodController, type WorkspacePodSpec } from './k8s-client.ts'
 import { registerWorkspaceApi } from './api.ts'
-import { registerWorkspaceUi } from './ui.ts'
 import { WorkspaceManagement } from './management.ts'
 import { ApiProxyWorkspaceRegistry } from './registry.ts'
 import { WorkspaceReconciler } from './reconciler.ts'
@@ -198,7 +197,6 @@ export function apply(ctx: Context, config: Config): void {
     const webServer = webCtx.get('webServer') as { register(route: { kind: 'prefix' | 'exact'; path: string; handler: (req: unknown, res: unknown) => unknown }): () => void } | undefined
     if (webServer === undefined) return
     ctx.effect(() => registerWorkspaceApi(webServer, management), 'dsh-workspace-k8s: /workspaces/api routes')
-    ctx.effect(() => registerWorkspaceUi(webServer), 'dsh-workspace-k8s: /workspaces/ui page')
   })
 
   const intervalMs = config.reconcileIntervalMs ?? 60_000

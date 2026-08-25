@@ -65,6 +65,7 @@ USER root
 # string replacement + assertions + node --check; fails the build on any
 # mismatch — no fragile sed). See scripts/patch-dsh.mjs.
 COPY scripts/patch-dsh.mjs /usr/local/lib/node_modules/patch-dsh.mjs
+COPY scripts/enable-workspace-ui.mjs /usr/local/lib/node_modules/enable-workspace-ui.mjs
 RUN node /usr/local/lib/node_modules/patch-dsh.mjs \
       /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai
 
@@ -89,6 +90,7 @@ RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
        @visecy/dsh-subprocess-k8s@${PLUGIN_VERSION:-latest} \
        @visecy/dsh-workspace-k8s@${PLUGIN_VERSION:-latest} \
        @visecy/dsh-workspace-picker@${PLUGIN_VERSION:-latest} \
+       @visecy/dsh-workspace-ui@${PLUGIN_VERSION:-latest} \
        file:/opt/dsh-home/plugins/session-persistence-rdb \
        file:/opt/dsh-home/plugins/storage-db \
        file:/opt/dsh-home/plugins/platform-domain \
@@ -109,6 +111,7 @@ RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
        @deepseek-ai/dsh-session-persistence@${DSH_VERSION} \
        @kubernetes/client-node
 
+RUN node /usr/local/lib/node_modules/enable-workspace-ui.mjs /opt/dsh-home/profiles/web 2>/dev/null || true
 COPY docker/profiles/web.cordis.patch.yml /opt/dsh-home/profiles/web/cordis.patch.yml
 COPY docker/profiles/headless.cordis.patch.yml /opt/dsh-home/profiles/headless/cordis.patch.yml
 
