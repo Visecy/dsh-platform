@@ -30,6 +30,7 @@ export const WORKSPACE_UI_CSS = `
 .dsh-ws-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 12px; font-size: 12px; color: #57606a; border-top: 1px solid #e5e7eb; }
 .dsh-ws-status .dsh-ws-badge { font-size: 11px; }
 
+.dsh-ws-modal-overlay, .dsh-ws-modal-overlay *, .dsh-ws-modal, .dsh-ws-modal * { box-sizing: border-box; }
 .dsh-ws-modal-overlay { position: fixed; inset: 0; background: rgba(31,35,40,.35); display: flex; align-items: center; justify-content: center; z-index: 100; }
 .dsh-ws-modal { width: 380px; background: #fff; border-radius: 12px; box-shadow: 0 16px 48px rgba(0,0,0,.2); padding: 20px; }
 .dsh-ws-modal-wide { width: 460px; }

@@ -54,7 +54,8 @@ export class AuthPlugin {
     this.oidc = new OidcClient(config.oidc)
     this.sessions = new SessionCodec(config.sessionSecret)
     this.cookieName = config.cookieName ?? 'dsh_session'
-    this.publicPaths = config.publicPaths ?? ['/healthz']
+    const defaultPublicPaths = ['/healthz', '/manifest.webmanifest', '/manifest.json', '/favicon.svg', '/sw.js', '/service-worker.js']
+    this.publicPaths = Array.from(new Set([...defaultPublicPaths, ...(config.publicPaths ?? [])]))
     this.adminGroups = config.adminGroups ?? ['dsh-admins']
     this.port = config.port ?? 0
     this.host = config.host ?? '127.0.0.1'

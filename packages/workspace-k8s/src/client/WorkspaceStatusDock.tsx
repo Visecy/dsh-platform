@@ -10,13 +10,18 @@ const phaseMap: Record<CatalogWorkspace['phase'], string> = {
 
 export function WorkspaceStatusDock(props: Props) {
   const { sessionId } = props
+  // Read workspace membership as a component-level hook. Calling
+  // `useWorkspaces` inside an effect violates the Rules of Hooks and crashes
+  // the dock with React error #321.
+  const workspace = props.useWorkspaces((s) => s.items.find((x) => x.sessionIds.includes(sessionId as any)))
   const [row, setRow] = useState<CatalogWorkspace | undefined>()
   const [error, setError] = useState('')
   useEffect(() => {
-    if (!sessionId) return
-    const w = props.useWorkspaces((s) => s.items.find((x) => x.sessionIds.includes(sessionId as any)))
-    const nativeId = w?.workspaceId
-    if (nativeId === undefined) return
+    const nativeId = workspace?.workspaceId
+    if (nativeId === undefined) {
+      setRow(undefined)
+      return
+    }
     let cancelled = false
     void workspaceApi.list().then((rows) => {
       if (cancelled) return
@@ -24,7 +29,7 @@ export function WorkspaceStatusDock(props: Props) {
       setRow(found ?? undefined)
     }).catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)) })
     return () => { cancelled = true }
-  }, [sessionId, props.useWorkspaces])
+  }, [sessionId, workspace?.workspaceId])
   if (row === undefined) return null
   return createElement('div', { className: 'dsh-workspace-ui dsh-ws-status' },
     createElement('span', null, `工作区：${row.workspaceId}`),

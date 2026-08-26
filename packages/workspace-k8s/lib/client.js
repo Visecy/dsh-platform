@@ -119,13 +119,15 @@ var phaseMap = {
 };
 function WorkspaceStatusDock(props) {
   const { sessionId } = props;
+  const workspace = props.useWorkspaces((s) => s.items.find((x) => x.sessionIds.includes(sessionId)));
   const [row, setRow] = (0, import_react2.useState)();
   const [error, setError] = (0, import_react2.useState)("");
   (0, import_react2.useEffect)(() => {
-    if (!sessionId) return;
-    const w = props.useWorkspaces((s) => s.items.find((x) => x.sessionIds.includes(sessionId)));
-    const nativeId = w?.workspaceId;
-    if (nativeId === void 0) return;
+    const nativeId = workspace?.workspaceId;
+    if (nativeId === void 0) {
+      setRow(void 0);
+      return;
+    }
     let cancelled = false;
     void workspaceApi.list().then((rows) => {
       if (cancelled) return;
@@ -137,7 +139,7 @@ function WorkspaceStatusDock(props) {
     return () => {
       cancelled = true;
     };
-  }, [sessionId, props.useWorkspaces]);
+  }, [sessionId, workspace?.workspaceId]);
   if (row === void 0) return null;
   return (0, import_react2.createElement)(
     "div",
@@ -313,6 +315,7 @@ var WORKSPACE_UI_CSS = `
 .dsh-ws-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 12px; font-size: 12px; color: #57606a; border-top: 1px solid #e5e7eb; }
 .dsh-ws-status .dsh-ws-badge { font-size: 11px; }
 
+.dsh-ws-modal-overlay, .dsh-ws-modal-overlay *, .dsh-ws-modal, .dsh-ws-modal * { box-sizing: border-box; }
 .dsh-ws-modal-overlay { position: fixed; inset: 0; background: rgba(31,35,40,.35); display: flex; align-items: center; justify-content: center; z-index: 100; }
 .dsh-ws-modal { width: 380px; background: #fff; border-radius: 12px; box-shadow: 0 16px 48px rgba(0,0,0,.2); padding: 20px; }
 .dsh-ws-modal-wide { width: 460px; }
@@ -345,15 +348,18 @@ function apply(ctx) {
   const directoryInject = () => ({ createByName });
   ctx.slots.inject("conversation.hero.workspace.directoryFlow", () => ctx.slots.register({
     name: "conversation.hero.workspace.directoryFlow",
+    priority: -100,
     inject: directoryInject
   }, NewWorkspaceDialog));
   ctx.slots.inject("sidebar.workspaces.directoryFlow", () => ctx.slots.register({
     name: "sidebar.workspaces.directoryFlow",
+    priority: -100,
     inject: directoryInject
   }, NewWorkspaceDialog));
   ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({
     name: "conversation.input.dock",
     id: "workspace-status-dock",
+    order: 30,
     inject: () => ({})
   }, WorkspaceStatusDock));
   ctx.slots.inject("sidebar.footer.action", () => ctx.slots.register({

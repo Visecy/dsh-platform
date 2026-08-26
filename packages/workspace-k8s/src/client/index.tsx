@@ -45,21 +45,28 @@ export function apply(ctx: ClientContext): void {
   const directoryInject = (): NewWorkspaceDialogInjected => ({ createByName })
 
   // Provide our name-based New Workspace modal to both official directory-flow
-  // holes. The official ui-workspace keeps owning the menu/session tree.
+  // holes. The official ui-workspace keeps owning the menu/session tree, and
+  // the official directory-picker (native/browse) occupies the same holes at
+  // priority 0. Registering at a lower priority shadows that occupant instead
+  // of colliding with it (same-priority registrations throw a duplicate-slot
+  // error and abort the whole plugin boot).
   ctx.slots.inject('conversation.hero.workspace.directoryFlow', () => ctx.slots.register({
     name: 'conversation.hero.workspace.directoryFlow',
+    priority: -100,
     inject: directoryInject,
   }, NewWorkspaceDialog))
 
   ctx.slots.inject('sidebar.workspaces.directoryFlow', () => ctx.slots.register({
     name: 'sidebar.workspaces.directoryFlow',
+    priority: -100,
     inject: directoryInject,
   }, NewWorkspaceDialog))
 
-  // In-session workspace status strip.
+  // In-session workspace status strip (after the Todo/Goal/Queue stacks).
   ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
     name: 'conversation.input.dock',
     id: 'workspace-status-dock',
+    order: 30,
     inject: () => ({}),
   }, WorkspaceStatusDock))
 

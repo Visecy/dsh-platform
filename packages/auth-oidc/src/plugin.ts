@@ -100,7 +100,13 @@ export function apply(ctx: Context, config: AuthConfig): void {
     const gate = async (req: IncomingMessage, res: ServerResponse, kind: 'request' | 'upgrade'): Promise<boolean> => {
       const pathname = new URL(req.url ?? '/', 'http://dsh.internal').pathname
       if (pathname === '/auth/login' || pathname === '/auth/callback' || pathname === '/auth/logout') return true
-      const publicPaths = auth.config.publicPaths ?? ['/healthz']
+      // PWA agents fetch /manifest.webmanifest and favicons without a session
+      // cookie; redirecting them to the IdP surfaces a cross-origin CORS error
+      // in the console. Keep those static assets public even when the operator
+      // supplies an explicit publicPaths list.
+      const defaultPublicPaths = ['/healthz', '/manifest.webmanifest', '/manifest.json', '/favicon.svg', '/sw.js', '/service-worker.js']
+      const configuredPublicPaths = auth.config.publicPaths ?? []
+      const publicPaths = Array.from(new Set([...defaultPublicPaths, ...configuredPublicPaths]))
       if (publicPaths.some((p) => pathname === p || pathname.startsWith(p + '/'))) return true
       const user = auth.currentUser(req)
       if (user !== undefined) {
