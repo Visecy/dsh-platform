@@ -1,22 +1,20 @@
 /**
- * Native DSH workspace UI - additive only.
+ * Native DSH workspace UI - minimal additive layer.
  *
- * We do NOT replace official `sidebar.workspaces` or
- * `conversation.hero.workspace`; those keep the official session/workspace
- * tree and picker. We only:
- * - provide a name-based New Workspace flow into the official directory-flow
- *   holes (`conversation.hero.workspace.directoryFlow`,
- *   `sidebar.workspaces.directoryFlow`)
- * - add an in-session status bar (`conversation.input.dock`)
- * - add a workspace status/management footer action
- *   (`sidebar.footer.action`)
+ * Keeps the official `sidebar.workspaces` and `conversation.hero.workspace`
+ * session/workspace tree and picker untouched. The only addition is a
+ * name-based New Workspace flow into the official directory-flow holes
+ * (`conversation.hero.workspace.directoryFlow`,
+ * `sidebar.workspaces.directoryFlow`), which the official ui-workspace
+ * picker drives through its "Add workspace" affordance.
+ *
+ * The workspace status dock and sidebar footer action were removed in favour
+ * of the official UI while the workspace chrome is redesigned from scratch.
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { NewWorkspaceDialog, type NewWorkspaceDialogInjected } from './NewWorkspaceDialog.tsx'
-import { WorkspaceStatusDock } from './WorkspaceStatusDock.tsx'
-import { WorkspaceFooterAction, type Props as FooterActionProps } from './WorkspaceFooterAction.tsx'
 import { workspaceApi } from './api.ts'
 import { WORKSPACE_UI_CSS } from './styles.ts'
 
@@ -61,19 +59,4 @@ export function apply(ctx: ClientContext): void {
     priority: -100,
     inject: directoryInject,
   }, NewWorkspaceDialog))
-
-  // In-session workspace status strip (after the Todo/Goal/Queue stacks).
-  ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
-    name: 'conversation.input.dock',
-    id: 'workspace-status-dock',
-    order: 30,
-    inject: () => ({}),
-  }, WorkspaceStatusDock))
-
-  // Sidebar footer management/status action.
-  ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
-    name: 'sidebar.footer.action',
-    id: 'workspace-status-action',
-    inject: () => ({ createByName }),
-  }, WorkspaceFooterAction))
 }
