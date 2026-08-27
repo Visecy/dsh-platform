@@ -94,12 +94,27 @@ export class WorkspaceLifecycleManager {
 
   /** User opened/activated the workspace (cancel sleep). */
   attach(workspaceId: string): void {
+    // An untracked workspace (no session activity since boot) is seeded as a
+    // provisioned sleeping workspace so the wake goes through WAKING and the
+    // ensure path applies.
+    this.seedUntracked(workspaceId)
     this.handle(workspaceId, { type: 'user-attach' })
   }
 
   /** Explicit manual sleep (user request). */
   sleep(workspaceId: string): void {
+    // Untracked workspaces may still have a live pod (created before the
+    // lifecycle manager started tracking); seed as running so the sleep
+    // request actually disposes the pod instead of being a no-op.
+    if (!this.states.has(workspaceId)) {
+      this.states.set(workspaceId, { ...initialState(workspaceId), phase: 'running', provisioned: true })
+    }
     this.handle(workspaceId, { type: 'sleep-requested' })
+  }
+
+  private seedUntracked(workspaceId: string): void {
+    if (this.states.has(workspaceId)) return
+    this.states.set(workspaceId, { ...initialState(workspaceId), provisioned: true })
   }
 
   /** Explicit workspace deletion. */

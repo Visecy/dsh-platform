@@ -176,4 +176,17 @@ describe('WorkspaceLifecycleManager', () => {
     expect(mgr.stateOf('ws-pvc')?.phase).toBe('deleted')
     expect(ctrl.pvcs.has('ws-pvc-data')).toBe(false)
   })
+
+  it('sleep on an untracked workspace seeds running and disposes the pod', async () => {
+    mgr.sleep('ws-untracked')
+    expect(mgr.stateOf('ws-untracked')?.phase).toBe('sleep')
+    expect(mgr.stateOf('ws-untracked')?.sleepCount).toBe(1)
+    expect(ctrl.deleteCalls).toContain('ws-untracked')
+  })
+
+  it('attach on an untracked workspace seeds provisioned and wakes through waking', async () => {
+    mgr.attach('ws-untracked2')
+    expect(mgr.stateOf('ws-untracked2')?.phase).toBe('waking')
+    expect(mgr.stateOf('ws-untracked2')?.provisioned).toBe(true)
+  })
 })
