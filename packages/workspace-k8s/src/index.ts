@@ -10,6 +10,7 @@ import * as k8s from '@kubernetes/client-node'
 import { K8sPodController, type PodController, type WorkspacePodSpec } from './k8s-client.ts'
 import { registerWorkspaceApi } from './api.ts'
 import { WorkspaceManagement } from './management.ts'
+import { WorkspaceMetricsSampler } from './metrics.ts'
 import { ApiProxyWorkspaceRegistry } from './registry.ts'
 import { WorkspaceReconciler } from './reconciler.ts'
 import { wireWorkspaceLifecycle } from './wire.ts'
@@ -24,10 +25,13 @@ export interface Config {
   resources?: { cpu?: string; memory?: string }
   storageClassName?: string
   storageSize?: string
+  runtimeClassName?: string
   /** Idle timeout with no lingering commands. Default 5 minutes. */
   idleTimeoutMs?: number
   /** Lingering-command grace before force termination. Default 3 hours. */
   graceMs?: number
+  /** Metrics sampling interval (metrics.k8s.io). Default 15s. */
+  metricIntervalMs?: number
   /** Registry bridge interval (ms). 0 disables the periodic pass. */
   reconcileIntervalMs?: number
   /** Injectable controller for tests; defaults to the real k8s client. */
@@ -145,7 +149,7 @@ export function apply(ctx: Context, config: Config | undefined): void {
     }
   }
 
-  const { resolveEndpoint, commandTracker, deleteWorkspace, status: workspaceStatus } = wireWorkspaceLifecycle(ctx, {
+  const { resolveEndpoint, commandTracker, deleteWorkspace, attach, sleepWorkspace, status: workspaceStatus } = wireWorkspaceLifecycle(ctx, {
     lifecycle: {
       controller: runtime.podController,
       namespace: config.namespace,
@@ -184,14 +188,40 @@ export function apply(ctx: Context, config: Config | undefined): void {
     delete: deleteWorkspaceAsync,
   })
 
+  // Metrics sampling (metrics.k8s.io) for the status page; frozen while a
+  // workspace sleeps so the UI does not jump.
+  const metricsSampler = new WorkspaceMetricsSampler({
+    controller: runtime.podController,
+    namespace: config.namespace,
+    intervalMs: config.metricIntervalMs,
+    limits: config.resources,
+  })
+  metricsSampler.start()
+  ctx.on('dispose', () => metricsSampler.stop())
+
   const management = new WorkspaceManagement({
     controller: runtime.podController,
     registry,
     status: workspaceStatus,
+    metrics: metricsSampler,
     namespace: config.namespace,
     hostRoot: '/workspaces',
+    image: config.image,
+    storageClassName: config.storageClassName,
+    storageSize: config.storageSize,
+    runtimeClassName: config.runtimeClassName,
+    resources: config.resources,
+    idleTimeoutMs: config.idleTimeoutMs,
+    graceMs: config.graceMs,
     deleteWorkspace: deleteWorkspaceAsync,
-    ensureWorkspace: (workspaceId) => runtime.ensure(workspaceId),
+    ensureWorkspace: async (workspaceId) => {
+      const endpoint = await runtime.ensure(workspaceId)
+      // Drive the state machine: sleep -> waking/provision, then pod-ready
+      // via the manager's own (idempotent) ensure path.
+      attach(workspaceId)
+      return endpoint
+    },
+    sleepWorkspace: (workspaceId) => sleepWorkspace(workspaceId),
   })
   ctx.provide('workspaceManagement', management)
 

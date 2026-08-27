@@ -4,23 +4,40 @@ import { initialState, transition, type WorkspaceState } from '../src/state-mach
 const ws = (over: Partial<WorkspaceState> = {}): WorkspaceState => ({ ...initialState('ws-1'), ...over })
 
 describe('state machine', () => {
-  it('sleep + user-attach -> provision with ensure', () => {
+  it('sleep + user-attach -> provision with ensure (first creation)', () => {
     const t = transition(ws(), { type: 'user-attach' })
     expect(t.state.phase).toBe('provision')
+    expect(t.state.provisioned).toBe(false)
+    expect(t.action).toEqual({ kind: 'ensure' })
+    expect(t.state.events.at(-1)?.type).toBe('provision-started')
+  })
+
+  it('sleep + user-attach after provision -> waking with ensure', () => {
+    const t = transition(ws({ provisioned: true }), { type: 'user-attach' })
+    expect(t.state.phase).toBe('waking')
+    expect(t.action).toEqual({ kind: 'ensure' })
+    expect(t.state.events.at(-1)?.type).toBe('waking-started')
+  })
+
+  it('sleep + session-created after provision -> waking', () => {
+    const t = transition(ws({ provisioned: true }), { type: 'session-created' })
+    expect(t.state.phase).toBe('waking')
     expect(t.action).toEqual({ kind: 'ensure' })
   })
 
-  it('sleep + session-created -> provision with ensure', () => {
-    const t = transition(ws(), { type: 'session-created' })
-    expect(t.state.phase).toBe('provision')
-    expect(t.action).toEqual({ kind: 'ensure' })
+  it('sleep + ensure-requested -> provision (unprovisioned) / waking (provisioned)', () => {
+    expect(transition(ws(), { type: 'ensure-requested' }).state.phase).toBe('provision')
+    expect(transition(ws({ provisioned: true }), { type: 'ensure-requested' }).state.phase).toBe('waking')
   })
 
-  it('provision + pod-ready -> running (active)', () => {
+  it('provision + pod-ready -> running (active), provisioned set', () => {
     const t = transition(ws({ phase: 'provision', activeSessions: 1 }), { type: 'pod-ready' })
     expect(t.state.phase).toBe('running')
+    expect(t.state.provisioned).toBe(true)
+    expect(t.state.lastWakeAt).toBeTypeOf('number')
     expect(t.action).toEqual({ kind: 'none' })
     expect(t.state.idleSince).toBeUndefined()
+    expect(t.state.events.at(-1)?.type).toBe('pod-ready')
   })
 
   it('provision + pod-ready with no activity starts idle timer', () => {
@@ -36,6 +53,20 @@ describe('state machine', () => {
     expect(t.action).toEqual({ kind: 'start-grace' })
   })
 
+  it('waking + pod-ready -> running and increments wakeCount', () => {
+    const t = transition(ws({ phase: 'waking', provisioned: true }), { type: 'pod-ready' })
+    expect(t.state.phase).toBe('running')
+    expect(t.state.wakeCount).toBe(1)
+    expect(t.state.lastWakeAt).toBeTypeOf('number')
+    expect(t.state.events.at(-1)?.type).toBe('pod-ready')
+  })
+
+  it('waking + pod-lost -> ensure (retry, stays waking)', () => {
+    const t = transition(ws({ phase: 'waking', provisioned: true }), { type: 'pod-lost' })
+    expect(t.state.phase).toBe('waking')
+    expect(t.action).toEqual({ kind: 'ensure' })
+  })
+
   it('running + session-created cancels timers', () => {
     const t = transition(ws({ phase: 'running', idleSince: 100 }), { type: 'session-created' })
     expect(t.state.idleSince).toBeUndefined()
@@ -47,6 +78,7 @@ describe('state machine', () => {
     expect(t.state.phase).toBe('running')
     expect(t.state.idleSince).toBeTypeOf('number')
     expect(t.action).toEqual({ kind: 'start-idle' })
+    expect(t.state.events.at(-1)?.type).toBe('idle-started')
   })
 
   it('running + session-disposed to zero with lingering commands starts grace timer', () => {
@@ -54,19 +86,24 @@ describe('state machine', () => {
     expect(t.state.phase).toBe('running')
     expect(t.state.idleSince).toBeTypeOf('number')
     expect(t.action).toEqual({ kind: 'start-grace' })
+    expect(t.state.events.at(-1)?.type).toBe('grace-started')
   })
 
-  it('running + idle-expired -> sleep with dispose', () => {
+  it('running + idle-expired -> sleep with dispose, counters and event', () => {
     const t = transition(ws({ phase: 'running', idleSince: 100 }), { type: 'idle-expired' })
     expect(t.state.phase).toBe('sleep')
     expect(t.state.idleSince).toBeUndefined()
+    expect(t.state.sleepCount).toBe(1)
+    expect(t.state.lastSleepAt).toBeTypeOf('number')
     expect(t.action).toEqual({ kind: 'dispose' })
+    expect(t.state.events.at(-1)?.type).toBe('sleep')
   })
 
   it('running + grace-expired while commands remain -> sleep with dispose', () => {
     const t = transition(ws({ phase: 'running', idleSince: 100, activeCommands: 1 }), { type: 'grace-expired' })
     expect(t.state.phase).toBe('sleep')
     expect(t.state.idleSince).toBeUndefined()
+    expect(t.state.sleepCount).toBe(1)
     expect(t.action).toEqual({ kind: 'dispose' })
   })
 
@@ -105,16 +142,12 @@ describe('state machine', () => {
     expect(t.action).toEqual({ kind: 'ensure' })
   })
 
-  it('sleep + ensure-requested -> provision', () => {
-    const t = transition(ws(), { type: 'ensure-requested' })
-    expect(t.state.phase).toBe('provision')
-  })
-
   it('dispose-requested from any phase -> deleted with delete action', () => {
-    for (const phase of ['provision', 'running', 'sleep'] as const) {
+    for (const phase of ['provision', 'waking', 'running', 'sleep'] as const) {
       const t = transition(ws({ phase, activeSessions: 3 }), { type: 'dispose-requested' })
       expect(t.state.phase).toBe('deleted')
       expect(t.action).toEqual({ kind: 'delete' })
+      expect(t.state.events.at(-1)?.type).toBe('deleted')
     }
   })
 
@@ -136,5 +169,16 @@ describe('state machine', () => {
     st = ended.state
     expect(st.idleSince).toBeTypeOf('number') // now idle -> idle timer (no commands)
     expect(ended.action).toEqual({ kind: 'start-idle' })
+  })
+
+  it('event log is bounded', () => {
+    let st = initialState('ws-1')
+    for (let i = 0; i < 120; i++) {
+      st = transition(st, { type: 'user-attach' }).state
+      st = transition(st, { type: 'pod-ready' }).state
+      st = transition(st, { type: 'session-created' }).state
+      st = transition(st, { type: 'session-disposed' }).state
+    }
+    expect(st.events.length).toBeLessThanOrEqual(50)
   })
 })

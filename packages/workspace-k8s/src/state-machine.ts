@@ -1,7 +1,10 @@
 /**
  * Workspace lifecycle state machine (pure logic, no I/O).
  *
- * States: provision -> running <-> sleep -> deleted
+ * States: provision -> running <-> sleep -> deleted, plus a waking state for
+ * SLEEP -> RUNNING pod pulls (PROVISION is first creation: PVC + Pod; WAKING
+ * is a later pull with the PVC already present).
+ *
  * Idle rule (confirmed): a workspace is idle when it has no live sessions AND
  * no open agent turns. Once idle:
  *   - without lingering commands => idle timer (default 5min) then sleep.
@@ -9,12 +12,24 @@
  *     force-terminate commands and sleep.
  * There is one timer per workspace, NOT per command/session. Returning before
  * the timer fires cancels it.
+ *
+ * The state also carries a bounded event log (type codes; display text is the
+ * catalog layer's job), wake/sleep counters, and timestamps for the status UI.
  */
-export type WorkspacePhase = 'provision' | 'running' | 'sleep' | 'deleted'
+export type WorkspacePhase = 'provision' | 'waking' | 'running' | 'sleep' | 'deleted'
+
+/** One lifecycle event log entry (type code + timestamp). */
+export interface WorkspaceEventLogEntry {
+  at: number
+  type: string
+}
 
 export interface WorkspaceState {
   workspaceId: string
   phase: WorkspacePhase
+  /** False until the first provision completes (PVC exists). Sleep before
+   *  that goes to provision on attach; afterwards to waking. */
+  provisioned: boolean
   /** Live sessions bound to this workspace (via cwd). */
   activeSessions: number
   /** Sessions with an open agent turn. */
@@ -24,6 +39,17 @@ export interface WorkspaceState {
   /** Timestamp when the workspace became idle (timer start), undefined while active. */
   idleSince?: number
   lastTransitionAt: number
+  /** Last time the pod was put to sleep. */
+  lastSleepAt?: number
+  /** Last time the pod became ready (uptime anchor). */
+  lastWakeAt?: number
+  /** How many times the workspace has been woken / slept. */
+  wakeCount: number
+  sleepCount: number
+  /** Workspace creation instant (first state creation). */
+  createdAt: number
+  /** Bounded lifecycle event log (newest last; capped). */
+  events: WorkspaceEventLogEntry[]
 }
 
 export type WorkspaceEvent =
@@ -35,6 +61,7 @@ export type WorkspaceEvent =
   | { type: 'command-ended' }
   | { type: 'user-attach' }
   | { type: 'ensure-requested' }
+  | { type: 'sleep-requested' }
   | { type: 'idle-expired' }
   | { type: 'grace-expired' }
   | { type: 'pod-ready' }
@@ -61,17 +88,31 @@ export interface Transition {
   action: WorkspaceAction
 }
 
+/** Bounded event log length. */
+export const EVENT_LOG_CAP = 50
+
 const now = (): number => Date.now()
 
 export function initialState(workspaceId: string): WorkspaceState {
   return {
     workspaceId,
     phase: 'sleep',
+    provisioned: false,
     activeSessions: 0,
     openTurns: 0,
     activeCommands: 0,
     lastTransitionAt: now(),
+    wakeCount: 0,
+    sleepCount: 0,
+    createdAt: now(),
+    events: [],
   }
+}
+
+/** Append a lifecycle event, keeping the log bounded. */
+function log(state: WorkspaceState, type: string, at: number): void {
+  state.events.push({ at, type })
+  if (state.events.length > EVENT_LOG_CAP) state.events.shift()
 }
 
 /**
@@ -79,7 +120,8 @@ export function initialState(workspaceId: string): WorkspaceState {
  * next state plus the action the orchestrator must perform.
  */
 export function transition(state: WorkspaceState, event: WorkspaceEvent): Transition {
-  const s = { ...state, lastTransitionAt: now() }
+  const at = now()
+  const s = { ...state, lastTransitionAt: at, events: [...state.events] }
 
   // ── counters ────────────────────────────────────────────────────────────
   if (event.type === 'session-created') s.activeSessions += 1
@@ -96,6 +138,7 @@ export function transition(state: WorkspaceState, event: WorkspaceEvent): Transi
   if (event.type === 'dispose-requested') {
     s.phase = 'deleted'
     s.idleSince = undefined
+    log(s, 'deleted', at)
     return { state: s, action: { kind: 'delete' } }
   }
 
@@ -103,8 +146,30 @@ export function transition(state: WorkspaceState, event: WorkspaceEvent): Transi
     case 'provision': {
       if (event.type === 'pod-ready') {
         s.phase = 'running'
+        s.provisioned = true
+        s.lastWakeAt = at
+        log(s, 'pod-ready', at)
         if (idle) {
-          s.idleSince = now()
+          s.idleSince = at
+          return { state: s, action: hasCommands ? { kind: 'start-grace' } : { kind: 'start-idle' } }
+        }
+        return { state: s, action: { kind: 'none' } }
+      }
+      if (event.type === 'pod-lost') {
+        return { state: s, action: { kind: 'ensure' } }
+      }
+      return { state: s, action: { kind: 'none' } }
+    }
+
+    case 'waking': {
+      if (event.type === 'pod-ready') {
+        s.phase = 'running'
+        s.provisioned = true
+        s.lastWakeAt = at
+        s.wakeCount += 1
+        log(s, 'pod-ready', at)
+        if (idle) {
+          s.idleSince = at
           return { state: s, action: hasCommands ? { kind: 'start-grace' } : { kind: 'start-idle' } }
         }
         return { state: s, action: { kind: 'none' } }
@@ -117,6 +182,7 @@ export function transition(state: WorkspaceState, event: WorkspaceEvent): Transi
 
     case 'running': {
       if (event.type === 'pod-lost') {
+        log(s, 'pod-lost', at)
         return { state: s, action: { kind: 'ensure' } }
       }
       if (event.type === 'user-attach' && s.idleSince !== undefined) {
@@ -124,32 +190,50 @@ export function transition(state: WorkspaceState, event: WorkspaceEvent): Transi
         return { state: s, action: { kind: 'cancel-timers' } }
       }
 
+      // Manual sleep (user request): sleep regardless of activity.
+      if (event.type === 'sleep-requested') {
+        s.phase = 'sleep'
+        s.idleSince = undefined
+        s.activeCommands = 0
+        s.lastSleepAt = at
+        s.sleepCount += 1
+        log(s, 'sleep', at)
+        return { state: s, action: { kind: 'dispose' } }
+      }
+
       if (event.type === 'idle-expired' && idle && !hasCommands) {
         s.phase = 'sleep'
         s.idleSince = undefined
         s.activeCommands = 0
+        s.lastSleepAt = at
+        s.sleepCount += 1
+        log(s, 'sleep', at)
         return { state: s, action: { kind: 'dispose' } }
       }
       if (event.type === 'grace-expired' && idle) {
         s.phase = 'sleep'
         s.idleSince = undefined
         s.activeCommands = 0 // drain/force-terminate before pod deletion
+        s.lastSleepAt = at
+        s.sleepCount += 1
+        log(s, 'sleep', at)
         return { state: s, action: { kind: 'dispose' } }
       }
 
       // Command count changed while idle: switch timer type without waiting
       // for the previous timer to fire.
       if (idle && s.idleSince !== undefined && event.type === 'command-started' && hasCommands) {
-        s.idleSince = now()
+        s.idleSince = at
         return { state: s, action: { kind: 'start-grace' } }
       }
       if (idle && s.idleSince !== undefined && event.type === 'command-ended' && !hasCommands) {
-        s.idleSince = now()
+        s.idleSince = at
         return { state: s, action: { kind: 'start-idle' } }
       }
 
       if (idle && s.idleSince === undefined) {
-        s.idleSince = now()
+        s.idleSince = at
+        log(s, hasCommands ? 'grace-started' : 'idle-started', at)
         return { state: s, action: hasCommands ? { kind: 'start-grace' } : { kind: 'start-idle' } }
       }
       if (!idle && s.idleSince !== undefined) {
@@ -161,8 +245,10 @@ export function transition(state: WorkspaceState, event: WorkspaceEvent): Transi
 
     case 'sleep': {
       if (event.type === 'user-attach' || event.type === 'ensure-requested' || event.type === 'session-created') {
-        s.phase = 'provision'
+        const waking = s.provisioned
+        s.phase = waking ? 'waking' : 'provision'
         s.idleSince = undefined
+        log(s, waking ? 'waking-started' : 'provision-started', at)
         return { state: s, action: { kind: 'ensure' } }
       }
       return { state: s, action: { kind: 'none' } }

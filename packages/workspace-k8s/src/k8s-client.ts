@@ -21,6 +21,12 @@ export interface PvcOptions {
   storageSize?: string
 }
 
+/** One metrics.k8s.io sample for a workspace pod. */
+export interface PodMetrics {
+  cpuCores: number
+  memoryBytes: number
+}
+
 export interface PodController {
   ensurePod(spec: WorkspacePodSpec): Promise<string>
   deletePod(namespace: string, name: string): Promise<void>
@@ -28,11 +34,40 @@ export interface PodController {
   endpoint(namespace: string, name: string, port: number): string
   ensurePvc(workspaceId: string): Promise<string>
   deletePvc(workspaceId: string): Promise<void>
+  /** Resource names for a workspace id (platform naming: one name throughout). */
+  podName(workspaceId: string): string
+  pvcName(workspaceId: string): string
   /** Optional reconciliation support. */
   listPods?(namespace: string): Promise<string[]>
   listPvcs?(namespace: string): Promise<string[]>
   /** Optional direct pod-IP lookup (used to avoid flaky cluster DNS). */
   getPodIp?(namespace: string, name: string): Promise<string>
+  /** Optional metrics.k8s.io pod usage; undefined when metrics-server is absent. */
+  getPodMetrics?(namespace: string, name: string): Promise<PodMetrics | undefined>
+}
+
+/** Parse a k8s CPU quantity ("100m", "1", "250000000n") into cores. */
+export function parseCpuQuantity(value: string | undefined): number {
+  if (value === undefined || value === '') return 0
+  const m = /^([0-9]+)(m|n)?$/.exec(value.trim())
+  if (m === null) return Number(value) || 0
+  const n = Number(m[1])
+  if (m[2] === 'm') return n / 1000
+  if (m[2] === 'n') return n / 1e9
+  return n
+}
+
+/** Parse a k8s memory quantity ("128974848", "123456Ki", "1Gi") into bytes. */
+export function parseMemoryQuantity(value: string | undefined): number {
+  if (value === undefined || value === '') return 0
+  const m = /^([0-9]+)([KMGTPE]i?)?$/.exec(value.trim())
+  if (m === null) return Number(value) || 0
+  const n = Number(m[1])
+  const suffix = m[2] ?? ''
+  const exp: Record<string, number> = { '': 0, K: 1, Ki: 1, M: 2, Mi: 2, G: 3, Gi: 3, T: 4, Ti: 4, P: 5, Pi: 5, E: 6, Ei: 6 }
+  const e = exp[suffix]
+  if (e === undefined) return n
+  return n * 1024 ** e
 }
 
 export const MANAGED_ANNOTATION = 'dsh-platform/managed'
@@ -167,6 +202,34 @@ export class K8sPodController implements PodController {
     const ip = pod.status?.podIP
     if (!ip) throw new Error(`workspace pod ${name} has no IP`)
     return ip
+  }
+
+  async getPodMetrics(namespace: string, name: string): Promise<PodMetrics | undefined> {
+    const custom = this.kc.makeApiClient(k8s.CustomObjectsApi)
+    let raw: unknown
+    try {
+      raw = await custom.getNamespacedCustomObject({
+        group: 'metrics.k8s.io',
+        version: 'v1beta1',
+        namespace,
+        plural: 'pods',
+        name,
+      })
+    } catch {
+      // metrics-server absent or the pod has no samples yet
+      return undefined
+    }
+    const body = (raw as { body?: unknown }).body ?? raw
+    const containers = (body as { containers?: Array<{ usage?: { cpu?: string; memory?: string } }> }).containers
+    if (!Array.isArray(containers)) return undefined
+    let cpuCores = 0
+    let memoryBytes = 0
+    for (const c of containers) {
+      cpuCores += parseCpuQuantity(c.usage?.cpu)
+      memoryBytes += parseMemoryQuantity(c.usage?.memory)
+    }
+    if (cpuCores === 0 && memoryBytes === 0) return undefined
+    return { cpuCores, memoryBytes }
   }
 
   async deletePod(namespace: string, workspaceId: string): Promise<void> {

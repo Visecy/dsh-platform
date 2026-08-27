@@ -105,6 +105,16 @@ export function registerWorkspaceApi(
             data = await management.ensure(id)
             break
           }
+          case 'sleep': {
+            const id = typeof body.workspaceId === 'string' ? body.workspaceId : ''
+            if (id === '') {
+              fail(res, 400, 'bad-request', 'workspaceId is required')
+              return
+            }
+            await management.sleep(id)
+            data = { ok: true }
+            break
+          }
           case 'delete': {
             const id = typeof body.workspaceId === 'string' ? body.workspaceId : ''
             if (id === '') {

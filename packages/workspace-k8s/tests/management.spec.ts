@@ -6,6 +6,7 @@ import { WorkspaceManagement } from '../src/management.ts'
 import type { PodController, WorkspacePodSpec } from '../src/k8s-client.ts'
 import type { WorkspaceRegistry } from '../src/registry.ts'
 import type { WorkspaceStatusService } from '../src/wire.ts'
+import { WorkspaceMetricsSampler } from '../src/metrics.ts'
 
 class FakeController implements PodController {
   pods = new Set<string>()
@@ -19,6 +20,8 @@ class FakeController implements PodController {
   async deletePvc(): Promise<void> {}
   async listPods(): Promise<string[]> { return [...this.pods] }
   async listPvcs(): Promise<string[]> { return [...this.pvcs] }
+  podName(workspaceId: string): string { return workspaceId }
+  pvcName(workspaceId: string): string { return workspaceId + '-data' }
 }
 
 class FakeRegistry implements WorkspaceRegistry {
@@ -49,12 +52,23 @@ describe('WorkspaceManagement', () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-ws-mgmt-'))
     ctrl = new FakeController()
     reg = new FakeRegistry()
+    const metrics = new WorkspaceMetricsSampler({
+      controller: ctrl,
+      namespace: 'dsh',
+      intervalMs: 0,
+      limits: { cpu: '2', memory: '4Gi' },
+    })
     mgr = new WorkspaceManagement({
       controller: ctrl,
       registry: reg,
       status: makeStatus(),
+      metrics,
       namespace: 'dsh',
       hostRoot: root,
+      image: 'test-image:v1',
+      storageClassName: 'standard',
+      storageSize: '10Gi',
+      resources: { cpu: '2', memory: '4Gi' },
       deleteWorkspace: async (id) => { await ctrl.deletePod('dsh', id) },
       ensureWorkspace: async (id) => { ctrl.pods.add(id); ctrl.pvcs.add(id + '-data'); return 'endpoint' },
     })

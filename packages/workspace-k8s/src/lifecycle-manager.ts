@@ -97,6 +97,11 @@ export class WorkspaceLifecycleManager {
     this.handle(workspaceId, { type: 'user-attach' })
   }
 
+  /** Explicit manual sleep (user request). */
+  sleep(workspaceId: string): void {
+    this.handle(workspaceId, { type: 'sleep-requested' })
+  }
+
   /** Explicit workspace deletion. */
   delete(workspaceId: string): void {
     this.handle(workspaceId, { type: 'dispose-requested' })

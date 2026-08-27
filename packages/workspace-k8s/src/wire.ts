@@ -56,6 +56,8 @@ export function wireWorkspaceLifecycle(ctx: Context & EventBus, opts: WireOption
   resolveEndpoint: (workspaceId: string) => Promise<string>
   commandTracker: CommandActivityTracker
   deleteWorkspace: (workspaceId: string) => void
+  attach: (workspaceId: string) => void
+  sleepWorkspace: (workspaceId: string) => void
   status: WorkspaceStatusService
 } {
   const manager = new WorkspaceLifecycleManager(opts.lifecycle)
@@ -97,6 +99,8 @@ export function wireWorkspaceLifecycle(ctx: Context & EventBus, opts: WireOption
       commandEnded: (workspaceId) => manager.commandEnded(workspaceId),
     },
     deleteWorkspace: (workspaceId) => manager.delete(workspaceId),
+    attach: (workspaceId) => manager.attach(workspaceId),
+    sleepWorkspace: (workspaceId) => manager.sleep(workspaceId),
     status: {
       get: (workspaceId) => manager.snapshot(workspaceId),
       list: () => manager.allStates(),

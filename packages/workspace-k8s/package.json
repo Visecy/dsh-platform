@@ -8,6 +8,7 @@
     "@kubernetes/client-node": "^2.0.0"
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-client-ui-workspace": "0.1.1-rc.2",
     "@types/node": "^26.2.0",
     "@visecy/dsh-sandbox-daemon": "workspace:*",
     "typescript": "^7.0.2",
