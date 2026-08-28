@@ -14,6 +14,12 @@
   disabled: true
 - id: directory-picker
   disabled: true
+# the official ui-workspace row is disabled: its sidebar/hero surfaces are
+# owned by the vendored WorkspaceBrowser in @visecy/dsh-workspace-k8s
+# (status patches), and both registering the same locale namespace crashes
+# the official apply.
+- id: ui-workspace
+  disabled: true
 - insert:
     - id: webserver-gated
       name: '@visecy/dsh-web-auth'

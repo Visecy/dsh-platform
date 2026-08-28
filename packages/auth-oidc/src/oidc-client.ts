@@ -45,6 +45,7 @@ export interface OidcUser {
 export class OidcClient {
   private discovery?: OidcDiscovery
   private jwks?: { keys: JsonWebKey[] }
+  private jwksFetchedAt = 0
 
   readonly config: OidcConfig
   constructor(config: OidcConfig) {
@@ -57,6 +58,20 @@ export class OidcClient {
     if (!res.ok) throw new Error(`OIDC discovery failed: ${res.status}`)
     this.discovery = (await res.json()) as OidcDiscovery
     return this.discovery
+  }
+
+  /** JWKS cache TTL: providers (dex) rotate signing keys, so the set is
+   *  re-fetched periodically and once more when an unknown kid is seen. */
+  private static readonly JWKS_TTL_MS = 5 * 60 * 1000
+
+  private async loadJwks(d: OidcDiscovery, force = false): Promise<{ keys: JsonWebKey[] }> {
+    const fresh = Date.now() - this.jwksFetchedAt > OidcClient.JWKS_TTL_MS
+    if (this.jwks !== undefined && !fresh && !force) return this.jwks
+    const res = await fetch(d.jwks_uri)
+    if (!res.ok) throw new Error(`jwks fetch failed: ${res.status}`)
+    this.jwks = (await res.json()) as { keys: JsonWebKey[] }
+    this.jwksFetchedAt = Date.now()
+    return this.jwks
   }
 
   /** Build the authorize URL with PKCE; returns { url, verifier, state }. */
@@ -103,12 +118,14 @@ export class OidcClient {
     }
     const header = JSON.parse(base64urlDecode(headerB64)) as { alg: string; kid?: string }
     const d = await this.getDiscovery()
-    if (this.jwks === undefined) {
-      const res = await fetch(d.jwks_uri)
-      if (!res.ok) throw new Error(`jwks fetch failed: ${res.status}`)
-      this.jwks = (await res.json()) as { keys: JsonWebKey[] }
+    const jwks = await this.loadJwks(d)
+    let key = jwks.keys.find((k) => k.kid === header.kid)
+    if (key === undefined) {
+      // Key rotation: the cached set may predate the signing key. Refetch
+      // once before giving up.
+      const freshJwks = await this.loadJwks(d, true)
+      key = freshJwks.keys.find((k) => k.kid === header.kid)
     }
-    const key = this.jwks.keys.find((k) => k.kid === header.kid)
     if (key === undefined) throw new Error('no matching jwk for id_token')
     const publicKey = createPublicKey({ key: key, format: 'jwk' })
     const { verify } = await import('node:crypto')
