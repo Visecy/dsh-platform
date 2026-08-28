@@ -25,7 +25,7 @@ class FakeController implements PodController {
 }
 
 class FakeRegistry implements WorkspaceRegistry {
-  rows: Array<{ workspaceId: string; path: string; title?: string }> = []
+  rows: Array<{ workspaceId: string; path: string; title?: string; internalId?: string }> = []
   deleted: string[] = []
   async list() { return [...this.rows] }
   async create(path: string) {
@@ -88,6 +88,24 @@ describe('WorkspaceManagement', () => {
     const rows = await mgr.list()
     expect(rows.find((r) => r.workspaceId === 'ws-sleep')?.phase).toBe('sleep')
     expect(rows.find((r) => r.workspaceId === 'ws-sleep')?.hasPvc).toBe(true)
+  })
+
+  it('propagates the official native UUID from registry rows', async () => {
+    reg.rows.push({
+      workspaceId: 'git',
+      path: `${root}/git`,
+      title: 'git',
+      internalId: 'a4a357de-0289-497a-ba19-ccdd18edf17e',
+    })
+    ctrl.pods.add('git')
+    ctrl.pvcs.add('git-data')
+    const rows = await mgr.list()
+    const git = rows.find((r) => r.workspaceId === 'git')
+    expect(git?.nativeWorkspaceId).toBe('a4a357de-0289-497a-ba19-ccdd18edf17e')
+    // Pod/PVC-only rows (no registry record) keep nativeWorkspaceId undefined.
+    ctrl.pods.add('ws-stale')
+    const stale = (await mgr.list()).find((r) => r.workspaceId === 'ws-stale')
+    expect(stale?.nativeWorkspaceId).toBeUndefined()
   })
 
   it('lists pod-only workspaces as orphan', async () => {

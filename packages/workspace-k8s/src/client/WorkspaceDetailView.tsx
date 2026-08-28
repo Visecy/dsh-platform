@@ -56,7 +56,10 @@ export function WorkspaceDetailView(props: Props) {
       </div>
     )
   }
-  const row: StatusRow | undefined = status.rows.find((r) => r.workspaceId === ws.workspaceId)
+  // The catalog keys by the platform id (path segment) but also carries the
+  // official native UUID (nativeWorkspaceId); the workspaces service items
+  // key by that UUID, so join on either.
+  const row: StatusRow | undefined = status.rows.find((r) => r.nativeWorkspaceId === ws.workspaceId || r.workspaceId === ws.workspaceId)
   const phase = row?.phase ?? 'unknown'
   const label = row?.label ?? '未知'
 
@@ -93,7 +96,9 @@ export function WorkspaceDetailView(props: Props) {
   const doAction = async (action: string): Promise<void> => {
     setBusy(true)
     try {
-      await runStatusAction(ws.workspaceId, action)
+      // The API addresses workspaces by the platform id (path segment), not
+      // the official native UUID the workspaces service uses.
+      await runStatusAction(row?.workspaceId ?? ws.workspaceId, action)
       setConfirmDelete(false)
     } catch (e) {
       console.error(e)

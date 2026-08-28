@@ -181,7 +181,9 @@ export class WorkspaceManagement implements WorkspaceManagementService {
       // non-platform workspaces; only /workspaces/<id> rows are real
       // platform workspaces.
       if (!path.startsWith(`${this.opts.hostRoot}/`) || path === this.opts.hostRoot) continue
-      rows.push(this.entry({ workspaceId: id, path, title: reg?.title }, hasPod, hasPvc))
+      // Pass the FULL registry row when present: entry() reads internalId
+      // (the official UUID the client workspaces service keys by) from it.
+      rows.push(this.entry(reg ?? { workspaceId: id, path, title: undefined }, hasPod, hasPvc))
     }
     rows.sort((a, b) => a.workspaceId.localeCompare(b.workspaceId))
     return rows

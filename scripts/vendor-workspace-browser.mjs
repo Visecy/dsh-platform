@@ -56,7 +56,7 @@ patch([L('const directoryFlowAvailable = useDirectoryFlow((occupied) => occupied
   L('const statusSnapshot = useStatus((snapshot) => snapshot);', 0),
   L('const statusById = {};', 0),
   L('if (statusSnapshot !== void 0 && Array.isArray(statusSnapshot.rows)) {', 0),
-  L('for (const statusRow of statusSnapshot.rows) statusById[statusRow.workspaceId] = statusRow;', 1),
+  L('for (const statusRow of statusSnapshot.rows) statusById[statusRow.nativeWorkspaceId ?? statusRow.workspaceId] = statusRow;', 1),
   L('}', 0),
 ], 'status-wiring')
 patch([L('function SessionTree({ useSessions, startSession, open, forkSession, workspaces, archivedSessionIds, onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive, insertWorkspaceBefore, insertSessionBefore, orderBy, groupExpansion, setGroupExpanded, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, home, t }) {', 0)],
