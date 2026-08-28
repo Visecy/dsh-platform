@@ -98,6 +98,7 @@ async function runStatusAction(workspaceId, action) {
 
 // src/client/WorkspaceDetailView.tsx
 var import_react = require("react");
+var import_jsx_runtime = require("react/jsx-runtime");
 var fmtDur = (ms) => {
   const s = Math.max(0, Math.floor(ms / 1e3));
   const h = Math.floor(s / 3600);
@@ -131,7 +132,7 @@ function WorkspaceDetailView(props) {
   const [busy, setBusy] = (0, import_react.useState)(false);
   const ws = workspaces.find((w) => (w.sessionIds ?? []).includes(sessionId));
   if (ws === void 0) {
-    return /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd" }, /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-inner" }, /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-empty" }, "\u8BE5\u4F1A\u8BDD\u672A\u5173\u8054\u5DE5\u4F5C\u533A")));
+    return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-inner", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-empty", children: "\u8BE5\u4F1A\u8BDD\u672A\u5173\u8054\u5DE5\u4F5C\u533A" }) }) });
   }
   const row = status.rows.find((r) => r.nativeWorkspaceId === ws.workspaceId || r.workspaceId === ws.workspaceId);
   const phase = row?.phase ?? "unknown";
@@ -180,33 +181,96 @@ function WorkspaceDetailView(props) {
   const metricsFrozen = phase === "sleep" || phase === "deleted";
   const k8s = row?.k8s ?? null;
   const timeline = (row?.timeline ?? []).slice().reverse();
-  return /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd" }, /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-inner" }, /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-head" }, /* @__PURE__ */ React.createElement("span", { className: "dsh-wsd-name" }, ws.title || ws.workspaceId), /* @__PURE__ */ React.createElement("span", { className: `dsh-wsb-dot ${phase}` }), /* @__PURE__ */ React.createElement("span", { className: `dsh-wsb-phase ${phase}` }, label), /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-actions" }, phase === "sleep" || phase === "unknown" ? /* @__PURE__ */ React.createElement("button", { className: "dsh-wsd-btn primary", disabled: busy, onClick: () => void doAction("ensure") }, "\u5524\u9192") : null, phase === "running" ? /* @__PURE__ */ React.createElement("button", { className: "dsh-wsd-btn", disabled: busy, onClick: () => void doAction("sleep") }, "\u4F11\u7720") : null, confirmDelete ? /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("button", { className: "dsh-wsd-btn danger", disabled: busy, onClick: () => void doAction("delete") }, "\u786E\u8BA4\u5220\u9664"), /* @__PURE__ */ React.createElement("button", { className: "dsh-wsd-btn", disabled: busy, onClick: () => setConfirmDelete(false) }, "\u53D6\u6D88")) : /* @__PURE__ */ React.createElement("button", { className: "dsh-wsd-btn danger", onClick: () => setConfirmDelete(true) }, "\u5220\u9664"))), /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-cols" }, /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-col" }, /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-card" }, /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-status" }, /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-phase-line" }, /* @__PURE__ */ React.createElement("span", { className: `dsh-wsb-dot ${phase}` }), /* @__PURE__ */ React.createElement("span", null, label)), countdown !== null ? /* @__PURE__ */ React.createElement("div", { className: `dsh-wsd-countdown${countdownOk ? " ok" : ""}` }, countdown) : null, /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-statgrid" }, stats.map(([k, v]) => /* @__PURE__ */ React.createElement("div", { key: k, className: "dsh-wsd-stat" }, /* @__PURE__ */ React.createElement("div", { className: "k" }, k), /* @__PURE__ */ React.createElement("div", { className: "v" }, String(v))))))), /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-card" }, /* @__PURE__ */ React.createElement("h4", null, "\u751F\u547D\u5468\u671F"), /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-sm" }, smStates.map((s, i) => {
-    const isWakingEdge = phase === "waking" && s.key === "sleep";
-    return /* @__PURE__ */ React.createElement(import_react.Fragment, { key: s.key }, i === 0 ? null : /* @__PURE__ */ React.createElement("span", { className: "arrow" }, isWakingEdge ? null : s.key === "sleep" ? "\u21C4" : "\u2192"), isWakingEdge ? /* @__PURE__ */ React.createElement("span", { className: "node waking" }, "\u5524\u9192\u4E2D\u2026") : /* @__PURE__ */ React.createElement("span", { className: `node${phase === s.key ? " current" : ""}` }, s.label));
-  }))), /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-card" }, /* @__PURE__ */ React.createElement("h4", null, "\u65F6\u95F4\u7EBF"), /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-tl" }, timeline.length === 0 ? /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-empty" }, "\u6682\u65E0\u4E8B\u4EF6") : timeline.map((e, i) => /* @__PURE__ */ React.createElement("div", { key: i, className: "ev" }, /* @__PURE__ */ React.createElement("span", { className: "t" }, fmtAgo(status.at - e.at)), /* @__PURE__ */ React.createElement("span", null, e.text)))))), /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-col" }, /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-card" }, /* @__PURE__ */ React.createElement("h4", null, "\u8D44\u6E90\u6307\u6807"), metrics === null ? /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-metric-note" }, "\u6307\u6807\u4E0D\u53EF\u7528\uFF08\u9700 metrics-server\uFF09") : /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-metrics" }, ["cpu", "mem"].map((key) => {
-    const m = metrics[key];
-    const name = key === "cpu" ? "CPU" : "\u5185\u5B58";
-    const value = key === "cpu" ? `${Math.round(m.value * 1e3) / 1e3} \u6838` : `${m.value} MB`;
-    return /* @__PURE__ */ React.createElement("div", { key, className: `dsh-wsd-metric${metricsFrozen ? " frozen" : ""}` }, /* @__PURE__ */ React.createElement("div", { className: "mk" }, name), /* @__PURE__ */ React.createElement("div", { className: "mv" }, m.pct === null ? value : `${value} \xB7 ${m.pct}%`), m.history.length > 1 ? /* @__PURE__ */ React.createElement("svg", { viewBox: "0 0 120 26", preserveAspectRatio: "none" }, /* @__PURE__ */ React.createElement(
-      "polyline",
-      {
-        points: spark(m.history, 120, 24),
-        fill: "none",
-        stroke: "currentColor",
-        strokeWidth: "1.5",
-        strokeLinejoin: "round"
-      }
-    )) : null);
-  }), !metrics.available ? /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-metric-note" }, "metrics-server \u65E0\u54CD\u5E94\uFF0C\u663E\u793A\u6700\u8FD1\u91C7\u6837") : null)), k8s !== null ? /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-card" }, /* @__PURE__ */ React.createElement("h4", null, "k8s \u8D44\u6E90"), /* @__PURE__ */ React.createElement("div", { className: "dsh-wsd-k8s" }, [
-    ["\u6267\u884C Pod", k8s.podName],
-    ["\u6570\u636E\u5377 PVC", k8s.pvcName],
-    ["\u547D\u540D\u7A7A\u95F4", k8s.namespace],
-    ["\u955C\u50CF", k8s.image],
-    ["RuntimeClass", k8s.runtimeClass ?? "\u2014"],
-    ["\u8D44\u6E90\u9650\u989D", `${k8s.cpuLimit ?? "\u2014"} / ${k8s.memLimit ?? "\u2014"}`],
-    ["\u5B58\u50A8\u7C7B", k8s.storageClass ?? "\u2014"],
-    ["\u5BB9\u91CF", `${k8s.capacityGB} GB`]
-  ].map(([k, v]) => /* @__PURE__ */ React.createElement("div", { key: k }, /* @__PURE__ */ React.createElement("div", { className: "k" }, k), /* @__PURE__ */ React.createElement("div", { className: "v" }, String(v)))))) : null))));
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd", children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-inner", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-head", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dsh-wsd-name", children: ws.title || ws.workspaceId }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: `dsh-wsb-dot ${phase}` }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: `dsh-wsb-phase ${phase}`, children: label }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-actions", children: [
+        phase === "sleep" || phase === "unknown" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { className: "dsh-wsd-btn primary", disabled: busy, onClick: () => void doAction("ensure"), children: "\u5524\u9192" }) : null,
+        phase === "running" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { className: "dsh-wsd-btn", disabled: busy, onClick: () => void doAction("sleep"), children: "\u4F11\u7720" }) : null,
+        confirmDelete ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { className: "dsh-wsd-btn danger", disabled: busy, onClick: () => void doAction("delete"), children: "\u786E\u8BA4\u5220\u9664" }),
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { className: "dsh-wsd-btn", disabled: busy, onClick: () => setConfirmDelete(false), children: "\u53D6\u6D88" })
+        ] }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { className: "dsh-wsd-btn danger", onClick: () => setConfirmDelete(true), children: "\u5220\u9664" })
+      ] })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-cols", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-col", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-card", children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-status", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-phase-line", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: `dsh-wsb-dot ${phase}` }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: label })
+          ] }),
+          countdown !== null ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: `dsh-wsd-countdown${countdownOk ? " ok" : ""}`, children: countdown }) : null,
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-statgrid", children: stats.map(([k, v]) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-stat", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "k", children: k }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "v", children: String(v) })
+          ] }, k)) })
+        ] }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-card", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h4", { children: "\u751F\u547D\u5468\u671F" }),
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-sm", children: smStates.map((s, i) => {
+            const isWakingEdge = phase === "waking" && s.key === "sleep";
+            return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_react.Fragment, { children: [
+              i === 0 ? null : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "arrow", children: isWakingEdge ? null : s.key === "sleep" ? "\u21C4" : "\u2192" }),
+              isWakingEdge ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "node waking", children: "\u5524\u9192\u4E2D\u2026" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: `node${phase === s.key ? " current" : ""}`, children: s.label })
+            ] }, s.key);
+          }) })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-card", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h4", { children: "\u65F6\u95F4\u7EBF" }),
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-tl", children: timeline.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-empty", children: "\u6682\u65E0\u4E8B\u4EF6" }) : timeline.map((e, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "ev", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "t", children: fmtAgo(status.at - e.at) }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: e.text })
+          ] }, i)) })
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-col", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-card", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h4", { children: "\u8D44\u6E90\u6307\u6807" }),
+          metrics === null ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-metric-note", children: "\u6307\u6807\u4E0D\u53EF\u7528\uFF08\u9700 metrics-server\uFF09" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-metrics", children: [
+            ["cpu", "mem"].map((key) => {
+              const m = metrics[key];
+              const name = key === "cpu" ? "CPU" : "\u5185\u5B58";
+              const value = key === "cpu" ? `${Math.round(m.value * 1e3) / 1e3} \u6838` : `${m.value} MB`;
+              return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: `dsh-wsd-metric${metricsFrozen ? " frozen" : ""}`, children: [
+                /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "mk", children: name }),
+                /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "mv", children: m.pct === null ? value : `${value} \xB7 ${m.pct}%` }),
+                m.history.length > 1 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("svg", { viewBox: "0 0 120 26", preserveAspectRatio: "none", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                  "polyline",
+                  {
+                    points: spark(m.history, 120, 24),
+                    fill: "none",
+                    stroke: "currentColor",
+                    strokeWidth: "1.5",
+                    strokeLinejoin: "round"
+                  }
+                ) }) : null
+              ] }, key);
+            }),
+            !metrics.available ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-metric-note", children: "metrics-server \u65E0\u54CD\u5E94\uFF0C\u663E\u793A\u6700\u8FD1\u91C7\u6837" }) : null
+          ] })
+        ] }),
+        k8s !== null ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-card", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h4", { children: "k8s \u8D44\u6E90" }),
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-k8s", children: [
+            ["\u6267\u884C Pod", k8s.podName],
+            ["\u6570\u636E\u5377 PVC", k8s.pvcName],
+            ["\u547D\u540D\u7A7A\u95F4", k8s.namespace],
+            ["\u955C\u50CF", k8s.image],
+            ["RuntimeClass", k8s.runtimeClass ?? "\u2014"],
+            ["\u8D44\u6E90\u9650\u989D", `${k8s.cpuLimit ?? "\u2014"} / ${k8s.memLimit ?? "\u2014"}`],
+            ["\u5B58\u50A8\u7C7B", k8s.storageClass ?? "\u2014"],
+            ["\u5BB9\u91CF", `${k8s.capacityGB} GB`]
+          ].map(([k, v]) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "k", children: k }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "v", children: String(v) })
+          ] }, k)) })
+        ] }) : null
+      ] })
+    ] })
+  ] }) });
 }
 
 // src/client/vendored-workspace.ts

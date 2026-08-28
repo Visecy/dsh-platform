@@ -46,6 +46,11 @@ await build({
   format: 'cjs',
   target: 'es2022',
   external,
+  // Automatic JSX runtime: our own .tsx sources compile to
+  // jsx-runtime calls (react/jsx-runtime is external and already in the
+  // module table), not React.createElement — the component files never
+  // import the React namespace.
+  jsx: 'automatic',
   define: {
     'process.env.NODE_ENV': '"production"',
   },
