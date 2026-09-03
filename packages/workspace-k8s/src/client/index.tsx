@@ -18,16 +18,30 @@
  * references `statusSource` / `runStatusAction` as bare identifiers; they
  * resolve through the eval closure to this module's scope, so they must
  * stay imported here.
+ *
+ * The 0.1.2 client stack has no `@deepseek-ai/dsh-client-runtime` package:
+ * client plugins type their ctx as the cordis Context (see the official
+ * ui-workspace /client declaration: exports `apply(ctx)` + `inject`). The
+ * fibers/events this apply() consumes (`ctx.slots`, `ctx.get`, `ctx.on`)
+ * belong to that root context, so a minimal structural interface stands in
+ * for the vanished ClientContext type.
  */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { poll, runStatusAction, statusSource } from './store.ts'
 import { WorkspaceDetailView } from './WorkspaceDetailView.tsx'
 import { VENDORED_WORKSPACE_BROWSER } from './vendored-workspace.ts'
 import { WORKSPACE_UI_CSS } from './styles.ts'
 
 export const inject = ['slots', 'sessions', 'workspaces', 'locale', 'connection']
+
+/** Structural client root context consumed by apply() (see header note). */
+interface ClientContext {
+  on(event: string, listener: () => void): void
+  get<T = unknown>(name: string): T | undefined
+  slots: {
+    inject(slot: string, register: () => unknown): unknown
+    register(options: Record<string, unknown>, component?: unknown): unknown
+  }
+}
 
 function ensureStyles(): void {
   if (typeof document === 'undefined') return

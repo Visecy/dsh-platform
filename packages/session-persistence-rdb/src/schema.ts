@@ -13,14 +13,16 @@
  * them (STRICT + version/identity pragmas live with the SQLite backend in
  * `sqlite.ts`). There is no migration toolchain and no hand-written DDL.
  *
- * Delta content is NOT persisted: `assistant/chunk` events are dropped at
- * write time, and surviving events are re-numbered to a dense persisted seq
- * (`f_original_seq` keeps the upstream seq, so `sourceEventSeqs` provenance
- * can be remapped on read — see `log.ts`). This gives the backend the same
- * "ephemeral chunks stay out of the canonical log" semantics the persistence
- * proposal records, without requiring the upstream session layer to skip seqs.
+ * Since 0.1.2 the backend persists EVERY event the coordinator delivers —
+ * including `assistant/chunk` deltas and events the writer marked
+ * `ignorable` — with its exact seq (`f_sequence` == `f_original_seq`), so no
+ * write-time filtering or renumbering exists anymore. Rows written by the
+ * rc.2-era delta-filtering backend remain readable (see `log.ts` for the
+ * legacy remap path). An event whose envelope marked `ignorable: true` keeps
+ * that marker in the physical row via `f_encoding`, so reads reproduce it for
+ * the coordinator's unknown-type tolerance.
  *
- * @module @morlay/session-persistence-rdb/schema
+ * @module @visecy/dsh-session-persistence-rdb/schema
  */
 
 import type { SessionEvent } from "@deepseek-ai/dsh-session";
@@ -38,15 +40,20 @@ export const SCHEMA_VERSION = 1;
 export const SESSION_PERSISTENCE_SQLITE_APPLICATION_ID = 0x44534850;
 
 /**
- * Event types whose CONTENT is not persisted: the backend drops these rows
- * entirely and re-numbers the surviving events to a dense persisted seq.
- * Mirrors the persistence proposal's "ephemeral events never enter the
- * canonical log" split.
+ * `t_events.f_encoding` for a regular row: JSON text. Future compression would
+ * switch this per row.
  */
-export const EPHEMERAL_EVENT_TYPES = ["assistant/chunk"] as const;
-
-/** `t_events.f_encoding` value: JSON text. Future compression would switch this per row. */
 export const EVENT_ENCODING = "json";
+
+/**
+ * `t_events.f_encoding` for a row whose event envelope marked
+ * `ignorable: true`. The marker is part of the event envelope (the JSONL
+ * backend writes it on the record line), so the RDB schema keeps it in the
+ * encoding column — `f_data` stays the bare payload. `rowToEvent` restores
+ * the marker on read; without it, a persisted unknown-type event would read
+ * back as REQUIRED and the coordinator would refuse the whole log.
+ */
+export const IGNORABLE_EVENT_ENCODING = "json-ignorable";
 
 /**
  * SQLite drizzle tables derived from the single entity definitions in
@@ -74,8 +81,8 @@ export const tSessionEvents = sqliteTables["t_session_events"]!;
  * A row of the `t_sessions` table — the out-of-log metadata ({@link SessionHeader})
  * plus the playpen-style head cursor (the last committed event id and seq). The
  * row's EXISTENCE is the materialization signal: it is written only by the
- * first non-empty append (lazy materialization), so a created-but-never-appended
- * session has no row and is absent from `list`.
+ * first non-empty append or an explicit header-only materialization, so a
+ * created-but-never-appended session has no row and is absent from `list`.
  *
  * The canonical shared shape lives in `backend.ts` (dialect-neutral); the
  * drizzle-derived select model is structurally compatible.
@@ -106,32 +113,12 @@ export type JournalMode = "wal" | "delete" | "truncate" | "persist";
 export const DEFAULT_BUSY_TIMEOUT_MS = 5000;
 
 /**
- * Whether an event type is ephemeral (its content must not be persisted).
- * @param type - the upstream `SessionEvent.type`.
- * @returns true for delta events the backend drops at write time.
- */
-export function isEphemeralType(type: string): boolean {
-  return (EPHEMERAL_EVENT_TYPES as readonly string[]).includes(type);
-}
-
-/**
- * Whether an event must be persisted. An event is dropped at write time when
- * its type is ephemeral (content not persisted) OR the writer marked it
- * `ignorable` — the envelope contract promises loss of an ignorable event
- * cannot affect reconstruction, so it never enters the canonical log (the
- * upstream seq is still recorded for provenance pruning, exactly like a
- * dropped delta).
- */
-export function isPersistedEvent(event: SessionEvent): boolean {
-  return !isEphemeralType(event.type) && event.ignorable !== true;
-}
-
-/**
  * Map a persisted event onto the playpen event dimensions. `f_kind` is the
  * upstream type; `f_role`/`f_name`/`f_action_id` are the playpen classification
  * columns. Unknown (plugin-merged) event types keep the playpen defaults so a
  * future extension can classify them without a schema change.
- * @param event - the event to classify (never an ephemeral type at write time).
+ * @param event - the event to classify (any type; since 0.1.2 nothing is
+ *   filtered at write time, so `assistant/chunk` deltas are classified too).
  * @returns the role, name, and action-id column values.
  */
 export function eventDimensions(event: SessionEvent): {
@@ -151,6 +138,7 @@ export function eventDimensions(event: SessionEvent): {
     case "request/context":
       return { role: "user", name: "", actionId: "" };
     case "assistant/message":
+    case "assistant/chunk":
       return { role: "model", name: "", actionId: "" };
     case "tool/call":
       return { role: "function", name: event.data.name, actionId: event.data.callId };

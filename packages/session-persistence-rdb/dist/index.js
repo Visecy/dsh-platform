@@ -1,6 +1,5 @@
-// packages/session-persistence-rdb/src/index.ts
+// src/index.ts
 import z from "@deepseek-ai/schemastery";
-import { settingsNamespace } from "@deepseek-ai/dsh-settings";
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { Pool } from "pg";
 import { drizzle as drizzlePg } from "drizzle-orm/node-postgres";
@@ -9,148 +8,23 @@ import {
   SessionPersistenceRevision,
   PersistenceCoordinator
 } from "@deepseek-ai/dsh-session-persistence";
+import {
+  SessionLogOffset
+} from "@deepseek-ai/dsh-session";
 
-// packages/session-persistence-rdb/src/log.ts
-function rowToMeta(row) {
-  if (!Number.isSafeInteger(row.fCreatedAt) || row.fCreatedAt < 0) {
-    throw new Error("stored session createdAt must be a non-negative safe integer");
-  }
-  return {
-    version: row.fVersion,
-    id: row.fSessionId,
-    createdAt: row.fCreatedAt,
-    ...row.fCwd !== null ? { cwd: row.fCwd } : {},
-    ...row.fParentSession !== null ? { parentSession: row.fParentSession } : {},
-    ...row.fSeedLength !== null ? { seedLength: row.fSeedLength } : {},
-    ...row.fOrigin !== null ? { origin: row.fOrigin } : {},
-    ...row.fDelegationDepth === null ? {} : { delegationDepth: row.fDelegationDepth }
-  };
-}
-function sessionInsertRow(meta, incarnation) {
-  return {
-    fSessionId: meta.id,
-    fHeadEventId: "",
-    fHeadSequence: -1,
-    fVersion: meta.version,
-    fCreatedAt: meta.createdAt,
-    fCwd: meta.cwd ?? null,
-    fParentSession: meta.parentSession ?? null,
-    fSeedLength: meta.seedLength ?? null,
-    fOrigin: meta.origin ?? null,
-    fDelegationDepth: meta.delegationDepth ?? null,
-    fIncarnation: incarnation,
-    fRevision: 0
-  };
-}
-function sessionConflictRow(meta) {
-  return {
-    fVersion: meta.version,
-    fCreatedAt: meta.createdAt,
-    fCwd: meta.cwd ?? null,
-    fParentSession: meta.parentSession ?? null,
-    fSeedLength: meta.seedLength ?? null,
-    fOrigin: meta.origin ?? null,
-    fDelegationDepth: meta.delegationDepth ?? null
-  };
-}
-function remapSurfaceOp(op, remap) {
-  if (op === "append") return op;
-  return { op: "replace", start: remap(op.start), end: remap(op.end) };
-}
-function remapShadowedRange(range, remap) {
-  return { start: remap(range.start), end: remap(range.end) };
-}
-function rowToEvent(row, seqMap) {
-  const remap = (seq) => seqMap?.get(seq) ?? seq;
-  const surfaceFields = {
-    ...row.fSourceEventSeqs !== null ? {
-      sourceEventSeqs: JSON.parse(row.fSourceEventSeqs).map(remap)
-    } : {},
-    ...row.fSurfaceOp !== null ? {
-      surfaceOp: remapSurfaceOp(JSON.parse(row.fSurfaceOp), remap)
-    } : {}
-  };
-  const data = JSON.parse(row.fData);
-  if (row.fKind === "compaction/summary" || row.fKind === "compaction/prune") {
-    const metering = data;
-    if (metering.shadowedRange !== void 0) {
-      metering.shadowedRange = remapShadowedRange(metering.shadowedRange, remap);
-    }
-  }
-  return {
-    type: row.fKind,
-    seq: row.fSequence,
-    time: row.fCreatedAt,
-    data,
-    ...surfaceFields
-  };
-}
-function buildSeqMap(rows) {
-  const map = /* @__PURE__ */ new Map();
-  for (const row of rows) {
-    if (!map.has(row.fOriginalSeq)) map.set(row.fOriginalSeq, row.fSequence);
-  }
-  return map;
-}
-function pruneSourceEventSeqs(refs, keep) {
-  return refs.filter(keep);
-}
-function scanRows(rows, base = 0, seqMap) {
-  const parsed = rows.map((row) => {
-    try {
-      return { ok: true, event: rowToEvent(row, seqMap) };
-    } catch {
-      return { ok: false };
-    }
-  });
-  let lastTurnEnd = -1;
-  for (let i = parsed.length - 1; i >= 0; i--) {
-    if (parsed[i]?.ok && rows[i]?.fKind === "turn/end") {
-      lastTurnEnd = i;
-      break;
-    }
-  }
-  const preserved = [];
-  for (let i = 0; i < rows.length; i++) {
-    const p = parsed[i];
-    if (!p?.ok || p.event === void 0) {
-      if (i <= lastTurnEnd)
-        throw new Error(
-          `corrupt session log: unparsable committed event at seq ${rows[i]?.fSequence}`
-        );
-      break;
-    }
-    if (p.event.seq !== base + i) {
-      if (i <= lastTurnEnd)
-        throw new Error(
-          `corrupt session log: seq gap in committed region (expected ${base + i}, got ${p.event.seq})`
-        );
-      break;
-    }
-    preserved.push(p.event);
-  }
-  return preserved.length < rows.length ? { preserved, tornFrom: base + preserved.length } : { preserved };
-}
-
-// packages/session-persistence-rdb/src/write-guard.ts
+// src/write-guard.ts
 var WriteGuard = class {
   /**
-   * Last CONFIRMED dense head per session — the head this instance itself
-   * wrote or observed via `loadStored`. `-1` records a confirmed absence (no
-   * row). `undefined` (absent from the map) means this instance never read or
-   * wrote the session.
+   * Last CONFIRMED head per session — the head this instance itself wrote or
+   * observed via `loadStored`. `-1` records a confirmed absence (no row).
+   * `undefined` (absent from the map) means this instance never read or wrote
+   * the session.
    */
   headSeqs = /* @__PURE__ */ new Map();
   /**
-   * Upstream seqs of delta events dropped per session. Mirrors `headSeqs` in
-   * shape: the concurrent-writer guarantee limits each session to one writer,
-   * so this instance is the only authority for its dropped seqs.
-   */
-  filteredSeqs = /* @__PURE__ */ new Map();
-  /**
    * Record a head this instance actually observed or wrote.
    * @param id - the session id.
-   * @param head - the confirmed dense head, or `-1` for a confirmed absence
+   * @param head - the confirmed head, or `-1` for a confirmed absence
    *   (a fresh session this instance has read about — a later append to a
    *   session that meanwhile got a row must reject).
    */
@@ -164,7 +38,7 @@ var WriteGuard = class {
    * means this instance's coordinator cursor is not the log's authority.
    * @param id - the session id.
    * @param storedHead - the on-disk head cursor, read inside the append
-   *   transaction before any re-numbering happens.
+   *   transaction before any row is inserted.
    */
   assertNoConcurrentWriter(id, storedHead) {
     const known = this.headSeqs.get(id);
@@ -182,42 +56,9 @@ var WriteGuard = class {
       );
     }
   }
-  /**
-   * Record the upstream seqs of events dropped for a session (delta events and
-   * ignorable events), so a later batch's `assistant/message` can prune
-   * `sourceEventSeqs` references to events that never got a persisted row.
-   * @param id - the session id.
-   * @param seqs - the dropped events' upstream seqs (pure-delta batches included).
-   */
-  noteDropped(id, seqs) {
-    const known = this.filteredSeqs.get(id) ?? /* @__PURE__ */ new Set();
-    for (const seq of seqs) known.add(seq);
-    this.filteredSeqs.set(id, known);
-  }
-  /**
-   * Prune `sourceEventSeqs` references that hit this session's dropped-delta
-   * seq set. `undefined`-like state (no dropped seqs recorded for the session)
-   * leaves the list untouched, matching the write path's "no known drops →
-   * keep verbatim" semantics (repair closers, which never carry provenance,
-   * call through the identity path).
-   *
-   * The predicate is THIS INSTANCE's view (see
-   * {@link pruneSourceEventSeqs}): only seqs it knows were dropped are
-   * pruned — references to rows persisted by another instance (e.g. a resume
-   * seed segment) must survive, so the disk-wide view used by the one-shot
-   * repair script is not applicable here.
-   * @param id - the session id.
-   * @param refs - the event's `sourceEventSeqs` (upstream seqs).
-   * @returns the pruned list; identical content when nothing was dropped.
-   */
-  pruneRefs(id, refs) {
-    const dropped = this.filteredSeqs.get(id);
-    if (dropped === void 0 || dropped.size === 0) return [...refs];
-    return pruneSourceEventSeqs(refs, (seq) => !dropped.has(seq));
-  }
 };
 
-// packages/session-persistence-rdb/src/adapters/to-sqlite.ts
+// src/adapters/to-sqlite.ts
 import { sql } from "drizzle-orm";
 import {
   check as sqliteCheck,
@@ -228,12 +69,12 @@ import {
   unique
 } from "drizzle-orm/sqlite-core";
 
-// packages/session-persistence-rdb/src/entities/types.ts
+// src/entities/types.ts
 function toProperty(name) {
   return name.replace(/_([a-z])/g, (_match, char) => char.toUpperCase());
 }
 
-// packages/session-persistence-rdb/src/adapters/to-sqlite.ts
+// src/adapters/to-sqlite.ts
 function buildColumn(c, tables) {
   let col;
   switch (c.type) {
@@ -289,7 +130,7 @@ function toSqliteSchema(defs) {
   return tables;
 }
 
-// packages/session-persistence-rdb/src/adapters/to-postgres.ts
+// src/adapters/to-postgres.ts
 import { sql as sql2 } from "drizzle-orm";
 import {
   bigint,
@@ -360,7 +201,7 @@ function toPostgresSchema(defs) {
   return tables;
 }
 
-// packages/session-persistence-rdb/src/adapters/ddl.ts
+// src/adapters/ddl.ts
 function sqlType(dialect, type) {
   switch (type) {
     case "serial":
@@ -417,7 +258,7 @@ function createTablesSql(dialect, defs) {
   return statements;
 }
 
-// packages/session-persistence-rdb/src/entities/persistence-state.ts
+// src/entities/persistence-state.ts
 var persistenceState = {
   name: "t_persistence_state",
   columns: [
@@ -427,7 +268,7 @@ var persistenceState = {
   checks: [{ name: "ck_persistence_state_singleton", expression: "f_singleton = 1" }]
 };
 
-// packages/session-persistence-rdb/src/entities/schema-meta.ts
+// src/entities/schema-meta.ts
 var schemaMeta = {
   name: "t_schema_meta",
   columns: [
@@ -436,7 +277,7 @@ var schemaMeta = {
   ]
 };
 
-// packages/session-persistence-rdb/src/entities/sessions.ts
+// src/entities/sessions.ts
 var sessions = {
   name: "t_sessions",
   columns: [
@@ -448,6 +289,10 @@ var sessions = {
     { name: "f_created_at", type: "bigint", notNull: true },
     { name: "f_cwd", type: "text" },
     { name: "f_parent_session", type: "text" },
+    // 0.1.2：out-of-log 的继承前缀 cut。存在性 = 头部 isSeeded（镜像 JSONL
+    // header 行的 seedLength 字段）；无该列的 rc.2 时代行仍按旧语义读取（见
+    // log.ts 的 storedInheritedCount）。写路径在 INSERT 时写入 cut、CONFLICT
+    // 时保留原值（sessionConflictRow 不含此列）。
     { name: "f_seed_length", type: "integer" },
     { name: "f_origin", type: "text" },
     { name: "f_delegation_depth", type: "integer" },
@@ -456,7 +301,7 @@ var sessions = {
   ]
 };
 
-// packages/session-persistence-rdb/src/entities/events.ts
+// src/entities/events.ts
 var events = {
   name: "t_events",
   columns: [
@@ -480,7 +325,7 @@ var events = {
   // 的查询——不再为不可达查询维护索引（写放大）。
 };
 
-// packages/session-persistence-rdb/src/entities/session-events.ts
+// src/entities/session-events.ts
 var sessionEvents = {
   name: "t_session_events",
   columns: [
@@ -506,7 +351,7 @@ var sessionEvents = {
   // 已覆盖本表的全部访问模式（按 session 过滤 + 按 seq 范围/排序/取尾）。
 };
 
-// packages/session-persistence-rdb/src/entities/index.ts
+// src/entities/index.ts
 var sqliteTableDefs = [persistenceState, sessions, events, sessionEvents];
 var postgresTableDefs = [
   persistenceState,
@@ -516,23 +361,17 @@ var postgresTableDefs = [
   sessionEvents
 ];
 
-// packages/session-persistence-rdb/src/schema.ts
+// src/schema.ts
 var SCHEMA_VERSION = 1;
 var SESSION_PERSISTENCE_SQLITE_APPLICATION_ID = 1146308688;
-var EPHEMERAL_EVENT_TYPES = ["assistant/chunk"];
 var EVENT_ENCODING = "json";
+var IGNORABLE_EVENT_ENCODING = "json-ignorable";
 var sqliteTables = toSqliteSchema(sqliteTableDefs);
 var tPersistenceState = sqliteTables["t_persistence_state"];
 var tSessions = sqliteTables["t_sessions"];
 var tEvents = sqliteTables["t_events"];
 var tSessionEvents = sqliteTables["t_session_events"];
 var DEFAULT_BUSY_TIMEOUT_MS = 5e3;
-function isEphemeralType(type) {
-  return EPHEMERAL_EVENT_TYPES.includes(type);
-}
-function isPersistedEvent(event) {
-  return !isEphemeralType(event.type) && event.ignorable !== true;
-}
 function eventDimensions(event) {
   switch (event.type) {
     case "turn/start":
@@ -546,6 +385,7 @@ function eventDimensions(event) {
     case "request/context":
       return { role: "user", name: "", actionId: "" };
     case "assistant/message":
+    case "assistant/chunk":
       return { role: "model", name: "", actionId: "" };
     case "tool/call":
       return { role: "function", name: event.data.name, actionId: event.data.callId };
@@ -560,7 +400,138 @@ function eventDimensions(event) {
   }
 }
 
-// packages/session-persistence-rdb/src/sqlite.ts
+// src/log.ts
+function rowToMeta(row) {
+  if (!Number.isSafeInteger(row.fCreatedAt) || row.fCreatedAt < 0) {
+    throw new Error("stored session createdAt must be a non-negative safe integer");
+  }
+  return {
+    version: row.fVersion,
+    id: row.fSessionId,
+    createdAt: row.fCreatedAt,
+    ...row.fCwd !== null ? { cwd: row.fCwd } : {},
+    ...row.fParentSession !== null ? { parentSession: row.fParentSession } : {},
+    isSeeded: row.fSeedLength !== null,
+    ...row.fOrigin !== null ? { origin: row.fOrigin } : {},
+    ...row.fDelegationDepth === null ? {} : { delegationDepth: row.fDelegationDepth }
+  };
+}
+function sessionInsertRow(meta, inheritedEventCount, incarnation) {
+  return {
+    fSessionId: meta.id,
+    fHeadEventId: "",
+    fHeadSequence: -1,
+    fVersion: meta.version,
+    fCreatedAt: meta.createdAt,
+    fCwd: meta.cwd ?? null,
+    fParentSession: meta.parentSession ?? null,
+    fSeedLength: meta.isSeeded ? inheritedEventCount : null,
+    fOrigin: meta.origin ?? null,
+    fDelegationDepth: meta.delegationDepth ?? null,
+    fIncarnation: incarnation,
+    fRevision: 0
+  };
+}
+function sessionConflictRow(meta) {
+  return {
+    fVersion: meta.version,
+    fCreatedAt: meta.createdAt,
+    fCwd: meta.cwd ?? null,
+    fParentSession: meta.parentSession ?? null,
+    fOrigin: meta.origin ?? null,
+    fDelegationDepth: meta.delegationDepth ?? null
+  };
+}
+function hasLegacyRenumbering(rows) {
+  return rows.some((row) => row.fOriginalSeq !== row.fSequence);
+}
+function storedInheritedCount(storedCut, seqRows, legacy) {
+  if (storedCut === null) return 0;
+  if (!legacy) return storedCut;
+  let count = 0;
+  for (const row of seqRows) {
+    if (row.fOriginalSeq < storedCut) count += 1;
+  }
+  return count;
+}
+function remapSurfaceOp(op, remap) {
+  if (op === "append") return op;
+  return { op: "replace", start: remap(op.start), end: remap(op.end) };
+}
+function remapShadowedRange(range, remap) {
+  return { start: remap(range.start), end: remap(range.end) };
+}
+function rowToEvent(row, seqMap) {
+  const remap = (seq) => seqMap?.get(seq) ?? seq;
+  const surfaceFields = {
+    ...row.fSourceEventSeqs !== null ? {
+      sourceEventSeqs: JSON.parse(row.fSourceEventSeqs).map(remap)
+    } : {},
+    ...row.fSurfaceOp !== null ? {
+      surfaceOp: remapSurfaceOp(JSON.parse(row.fSurfaceOp), remap)
+    } : {}
+  };
+  const data = JSON.parse(row.fData);
+  if (row.fKind === "compaction/summary" || row.fKind === "compaction/prune") {
+    const metering = data;
+    if (metering.shadowedRange !== void 0) {
+      metering.shadowedRange = remapShadowedRange(metering.shadowedRange, remap);
+    }
+  }
+  return {
+    type: row.fKind,
+    seq: row.fSequence,
+    time: row.fCreatedAt,
+    data,
+    ...row.fEncoding === IGNORABLE_EVENT_ENCODING ? { ignorable: true } : {},
+    ...surfaceFields
+  };
+}
+function buildSeqMap(rows) {
+  const map = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    if (!map.has(row.fOriginalSeq)) map.set(row.fOriginalSeq, row.fSequence);
+  }
+  return map;
+}
+function scanRows(rows, base = 0, seqMap) {
+  const parsed = rows.map((row) => {
+    try {
+      return { ok: true, event: rowToEvent(row, seqMap) };
+    } catch {
+      return { ok: false };
+    }
+  });
+  let lastTurnEnd = -1;
+  for (let i = parsed.length - 1; i >= 0; i--) {
+    if (parsed[i]?.ok && rows[i]?.fKind === "turn/end") {
+      lastTurnEnd = i;
+      break;
+    }
+  }
+  const preserved = [];
+  for (let i = 0; i < rows.length; i++) {
+    const p = parsed[i];
+    if (!p?.ok || p.event === void 0) {
+      if (i <= lastTurnEnd)
+        throw new Error(
+          `corrupt session log: unparsable committed event at seq ${rows[i]?.fSequence}`
+        );
+      break;
+    }
+    if (p.event.seq !== base + i) {
+      if (i <= lastTurnEnd)
+        throw new Error(
+          `corrupt session log: seq gap in committed region (expected ${base + i}, got ${p.event.seq})`
+        );
+      break;
+    }
+    preserved.push(p.event);
+  }
+  return preserved.length < rows.length ? { preserved, tornFrom: base + preserved.length } : { preserved };
+}
+
+// src/sqlite.ts
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { mkdir, open } from "node:fs/promises";
@@ -720,7 +691,7 @@ var SqliteBackend = class {
    * row primitives used by the non-transactional reads.
    */
   tx = {
-    upsertSession: (meta, incarnation) => this.upsertSession(meta, incarnation),
+    upsertSession: (meta, inheritedEventCount, incarnation) => this.upsertSession(meta, inheritedEventCount, incarnation),
     getHead: (id) => this.getHead(id),
     insertEvents: (events2) => this.insertEvents(events2),
     insertBridges: (rows) => this.insertBridges(rows),
@@ -731,8 +702,8 @@ var SqliteBackend = class {
     getLastBridge: (id) => this.getLastBridge(id)
   };
   // --- row primitives (transaction-internal or standalone) ---
-  async upsertSession(meta, incarnation) {
-    this.db.insert(tSessions).values(sessionInsertRow(meta, incarnation)).onConflictDoUpdate({
+  async upsertSession(meta, inheritedEventCount, incarnation) {
+    this.db.insert(tSessions).values(sessionInsertRow(meta, inheritedEventCount, incarnation)).onConflictDoUpdate({
       target: tSessions.fSessionId,
       set: sessionConflictRow(meta)
     }).run();
@@ -773,13 +744,14 @@ var SqliteBackend = class {
       fKind: tEvents.fKind,
       fCreatedAt: tEvents.fCreatedAt,
       fData: tEvents.fData,
+      fEncoding: tEvents.fEncoding,
       fSourceEventSeqs: tEvents.fSourceEventSeqs,
       fSurfaceOp: tEvents.fSurfaceOp
     }).from(tSessionEvents).innerJoin(tEvents, eq(tSessionEvents.fEventId, tEvents.fEventId));
   }
 };
 
-// packages/session-persistence-rdb/src/postgres.ts
+// src/postgres.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { and as and2, desc as desc2, eq as eq2, gte as gte2, sql as sql4 } from "drizzle-orm";
 var pgTables = toPostgresSchema(postgresTableDefs);
@@ -861,7 +833,7 @@ var PostgresBackend = class {
   /** Bind the {@link BackendTx} primitives to one drizzle PG transaction handle. */
   txFor(tx) {
     return {
-      upsertSession: (meta, incarnation) => this.upsertSession(tx, meta, incarnation),
+      upsertSession: (meta, inheritedEventCount, incarnation) => this.upsertSession(tx, meta, inheritedEventCount, incarnation),
       getHead: (id) => this.getHead(tx, id),
       insertEvents: (events2) => this.insertEvents(tx, events2),
       insertBridges: (rows) => this.insertBridges(tx, rows),
@@ -878,8 +850,8 @@ var PostgresBackend = class {
     return rows[0]?.fValue;
   }
   // --- row primitives (transaction-internal) ---
-  async upsertSession(exec, meta, incarnation) {
-    await exec.insert(pgSessions).values(sessionInsertRow(meta, incarnation)).onConflictDoUpdate({
+  async upsertSession(exec, meta, inheritedEventCount, incarnation) {
+    await exec.insert(pgSessions).values(sessionInsertRow(meta, inheritedEventCount, incarnation)).onConflictDoUpdate({
       target: pgSessions.fSessionId,
       set: sessionConflictRow(meta)
     }).execute();
@@ -920,13 +892,14 @@ var PostgresBackend = class {
       fKind: pgEvents.fKind,
       fCreatedAt: pgEvents.fCreatedAt,
       fData: pgEvents.fData,
+      fEncoding: pgEvents.fEncoding,
       fSourceEventSeqs: pgEvents.fSourceEventSeqs,
       fSurfaceOp: pgEvents.fSurfaceOp
     }).from(pgSessionEvents).innerJoin(pgEvents, eq2(pgSessionEvents.fEventId, pgEvents.fEventId));
   }
 };
 
-// packages/session-persistence-rdb/src/index.ts
+// src/index.ts
 var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersistence {
   constructor(ctx, config, injectedBackend) {
     let resolved = config;
@@ -965,8 +938,12 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
       connectionString: z.string().required()
     })
   ]);
-  /** settings namespace：`$DSH_HOME/settings.yaml` 的 `session-persistence-rdb` section。 */
-  static settingsNs = settingsNamespace("session-persistence-rdb");
+  /**
+   * settings namespace：`$DSH_HOME/settings.yaml` 的 `session-persistence-rdb`
+   * section。0.1.2 的 dsh-settings 移除了 `settingsNamespace()` 帮助函数 —
+   * 字面量本身即合法 namespace（小写连字符标识符）。
+   */
+  static settingsNs = "session-persistence-rdb";
   /**
    * Backend label for the coordinator's dispose diagnostics. Intentionally
    * shadows cordis `Service.name` (set to `'sessionPersistence'` by the base);
@@ -980,9 +957,8 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
   ready;
   coordinator;
   /**
-   * Write-authority state: the confirmed dense head per session (concurrent-
-   * writer detection) and the dropped delta seqs per session (provenance
-   * pruning). See {@link WriteGuard} for the timing contract.
+   * Write-authority state: the confirmed head per session (concurrent-writer
+   * detection). See {@link WriteGuard} for the timing contract.
    */
   writeGuard = new WriteGuard();
   async init() {
@@ -994,17 +970,26 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
   locate(_meta) {
     return void 0;
   }
-  create(meta) {
-    return this.coordinator.create(meta);
+  create(meta, inheritedEventCount) {
+    return this.coordinator.create(meta, inheritedEventCount);
+  }
+  ensureMaterialized(session) {
+    return this.coordinator.ensureMaterialized(session);
   }
   append(id, events2) {
     return this.coordinator.append(id, events2);
+  }
+  prepare(id, signal) {
+    return this.coordinator.prepare(id, signal);
   }
   load(id) {
     return this.coordinator.load(id);
   }
   inspect(id, signal) {
     return this.coordinator.inspect(id, signal);
+  }
+  borrowSession(id, signal) {
+    return this.coordinator.borrowSession(id, signal);
   }
   readFrom(id, fromSeq, signal) {
     return this.coordinator.readFrom(id, fromSeq, signal);
@@ -1018,21 +1003,27 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
   }
   /**
    * Seek-capable suffix read: the backend selects `f_sequence >= fromSeq`
-   * directly, so the read scales with the suffix, not the log. Provenance
-   * remapping still needs every row's upstream seq, so a lightweight
-   * two-column map is read alongside. Torn rows past the preserved region are
-   * dropped, never repaired (non-mutating read).
+   * directly, so the read scales with the suffix, not the log. A legacy
+   * (rc.2-era, dense-renumbered) log still needs every row's upstream seq for
+   * provenance remapping, so a lightweight two-column map is read alongside.
+   * The read is non-mutating: torn rows past the preserved region are dropped,
+   * never repaired. The returned metadata carries the session's inherited cut
+   * exactly like {@link loadStored}.
    */
   async loadStoredFrom(id, fromSeq, signal) {
     const log = await this.readLog(id, { fromSeq }, signal);
     if (log === void 0) return void 0;
-    return { meta: log.meta, events: log.events };
+    return {
+      meta: log.meta,
+      inheritedEventCount: SessionLogOffset(log.inheritedEventCount),
+      events: log.events
+    };
   }
   /**
    * Read a session's row + ordered events into a {@link StoredPrefix}. The
    * torn-tail marker is the persisted seq from which a never-committed tail
    * must be deleted (`scanRows` already returns it as `number | undefined`).
-   * Records the confirmed dense head (or confirmed absence) so a later
+   * Records the confirmed head (or confirmed absence) so a later
    * `appendBatch` can detect a second writer that advanced the log.
    */
   async readPrefix(id, signal) {
@@ -1044,6 +1035,10 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
     this.writeGuard.confirmHead(id, log.events.at(-1)?.seq ?? -1);
     return {
       meta: log.meta,
+      // The inherited cut travels OUT of band: the 0.1.2 header forbids
+      // `seedLength`, so every body-bearing read carries it alongside the
+      // header (mirrors the JSONL backend's fromHeaderLine pairing).
+      inheritedEventCount: SessionLogOffset(log.inheritedEventCount),
       events: log.events,
       // The revision must identify exactly these values and match
       // readStoredRevision's representation (see listSnapshots).
@@ -1070,10 +1065,16 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
     );
   }
   /**
-   * Shared read pipeline: session row → meta, event rows → preserved prefix.
-   * A whole-log read (`fromSeq` absent) builds the seq map from the same rows;
-   * a suffix read keeps the backend's lightweight two-column seq-map source so
-   * the query still scales with the suffix, not the log.
+   * Shared read pipeline: session row → meta + inherited cut, event rows →
+   * preserved prefix. A whole-log read (`fromSeq` absent) builds the legacy
+   * seq map from the same rows; a suffix read keeps the backend's lightweight
+   * two-column seq-map source so the query still scales with the suffix, not
+   * the log. The session is LEGACY when any of its rows carries
+   * `f_original_seq != f_sequence` (written by the rc.2-era delta-filtering
+   * backend): such logs are read through the upstream→persisted remap path
+   * and their stored cut is translated from upstream space to row space.
+   * Logs written by this build (`f_original_seq == f_sequence` everywhere)
+   * pass through as identity and use the stored cut verbatim.
    */
   async readLog(id, options = {}, signal) {
     signal?.throwIfAborted();
@@ -1083,18 +1084,24 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
     if (row === void 0) return void 0;
     const meta = rowToMeta(row);
     let eventRows;
-    let seqMap;
+    let seqRows;
+    let fromSeq = 0;
     if (options.fromSeq === void 0) {
       eventRows = await this.backend.getEventRows(id);
-      seqMap = buildSeqMap(eventRows);
+      seqRows = eventRows;
     } else {
-      eventRows = await this.backend.getEventRows(id, options.fromSeq);
-      seqMap = buildSeqMap(await this.backend.getSeqMapRows(id));
+      fromSeq = options.fromSeq;
+      eventRows = await this.backend.getEventRows(id, fromSeq);
+      seqRows = await this.backend.getSeqMapRows(id);
     }
     signal?.throwIfAborted();
-    const { preserved, tornFrom } = scanRows(eventRows, options.fromSeq ?? 0, seqMap);
+    const legacy = hasLegacyRenumbering(seqRows);
+    const seqMap = legacy ? buildSeqMap(seqRows) : void 0;
+    const inheritedEventCount = storedInheritedCount(row.fSeedLength, seqRows, legacy);
+    const { preserved, tornFrom } = scanRows(eventRows, fromSeq, seqMap);
     return {
       meta,
+      inheritedEventCount,
       events: preserved,
       incarnation: row.fIncarnation,
       revision: row.fRevision,
@@ -1103,13 +1110,13 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
   }
   /**
    * Durably append a batch in ONE transaction: materialize the sessions row (if
-   * lazy) and INSERT every persisted event (plus its bridge row), or roll back
-   * entirely. Delta events and events the writer marked `ignorable` are dropped
-   * and the surviving events are re-numbered densely from the session's head
-   * cursor; a batch that contains only dropped events is a no-op (no row
-   * materialization, no revision bump). Dropped events' upstream seqs are
-   * recorded per session so a later batch's surface provenance can prune
-   * references to them (see {@link surfaceBindings}).
+   * lazy) and INSERT every event (plus its bridge row), or roll back entirely.
+   * Since 0.1.2 NOTHING is dropped or renumbered: every event the coordinator
+   * delivers — deltas and ignorable events included — is persisted verbatim
+   * with its exact seq, so a batch that is only delta/ignorable events is a
+   * normal append (and a seeded session's first materializing batch includes
+   * its complete inherited prefix — the coordinator only invokes this hook
+   * once a batch reaches the declared cut).
    * The transaction is the atomicity + durability boundary, so a mid-batch
    * failure (a UNIQUE violation on a duplicated seq) leaves the stored log
    * untouched.
@@ -1117,37 +1124,34 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
    * SQLite acquires the write lock up front (`BEGIN IMMEDIATE`, queued behind
    * `busy_timeout`); PostgreSQL relies on the transaction's row locks and the
    * `UNIQUE (f_session_id, f_sequence)` constraint to reject a colliding batch.
-   * Either way {@link assertNoConcurrentWriter} rejects a second writer before
-   * re-numbering — a session has exactly one writer per log, and a second
-   * writer fails loud instead of corrupting the log.
+   * Either way {@link WriteGuard.assertNoConcurrentWriter} rejects a second
+   * writer before any row lands — a session has exactly one writer per log,
+   * and a second writer fails loud instead of corrupting the log.
    *
-   * The row upsert runs UNCONDITIONALLY, not only when `!isMaterialized`: a
-   * delta-only batch leaves the coordinator's materialized flag true while no
-   * row exists, so the flag cannot be trusted as the row's existence signal.
-   * The upsert keeps an existing row's head cursor (only header columns are
-   * refreshed on conflict), so a fresh row still starts at the initial head.
+   * The row upsert runs UNCONDITIONALLY, not only when `!isMaterialized`:
+   * the materialized flag is coordinator memory and cannot be trusted as the
+   * row's existence signal. On conflict only the header columns refresh —
+   * the head cursor, identity, revision, and the stored inherited cut are
+   * preserved (the cut deliberately survives: a legacy row's cut lives in its
+   * first generation's upstream space, and rewriting it would corrupt every
+   * later translation — see `sessionConflictRow` in `log.ts`).
+   * @param storage - the session's header plus its exact inherited cut.
+   * @param events - the contiguous batch to persist, in seq order.
+   * @param _isMaterialized - whether a sessions row already exists (lazy
+   *   materialization is handled by the unconditional upsert).
    */
-  async appendBatch(meta, events2, _isMaterialized) {
+  async appendBatch(storage, events2, _isMaterialized) {
     await this.ready;
-    const droppedSeqs = /* @__PURE__ */ new Set();
-    for (const event of events2) {
-      if (!isPersistedEvent(event)) droppedSeqs.add(event.seq);
-    }
-    if (droppedSeqs.size > 0) this.writeGuard.noteDropped(meta.id, droppedSeqs);
-    const persisted = events2.filter(isPersistedEvent);
-    if (persisted.length === 0) return;
+    const { meta } = storage;
     let confirmedHead = -1;
     await this.backend.transaction(async (tx) => {
-      await tx.upsertSession(meta, randomUUID3());
+      await tx.upsertSession(meta, storage.inheritedEventCount, randomUUID3());
       const head = await tx.getHead(meta.id);
       this.writeGuard.assertNoConcurrentWriter(meta.id, head.fHeadSequence);
-      const { headEventId, headSequence } = await appendEventTail(
-        tx,
-        meta,
-        persisted,
-        { parentId: head.fHeadEventId, nextSeq: head.fHeadSequence + 1 },
-        (refs) => this.writeGuard.pruneRefs(meta.id, refs)
-      );
+      const { headEventId, headSequence } = await appendEventTail(tx, storage, events2, {
+        parentId: head.fHeadEventId,
+        nextSeq: head.fHeadSequence + 1
+      });
       await tx.updateHead(meta.id, headEventId, headSequence);
       await tx.bumpRevision(meta.id);
       confirmedHead = headSequence;
@@ -1155,15 +1159,31 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
     this.writeGuard.confirmHead(meta.id, confirmedHead);
   }
   /**
+   * Durably materialize a header-only session: create the `t_sessions` row (in
+   * one transaction) WITHOUT any event row. This is the backend half of the
+   * service's `ensureMaterialized` — an explicitly durable EMPTY session, so
+   * unlike {@link appendBatch} there is no head-cursor advance and no revision
+   * bump (a fresh row already starts at revision 0; row existence IS the
+   * materialization signal). The inherited cut is stored exactly like a
+   * materializing append's.
+   */
+  async materializeHeader(storage) {
+    await this.ready;
+    await this.backend.transaction(async (tx) => {
+      await tx.upsertSession(storage.meta, storage.inheritedEventCount, randomUUID3());
+    });
+  }
+  /**
    * Make a crash repair durable in ONE transaction: DELETE the torn tail (from
    * `tornMarker`), rewind the head cursor to the last surviving event, INSERT
    * the synthetic `closers`, and bump the revision once. After COMMIT the
-   * stored rows == the balanced log.
+   * stored rows == the balanced log. Closers are persisted verbatim like any
+   * other event (they never carry dropped content).
    */
-  async commitRepair(meta, tornMarker, closers) {
+  async commitRepair(storage, tornMarker, closers) {
     await this.ready;
-    const persistedClosers = closers.filter(isPersistedEvent);
-    if (tornMarker === void 0 && persistedClosers.length === 0) return;
+    const { meta } = storage;
+    if (tornMarker === void 0 && closers.length === 0) return;
     await this.backend.transaction(async (tx) => {
       if (tornMarker !== void 0) {
         await tx.deleteBridgeTail(meta.id, tornMarker);
@@ -1174,9 +1194,9 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
           await tx.updateHead(meta.id, prev.fEventId, prev.fSequence);
         }
       }
-      if (persistedClosers.length > 0) {
+      if (closers.length > 0) {
         const last = await tx.getLastBridge(meta.id);
-        const { headEventId, headSequence } = await appendEventTail(tx, meta, persistedClosers, {
+        const { headEventId, headSequence } = await appendEventTail(tx, storage, closers, {
           parentId: last?.fEventId ?? "",
           nextSeq: (last?.fSequence ?? -1) + 1
         });
@@ -1236,23 +1256,29 @@ function createBackend(config) {
   ].join(":");
   return new PostgresBackend(db, { identityBase, close: () => pool.end() });
 }
-function surfaceBindings(event, prune = (refs) => refs) {
+function surfaceBindings(event) {
   const se = event;
-  const sourceSeqs = se.sourceEventSeqs === void 0 ? void 0 : prune(se.sourceEventSeqs);
+  const sourceSeqs = se.sourceEventSeqs;
   return [
     sourceSeqs !== void 0 && sourceSeqs.length > 0 ? JSON.stringify(sourceSeqs) : null,
     se.surfaceOp !== void 0 ? JSON.stringify(se.surfaceOp) : null
   ];
 }
-async function appendEventTail(tx, meta, events2, anchor, prune = (refs) => refs) {
+async function appendEventTail(tx, storage, events2, anchor) {
+  const { meta } = storage;
   let parentId = anchor.parentId;
   let nextSeq = anchor.nextSeq;
   const eventRows = [];
   const bridgeRows = [];
   for (const event of events2) {
+    if (event.seq !== nextSeq) {
+      throw new Error(
+        `append seq mismatch for "${meta.id}": physical tail is at ${nextSeq - 1}, batch event carries seq ${event.seq} \u2014 refusing to renumber`
+      );
+    }
     const eventId = randomUUID3();
     const { role, name, actionId } = eventDimensions(event);
-    const [surfaceSeqs, surfaceOp] = surfaceBindings(event, prune);
+    const [surfaceSeqs, surfaceOp] = surfaceBindings(event);
     eventRows.push({
       fEventId: eventId,
       fParentId: parentId,
@@ -1260,7 +1286,7 @@ async function appendEventTail(tx, meta, events2, anchor, prune = (refs) => refs
       fRole: role,
       fName: name,
       fActionId: actionId,
-      fEncoding: EVENT_ENCODING,
+      fEncoding: event.ignorable === true ? IGNORABLE_EVENT_ENCODING : EVENT_ENCODING,
       fData: JSON.stringify(event.data),
       fCreatedAt: event.time,
       fOriginalSeq: event.seq,
@@ -1277,7 +1303,6 @@ async function appendEventTail(tx, meta, events2, anchor, prune = (refs) => refs
 }
 var index_default = SessionPersistenceRdb;
 export {
-  EPHEMERAL_EVENT_TYPES,
   SCHEMA_VERSION,
   SessionPersistenceRdb,
   index_default as default

@@ -5,7 +5,7 @@
  *
  * 所有方法均为 async：SQLite（`node:sqlite`）驱动同步执行、PostgreSQL 驱动
  * 异步执行，接口统一为 Promise 以便两种后端共用同一套存储逻辑。
- * @module @morlay/session-persistence-rdb/backend
+ * @module @visecy/dsh-session-persistence-rdb/backend
  */
 
 import type { SessionHeader, SessionId } from "@deepseek-ai/dsh-session";
@@ -13,6 +13,11 @@ import type { SessionHeader, SessionId } from "@deepseek-ai/dsh-session";
 /**
  * 与方言无关的 `t_sessions` 行投影。SQLite / PostgreSQL 的 drizzle
  * `InferSelectModel` 均结构兼容（各自多出的自增主键列不影响赋值）。
+ *
+ * `f_seed_length`：0.1.2 起是 out-of-log 的继承前缀 cut——头部不再携带
+ * `seedLength` 字段，`isSeeded` 由该列的存在性推导，cut 值随读路径带出
+ * （`StoredPrefix.inheritedEventCount`）。rc.2 时代的行该列仍是第一代行的
+ * upstream 空间 cut，由 {@link storedInheritedCount} 翻译（见 `log.ts`）。
  */
 export interface SessionRow {
   fSessionId: string;
@@ -53,11 +58,16 @@ export interface EventInsert {
 /**
  * 一个 joined `t_session_events` + `t_events` 行：按 session 本地 `f_sequence`
  * 寻址的持久化事件（`f_data` 为 JSON 文本，surface 列为 JSON 文本或 null）。
+ *
+ * 0.1.2 起的行满足 `f_sequence` == `f_original_seq` == 逻辑 seq（persist-
+ * everything，无重编号）；rc.2 时代稠密重编号的行 `f_original_seq` 保存
+ * upstream seq（读路径按 legacy 重映射，见 `log.ts`）。`f_encoding` 携带
+ * envelope 的 `ignorable` 标记（`json-ignorable`）。
  */
 export interface EventRow {
-  /** `t_session_events.f_sequence` — the dense persisted seq. */
+  /** `t_session_events.f_sequence` — the presented (persisted) seq. */
   fSequence: number;
-  /** `t_events.f_original_seq` — the upstream seq before delta filtering. */
+  /** `t_events.f_original_seq` — the upstream seq (== f_sequence since 0.1.2). */
   fOriginalSeq: number;
   /** `t_events.f_kind` — the upstream `SessionEvent.type`. */
   fKind: string;
@@ -65,6 +75,8 @@ export interface EventRow {
   fCreatedAt: number;
   /** `t_events.f_data` — JSON-encoded event data. */
   fData: string;
+  /** `t_events.f_encoding` — `json`, or `json-ignorable` for an ignorable event. */
+  fEncoding: string;
   /** JSON-encoded `number[]` — the event's sourceEventSeqs (upstream seqs), or null. */
   fSourceEventSeqs: string | null;
   /** JSON-encoded `SurfaceOp` — how the event entered the surface, or null. */
@@ -76,8 +88,13 @@ export interface EventRow {
  * （SQLite 单连接隐式满足；PostgreSQL 绑定到 drizzle 的事务句柄）。
  */
 export interface BackendTx {
-  /** Insert-or-replace the session's metadata row (initial head cursor). */
-  upsertSession(meta: SessionHeader, incarnation: string): Promise<void>;
+  /**
+   * Insert-or-replace the session's metadata row (initial head cursor).
+   * `inheritedEventCount` is the row-space fork cut, stored in `f_seed_length`
+   * only for a seeded header; ON CONFLICT the cut is preserved as stored
+   * (legacy rows keep their upstream-space cut — see `sessionConflictRow`).
+   */
+  upsertSession(meta: SessionHeader, inheritedEventCount: number, incarnation: string): Promise<void>;
   /** Fetch the head cursor; the caller materialized the row first. */
   getHead(id: SessionId): Promise<Pick<SessionRow, "fHeadEventId" | "fHeadSequence">>;
   /**

@@ -12,10 +12,31 @@
  *
  * Why patches and not plugins: the touched files are compiled artifacts of
  * official packages (the browser client bundle is loaded by package name;
- * the privileged RPC fence lives inside dsh-host-apiproxy's internal
- * closure). The platform's real extension points are cordis plugins — these
- * two patches only relax official loopback pins in a deployment where the
- * OIDC gate (dsh-auth-oidc) authenticates every request first.
+ * the Host/Origin fence and the browser-session cookie layer live inside
+ * dsh-client-connection's internal closure). The platform's real extension
+ * points are cordis plugins — these patches only relax official browser
+ * trust pins in a deployment where the OIDC gate (dsh-auth-oidc)
+ * authenticates every request first.
+ *
+ * DSH 0.1.2-rc.1 delta vs the 0.1.1-rc.2 fragments:
+ *  - the old "privileged RPC fence" fragment is GONE upstream: 0.1.2 removed
+ *    the PRIVILEGED_METHODS loopback tier and replaced it with one uniform
+ *    fence (Host/Origin check against config `trustedHosts` → 403) on every
+ *    /api request, RPC channel and WebSocket upgrade. trustedHosts is now
+ *    official configuration (`dsh web --trusted-host` → webRuntime →
+ *    connection row config), so the platform configures it in
+ *    docker/profiles/web.cordis.patch.yml instead of patching compiled code.
+ *  - 0.1.2 ADDED a browser-session layer: every request must also present an
+ *    authority-bound signed cookie minted from a per-process launch token
+ *    (BrowserAuth). Remote browsers behind the platform's OIDC gate can never
+ *    redeem that token (the gate 302s the tokenized URL to the IdP, which
+ *    drops the query), so this cookie layer is bypassed — the OIDC gate
+ *    remains the sole session layer while the Host/Origin fence stays active
+ *    as defense in depth.
+ *  - the browser-side `isLoopback` classification changed spelling (it now
+ *    also consults the shell transport's `ownsHost`); the platform still
+ *    forces `true` so remote browsers keep host-backed settings persistence,
+ *    the host document store and produced-file open affordances.
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -27,25 +48,43 @@ const base = process.argv[2] ? resolve(process.argv[2]) : join(here, '..', 'node
 const read = (p) => readFileSync(p, 'utf8')
 const write = (p, s) => writeFileSync(p, s)
 
+const L = '\n' // patched artifacts use \n line endings; fragments build with explicit escapes.
+
 /** One patch: file (relative to base), exact old/new, assertion regex+count, optional keep-guard. */
 const patches = [
   {
-    file: join(base, 'dsh-client-connection', 'lib', 'index.js'),
-    what: 'privileged RPC fence: trust configured trustedHosts (OIDC-gated deployment)',
-    old: 'if (method !== void 0 && PRIVILEGED_METHODS.has(method) && !isTrustedApiRequest(request, [])) return new Response("forbidden", { status: 403 });',
-    new: 'if (method !== void 0 && PRIVILEGED_METHODS.has(method) && !isTrustedApiRequest(request, trustedHosts)) return new Response("forbidden", { status: 403 });',
-    assert: /PRIVILEGED_METHODS\.has\(method\) && !isTrustedApiRequest\(request, trustedHosts\)/,
-    assertCount: 1,
-    // the interceptor path (authority === "loopback") MUST stay pinned:
-    keep: /interceptor\.options\.authority === "loopback" && !isTrustedApiRequest\(request, \[\]\)/,
-  },
-  {
     file: join(base, 'dsh-client-connection', 'lib', 'client.js'),
     what: 'browser isLoopback: remote browser treated as trusted (host fence + OIDC gate still enforce)',
-    old: 'isLoopback: pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname),',
-    new: 'isLoopback: true,',
+    old: '\t\t\t\tisLoopback: transport?.ownsHost === true || pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname),',
+    new: '\t\t\t\tisLoopback: true,',
     assert: /isLoopback: true,/,
     assertCount: 1,
+    // the transport/ownsHost machinery must still exist for other consumers:
+    keep: /globalThis\.__DSH_TRANSPORT__/,
+  },
+  {
+    file: join(base, 'dsh-client-connection', 'lib', 'index.js'),
+    what: 'browser-session cookie layer bypassed (OIDC gate authenticates every request; remote browsers cannot redeem the per-process launch token)',
+    old: '\tisAuthenticated(request) {' + L +
+      '\t\tconst authority = requestAuthority(request.headers);' + L +
+      '\t\tconst rawCookie = header(request.headers, "cookie");' + L +
+      '\t\tif (authority === void 0 || rawCookie === void 0) return false;' + L +
+      '\t\tconst value = cookieValue(rawCookie, cookieName(authority));' + L +
+      '\t\tif (value === void 0) return false;' + L +
+      '\t\tconst payload = decodeCookie(value, this.secret);' + L +
+      '\t\tif (payload === void 0 || payload.authority !== authority) return false;' + L +
+      '\t\tconst now = Date.now();' + L +
+      '\t\treturn payload.issuedAt <= now && payload.expiresAt > now && payload.expiresAt > payload.issuedAt && payload.expiresAt - payload.issuedAt <= this.maxAgeMilliseconds;' + L +
+      '\t}',
+    new: '\tisAuthenticated(request) {' + L +
+      '\t\t// Platform patch: the OIDC gate in front of the webserver is the' + L +
+      '\t\t// session layer; the dsh launch-token cookie flow cannot run behind it.' + L +
+      '\t\treturn true;' + L +
+      '\t}',
+    assert: /isAuthenticated\(request\) \{\n\t\t\/\/ Platform patch: the OIDC gate in front of the webserver is the/,
+    assertCount: 1,
+    // the Host/Origin fence and the rest of the BrowserAuth machinery stay:
+    keep: /!isTrustedApiRequest\(request, this\.trustedHosts\)/,
   },
 ]
 

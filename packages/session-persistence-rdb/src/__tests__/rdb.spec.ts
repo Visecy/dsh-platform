@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { CallId, createMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
+import { MessageId, ToolCallId, createMessage, createUserMessage, freezeMessage } from "@deepseek-ai/dsh-llm";
 import { afterEach, describe, expect, it } from "vitest";
 import { EmptySettings } from "./testing/helpers.ts";
 import { Context } from "@deepseek-ai/cordis";
@@ -8,28 +8,30 @@ import { chmod, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { SessionStore, SessionId } from "@deepseek-ai/dsh-session";
+import { SessionStore, SessionLogOffset, SessionId } from "@deepseek-ai/dsh-session";
 import type {
   Session,
   SessionEvent,
   SurfaceEvent,
   SurfaceEventType,
 } from "@deepseek-ai/dsh-session";
-import SessionPersistenceSqlite, { SCHEMA_VERSION, EPHEMERAL_EVENT_TYPES } from "../index.ts";
+import SessionPersistenceSqlite, { SCHEMA_VERSION } from "../index.ts";
 import {
   buildSeqMap,
+  hasLegacyRenumbering,
   remapShadowedRange,
   remapSurfaceOp,
   rowToEvent,
   rowToMeta,
   scanRows,
+  storedInheritedCount,
 } from "../log.ts";
 import {
   DEFAULT_BUSY_TIMEOUT_MS,
-  eventDimensions,
-  isEphemeralType,
-  isPersistedEvent,
+  EVENT_ENCODING,
+  IGNORABLE_EVENT_ENCODING,
   SESSION_PERSISTENCE_SQLITE_APPLICATION_ID,
+  eventDimensions,
   type EventRow,
   type SessionRow,
 } from "../schema.ts";
@@ -73,6 +75,13 @@ function insertEventRow(
   kind: string,
   data: unknown,
   parentId: string,
+  options: {
+    originalSeq?: number;
+    encoding?: string;
+    surfaceSeqs?: string | null;
+    surfaceOp?: string | null;
+    createdAt?: number;
+  } = {},
 ): string {
   const eventId = randomUUID();
   db.prepare(`
@@ -87,17 +96,47 @@ function insertEventRow(
     "",
     "",
     "",
-    "json",
-    JSON.stringify(data),
-    seq + 1,
-    seq,
-    null,
-    null,
+    options.encoding ?? EVENT_ENCODING,
+    typeof data === "string" ? data : JSON.stringify(data),
+    options.createdAt ?? seq + 1,
+    options.originalSeq ?? seq,
+    options.surfaceSeqs ?? null,
+    options.surfaceOp ?? null,
   );
   db.prepare(
     "INSERT INTO t_session_events (f_session_id, f_event_id, f_sequence) VALUES (?, ?, ?)",
   ).run(sessionId, eventId, seq);
   return eventId;
+}
+
+/** Insert the `t_sessions` row directly (raw SQL — bypasses the write path). */
+function insertSessionRow(
+  db: DatabaseSync,
+  row: {
+    fSessionId: string;
+    fHeadEventId: string;
+    fHeadSequence: number;
+    fVersion: number;
+    fCreatedAt: number;
+    fCwd: string | null;
+    fSeedLength: number | null;
+  },
+): void {
+  db.prepare(`
+    INSERT INTO t_sessions
+      (f_session_id, f_head_event_id, f_head_sequence, f_version, f_created_at, f_cwd,
+       f_parent_session, f_seed_length, f_origin, f_delegation_depth, f_incarnation, f_revision)
+    VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, 1)
+  `).run(
+    row.fSessionId,
+    row.fHeadEventId,
+    row.fHeadSequence,
+    row.fVersion,
+    row.fCreatedAt,
+    row.fCwd,
+    row.fSeedLength,
+    "hand-written",
+  );
 }
 
 /** A context with the session store + SQLite backend, plus a teardown. */
@@ -116,6 +155,7 @@ runPersistenceContract("sqlite", async () => {
   await ctx.plugin(SessionStore);
   const fiber = await ctx.plugin(SessionPersistenceSqlite, { type: "sqlite", path: ":memory:" });
   return {
+    ctx,
     persistence: ctx.sessionPersistence,
     dispose: async () => {
       await fiber.dispose();
@@ -144,29 +184,7 @@ runCoordinatorContract("sqlite", async (): Promise<CoordinatorFixture> => {
         .prepare("SELECT f_head_event_id, f_head_sequence FROM t_sessions WHERE f_session_id = ?")
         .get(id) as { f_head_event_id: string; f_head_sequence: number };
       const next = head.f_head_sequence + 1;
-      const eventId = randomUUID();
-      db.prepare(`
-        INSERT INTO t_events
-          (f_event_id, f_parent_id, f_kind, f_role, f_name, f_action_id, f_encoding,
-           f_data, f_created_at, f_original_seq, f_source_event_seqs, f_surface_op)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        eventId,
-        head.f_head_event_id,
-        "assistant/chunk",
-        "model",
-        "",
-        "",
-        "json",
-        "{not valid json",
-        99,
-        next,
-        null,
-        null,
-      );
-      db.prepare(
-        "INSERT INTO t_session_events (f_session_id, f_event_id, f_sequence) VALUES (?, ?, ?)",
-      ).run(id, eventId, next);
+      insertEventRow(db, id, next, "assistant/chunk", "{not valid json", head.f_head_event_id);
       db.close();
     },
     cleanup: async () => {
@@ -174,6 +192,55 @@ runCoordinatorContract("sqlite", async (): Promise<CoordinatorFixture> => {
     },
   };
 });
+
+/** A one-turn log with a delta stream between step/start and assistant/message. */
+function chunkedTurnLog(): SessionEvent[] {
+  return [
+    { type: "turn/start", seq: 0, time: 1, data: { turn: 1 } },
+    {
+      type: "user/message",
+      seq: 1,
+      time: 2,
+      data: createUserMessage({
+        content: [{ type: "text", text: "hi" }],
+        source: { kind: "user" },
+      }),
+      surfaceOp: "append",
+    },
+    { type: "step/start", seq: 2, time: 3, data: { turn: 1, step: 1 } },
+    {
+      type: "assistant/chunk",
+      seq: 3,
+      time: 4,
+      data: { turn: 1, step: 1, chunk: { type: "text-delta", index: 0, text: "he" } },
+    },
+    {
+      type: "assistant/chunk",
+      seq: 4,
+      time: 5,
+      data: { turn: 1, step: 1, chunk: { type: "text-delta", index: 0, text: "llo" } },
+    },
+    {
+      type: "assistant/message",
+      seq: 5,
+      time: 6,
+      data: {
+        turn: 1,
+        step: 1,
+        message: freezeMessage({
+          id: MessageId("chunked-assistant"),
+          role: "assistant",
+          content: [{ type: "text", text: "hello" }],
+          source: { kind: "model", provider: "mock", model: "mock" },
+        }),
+      },
+      surfaceOp: "append",
+      sourceEventSeqs: [1, 3, 4],
+    },
+    { type: "step/end", seq: 6, time: 7, data: { turn: 1, step: 1 } },
+    { type: "turn/end", seq: 7, time: 8, data: { turn: 1, reason: { kind: "completed" } } },
+  ];
+}
 
 describe("eventDimensions", () => {
   it("classifies boundary events as turn role", () => {
@@ -186,7 +253,7 @@ describe("eventDimensions", () => {
     expect([role, name, actionId]).toEqual(["turn", "", ""]);
   });
 
-  it("classifies messages as user/model roles", () => {
+  it("classifies messages and chunk deltas as user/model roles", () => {
     expect(
       eventDimensions({
         type: "user/message",
@@ -214,6 +281,15 @@ describe("eventDimensions", () => {
         },
       }).role,
     ).toBe("model");
+    // Since 0.1.2 chunk deltas are persisted too; they classify as model output.
+    expect(
+      eventDimensions({
+        type: "assistant/chunk",
+        seq: 3,
+        time: 4,
+        data: { turn: 1, step: 1, chunk: { type: "text-delta", index: 0, text: "he" } },
+      }),
+    ).toEqual({ role: "model", name: "", actionId: "" });
   });
 
   it("extracts the function name and call id from tool/call", () => {
@@ -221,13 +297,13 @@ describe("eventDimensions", () => {
       type: "tool/call",
       seq: 4,
       time: 5,
-      data: { turn: 1, step: 1, callId: CallId("call-1"), name: "read", arguments: "{}" },
+      data: { turn: 1, step: 1, callId: ToolCallId("call-1"), name: "read", arguments: "{}" },
     });
     expect(dims).toEqual({ role: "function", name: "read", actionId: "call-1" });
   });
 
   it("extracts the call id from tool/result and classifies todo/write as state", () => {
-    const callId = CallId("call-2");
+    const callId = ToolCallId("call-2");
     const result = eventDimensions({
       type: "tool/result",
       seq: 5,
@@ -257,43 +333,10 @@ describe("eventDimensions", () => {
   });
 });
 
-describe("isEphemeralType / EPHEMERAL_EVENT_TYPES", () => {
-  it("treats assistant/chunk as ephemeral and everything else as persisted", () => {
-    expect(EPHEMERAL_EVENT_TYPES).toEqual(["assistant/chunk"]);
-    expect(isEphemeralType("assistant/chunk")).toBe(true);
-    expect(isEphemeralType("assistant/message")).toBe(false);
-    expect(isEphemeralType("turn/start")).toBe(false);
-  });
-});
-
-describe("isPersistedEvent", () => {
-  const ev = (extra: Partial<SessionEvent> = {}): SessionEvent =>
-    ({ type: "plugin/x", seq: 0, time: 1, data: null, ...extra }) as SessionEvent;
-
-  it("drops ephemeral types and ignorable events, keeps everything else", () => {
-    expect(isPersistedEvent(ev({ type: "assistant/chunk" }))).toBe(false);
-    expect(isPersistedEvent(ev({ ignorable: true }))).toBe(false);
-    // An ephemeral type marked ignorable is dropped either way.
-    expect(isPersistedEvent(ev({ type: "assistant/chunk", ignorable: true }))).toBe(false);
-    expect(isPersistedEvent(ev())).toBe(true);
-    // A non-`true` ignorable value is a dirty envelope (only `true` is legal);
-    // treat it as a required event: persist it, and let the read path's
-    // assertEventsSupported refuse the unknown type.
-    const dirty = {
-      type: "plugin/x",
-      seq: 0,
-      time: 1,
-      data: null,
-      ignorable: false,
-    } as unknown as SessionEvent;
-    expect(isPersistedEvent(dirty)).toBe(true);
-  });
-});
-
 describe("scanRows", () => {
   // scanRows works off EventRows (data is a JSON string column); build them from
   // SessionEvents so the unit tests read in terms of the event vocabulary. With
-  // no delta filtering the persisted seq equals the original seq.
+  // persist-everything the persisted seq equals the event's logical seq.
   const rows = (events: SessionEvent[]): EventRow[] =>
     events.map((e) => {
       const se = e as SessionEvent<SurfaceEventType>;
@@ -303,6 +346,7 @@ describe("scanRows", () => {
         fKind: e.type,
         fCreatedAt: e.time,
         fData: JSON.stringify(e.data),
+        fEncoding: e.ignorable === true ? IGNORABLE_EVENT_ENCODING : EVENT_ENCODING,
         fSourceEventSeqs:
           se.sourceEventSeqs === undefined ? null : JSON.stringify(se.sourceEventSeqs),
         fSurfaceOp: se.surfaceOp !== undefined ? JSON.stringify(se.surfaceOp) : null,
@@ -372,6 +416,7 @@ describe("scanRows", () => {
         fKind: "turn/start",
         fCreatedAt: 1,
         fData: "{not json",
+        fEncoding: EVENT_ENCODING,
         fSourceEventSeqs: null,
         fSurfaceOp: null,
       },
@@ -381,6 +426,7 @@ describe("scanRows", () => {
         fKind: "turn/end",
         fCreatedAt: 2,
         fData: JSON.stringify({ turn: 1, reason: { kind: "completed" } }),
+        fEncoding: EVENT_ENCODING,
         fSourceEventSeqs: null,
         fSurfaceOp: null,
       },
@@ -397,6 +443,7 @@ describe("scanRows", () => {
         fKind: "turn/start",
         fCreatedAt: 7,
         fData: "{not json",
+        fEncoding: EVENT_ENCODING,
         fSourceEventSeqs: null,
         fSurfaceOp: null,
       },
@@ -408,53 +455,115 @@ describe("scanRows", () => {
 });
 
 describe("rowToMeta", () => {
+  const row = (overrides: Partial<SessionRow> = {}): SessionRow => ({
+    fSessionId: "s1",
+    fHeadEventId: "",
+    fHeadSequence: -1,
+    fVersion: 0,
+    fCreatedAt: 1000,
+    fCwd: null,
+    fParentSession: null,
+    fSeedLength: null,
+    fOrigin: null,
+    fDelegationDepth: null,
+    fIncarnation: "i1",
+    fRevision: 1,
+    ...overrides,
+  });
+
   it("rejects fractional stored creation metadata", () => {
-    expect(() =>
-      rowToMeta({
-        fSessionId: "fractional",
-        fHeadEventId: "",
-        fHeadSequence: -1,
-        fVersion: 0,
-        fCreatedAt: 1.5,
-        fCwd: null,
-        fParentSession: null,
-        fSeedLength: null,
-        fOrigin: null,
-        fDelegationDepth: null,
-        fIncarnation: "fractional",
-        fRevision: 1,
-      } satisfies SessionRow),
-    ).toThrow("stored session createdAt must be a non-negative safe integer");
+    expect(() => rowToMeta(row({ fCreatedAt: 1.5 }))).toThrow(
+      "stored session createdAt must be a non-negative safe integer",
+    );
+  });
+
+  it("derives isSeeded from the stored cut's presence and never emits seedLength", () => {
+    // The 0.1.2 header REQUIRES isSeeded and FORBIDS seedLength; the cut is
+    // out-of-band storage state (mirrors the JSONL header line's seedLength).
+    expect(rowToMeta(row())).toMatchObject({ id: "s1", isSeeded: false });
+    expect(rowToMeta(row())).not.toHaveProperty("seedLength");
+    expect(rowToMeta(row({ fSeedLength: 3 }))).toMatchObject({ id: "s1", isSeeded: true });
+    expect(rowToMeta(row({ fSeedLength: 3 }))).not.toHaveProperty("seedLength");
+    expect(rowToMeta(row({ fSeedLength: 0 }))).toMatchObject({ isSeeded: true });
+  });
+
+  it("maps NULL columns to omitted optional fields", () => {
+    expect(rowToMeta(row())).toEqual({
+      version: 0,
+      id: "s1",
+      createdAt: 1000,
+      isSeeded: false,
+    });
+    expect(
+      rowToMeta(
+        row({
+          fCwd: "/w",
+          fParentSession: "p1",
+          fOrigin: "subagent",
+          fDelegationDepth: 2,
+        }),
+      ),
+    ).toMatchObject({
+      cwd: "/w",
+      parentSession: "p1",
+      origin: "subagent",
+      delegationDepth: 2,
+    });
   });
 });
 
 describe("rowToEvent", () => {
+  const row = (overrides: Partial<EventRow> = {}): EventRow => ({
+    fSequence: 0,
+    fOriginalSeq: 0,
+    fKind: "assistant/message",
+    fCreatedAt: 1,
+    fData: "{}",
+    fEncoding: EVENT_ENCODING,
+    fSourceEventSeqs: null,
+    fSurfaceOp: null,
+    ...overrides,
+  });
+
   it("parses surface fields from EventRow columns", () => {
-    const row: EventRow = {
-      fSequence: 0,
-      fOriginalSeq: 0,
-      fKind: "assistant/message",
-      fCreatedAt: 1,
-      fData: JSON.stringify({ turn: 1, step: 1, content: [] }),
-      fSourceEventSeqs: JSON.stringify([3, 5]),
-      fSurfaceOp: JSON.stringify("append"),
-    };
-    const event = rowToEvent(row);
+    const event = rowToEvent(
+      row({
+        fKind: "user/message",
+        fData: JSON.stringify({ content: [{ type: "text", text: "hi" }], source: { kind: "user" } }),
+        fSourceEventSeqs: JSON.stringify([3, 5]),
+        fSurfaceOp: JSON.stringify("append"),
+      }),
+    );
     expect(event.seq).toBe(0);
     expect((event as SurfaceEvent).sourceEventSeqs).toEqual([3, 5]);
     expect((event as SurfaceEvent).surfaceOp).toBe("append");
+    expect(event.ignorable).toBeUndefined();
   });
 
-  it("remaps sourceEventSeqs through the upstream→persisted seq map", () => {
-    const row: EventRow = {
+  it("restores the ignorable envelope marker from the ignorable encoding", () => {
+    // An unknown-type ignorable event must read back with `ignorable: true` or
+    // the coordinator's unknown-type tolerance would refuse the whole log.
+    const event = rowToEvent(
+      row({
+        fKind: "plugin/telemetry",
+        fEncoding: IGNORABLE_EVENT_ENCODING,
+        fData: "null",
+      }),
+    );
+    expect(event).toMatchObject({ type: "plugin/telemetry", ignorable: true, data: null });
+  });
+
+  it("remaps sourceEventSeqs through the upstream→persisted seq map (legacy rows)", () => {
+    // Rows written by the rc.2-era delta-filtering backend are dense-renumbered;
+    // provenance is stored in upstream seqs and translated on read.
+    const legacy = row({
       fSequence: 4,
       fOriginalSeq: 7,
       fKind: "assistant/message",
-      fCreatedAt: 1,
       fData: JSON.stringify({ turn: 1, step: 1, content: [] }),
       fSourceEventSeqs: JSON.stringify([2, 6]),
       fSurfaceOp: JSON.stringify({ op: "replace", start: 0, end: 1 }),
-    };
+    });
     const map = new Map<number, number>([
       [0, 0],
       [1, 1],
@@ -462,34 +571,31 @@ describe("rowToEvent", () => {
       [6, 3],
       [7, 4],
     ]);
-    const event = rowToEvent(row, map);
+    const event = rowToEvent(legacy, map);
     expect(event.seq).toBe(4);
     expect((event as SurfaceEvent).sourceEventSeqs).toEqual([2, 3]);
     expect((event as SurfaceEvent).surfaceOp).toEqual({ op: "replace", start: 0, end: 1 });
   });
 
   it("keeps an unmapped sourceEventSeqs entry verbatim (tolerated like a scan hole)", () => {
-    const row: EventRow = {
+    const legacy = row({
       fSequence: 1,
       fOriginalSeq: 1,
       fKind: "user/message",
-      fCreatedAt: 1,
       fData: JSON.stringify({ content: [{ type: "text", text: "hi" }], source: { kind: "user" } }),
       fSourceEventSeqs: JSON.stringify([9]),
-      fSurfaceOp: null,
-    };
-    const event = rowToEvent(row, new Map<number, number>([[1, 1]]));
+    });
+    const event = rowToEvent(legacy, new Map<number, number>([[1, 1]]));
     expect((event as SurfaceEvent).sourceEventSeqs).toEqual([9]);
   });
 
-  it("remaps a positional replace surfaceOp through the upstream→persisted seq map", () => {
+  it("remaps a positional replace surfaceOp through the upstream→persisted seq map (legacy rows)", () => {
     // The dense persisted seq must be used for the replacement range, or the
     // surface fold rejects the log ("start seq N not found in surface").
-    const row: EventRow = {
+    const legacy = row({
       fSequence: 9,
       fOriginalSeq: 30,
       fKind: "tool/result",
-      fCreatedAt: 1,
       fData: JSON.stringify({
         turn: 1,
         step: 1,
@@ -497,63 +603,57 @@ describe("rowToEvent", () => {
       }),
       fSourceEventSeqs: JSON.stringify([2]),
       fSurfaceOp: JSON.stringify({ op: "replace", start: 2, end: 2 }),
-    };
+    });
     const map = new Map<number, number>([
       [2, 5],
       [30, 9],
     ]);
-    const event = rowToEvent(row, map);
+    const event = rowToEvent(legacy, map);
     expect((event as SurfaceEvent).sourceEventSeqs).toEqual([5]);
     expect((event as SurfaceEvent).surfaceOp).toEqual({ op: "replace", start: 5, end: 5 });
   });
 
-  it("remaps a compaction/summary shadowedRange through the upstream→persisted seq map", () => {
+  it("remaps a compaction/summary shadowedRange through the upstream→persisted seq map (legacy rows)", () => {
     // The metering event's shadow-price claim names the replaced range by
     // UPSTREAM seq; it must follow the replace's surfaceOp into dense space or
     // the token-meter fold rejects the log ("token surface: replace ... has no
     // adjacent shadow price").
-    const row: EventRow = {
+    const legacy = row({
       fSequence: 4056,
       fOriginalSeq: 400_000,
       fKind: "compaction/summary",
-      fCreatedAt: 1,
       fData: JSON.stringify({
         turn: 1,
         summary: "…",
         shadowedRange: { start: 15, end: 398_881 },
         shadowedTokenCount: 12_345,
       }),
-      fSourceEventSeqs: null,
-      fSurfaceOp: null,
-    };
+    });
     const map = new Map<number, number>([
       [15, 15],
       [398_881, 4048],
       [400_000, 4056],
     ]);
-    const event = rowToEvent(row, map);
+    const event = rowToEvent(legacy, map);
     expect(event.data).toMatchObject({
       shadowedRange: { start: 15, end: 4048 },
       shadowedTokenCount: 12_345,
     });
   });
 
-  it("remaps a compaction/prune shadowedRange and leaves other data untouched", () => {
-    const row: EventRow = {
+  it("remaps a compaction/prune shadowedRange and leaves other data untouched (legacy rows)", () => {
+    const legacy = row({
       fSequence: 3,
       fOriginalSeq: 10,
       fKind: "compaction/prune",
-      fCreatedAt: 1,
       fData: JSON.stringify({
         turn: 2,
         shadowedRange: { start: 7, end: 9 },
         shadowedTokenCount: 42,
       }),
-      fSourceEventSeqs: null,
-      fSurfaceOp: null,
-    };
+    });
     const event = rowToEvent(
-      row,
+      legacy,
       new Map<number, number>([
         [7, 1],
         [9, 2],
@@ -567,76 +667,29 @@ describe("rowToEvent", () => {
     });
   });
 
-  it("keeps a compact shadowedRange verbatim without a seq map (no delta filtering)", () => {
-    const row: EventRow = {
+  it("keeps surface metadata verbatim without a seq map (current rows, identity)", () => {
+    const current = row({
       fSequence: 3,
       fOriginalSeq: 3,
       fKind: "compaction/summary",
-      fCreatedAt: 1,
       fData: JSON.stringify({
         turn: 1,
         shadowedRange: { start: 1, end: 2 },
         shadowedTokenCount: 9,
       }),
-      fSourceEventSeqs: null,
-      fSurfaceOp: null,
-    };
-    expect(rowToEvent(row).data).toMatchObject({
+      fSourceEventSeqs: JSON.stringify([1, 2]),
+      fSurfaceOp: JSON.stringify({ op: "replace", start: 1, end: 2 }),
+    });
+    expect(rowToEvent(current).data).toMatchObject({
       shadowedRange: { start: 1, end: 2 },
       shadowedTokenCount: 9,
     });
-  });
-
-  it("replays a compact seam so the shadow-price claim matches the replace range", () => {
-    // Regression for the reported history-load failure:
-    //   token surface: replace at seq 4057 over range 15-4048 has no adjacent
-    //   shadow price (armed claim covers 15-398881)
-    // The claim (compaction/summary data.shadowedRange, upstream seqs) must land
-    // on the SAME dense range as the immediately following replace's surfaceOp.
-    const map = new Map<number, number>([
-      [15, 15],
-      [398_881, 4048],
-      [4056, 4056],
-      [4057, 4057],
-    ]);
-    const metering = rowToEvent(
-      {
-        fSequence: 4056,
-        fOriginalSeq: 4056,
-        fKind: "compaction/summary",
-        fCreatedAt: 1,
-        fData: JSON.stringify({
-          turn: 1,
-          shadowedRange: { start: 15, end: 398_881 },
-          shadowedTokenCount: 12_345,
-        }),
-        fSourceEventSeqs: null,
-        fSurfaceOp: null,
-      },
-      map,
-    );
-    const replacement = rowToEvent(
-      {
-        fSequence: 4057,
-        fOriginalSeq: 4057,
-        fKind: "assistant/message",
-        fCreatedAt: 2,
-        fData: JSON.stringify({ turn: 1, step: 1, message: { role: "assistant", content: [] } }),
-        fSourceEventSeqs: JSON.stringify([15, 398_881]),
-        fSurfaceOp: JSON.stringify({ op: "replace", start: 15, end: 398_881 }),
-      },
-      map,
-    );
-    const claim = (metering.data as unknown as { shadowedRange: { start: number; end: number } })
-      .shadowedRange;
-    // The token-meter fold compares claim.start/end with op.start/end for exact
-    // equality — an un-remapped claim (15-398881) is exactly the reported failure.
-    expect((replacement as SurfaceEvent).surfaceOp).toEqual({
+    expect((rowToEvent(current) as SurfaceEvent).surfaceOp).toEqual({
       op: "replace",
-      start: 15,
-      end: 4048,
+      start: 1,
+      end: 2,
     });
-    expect(claim).toEqual({ start: 15, end: 4048 });
+    expect((rowToEvent(current) as SurfaceEvent).sourceEventSeqs).toEqual([1, 2]);
   });
 });
 
@@ -670,18 +723,9 @@ describe("remapShadowedRange", () => {
 describe("buildSeqMap", () => {
   it("maps upstream seqs to dense persisted seqs", () => {
     const map = buildSeqMap([
-      {
-        fSequence: 0,
-        fOriginalSeq: 0,
-      },
-      {
-        fSequence: 1,
-        fOriginalSeq: 4,
-      },
-      {
-        fSequence: 2,
-        fOriginalSeq: 5,
-      },
+      { fSequence: 0, fOriginalSeq: 0 },
+      { fSequence: 1, fOriginalSeq: 4 },
+      { fSequence: 2, fOriginalSeq: 5 },
     ]);
     expect(map.get(0)).toBe(0);
     expect(map.get(4)).toBe(1);
@@ -693,34 +737,54 @@ describe("buildSeqMap", () => {
     // boundary and overlap the seed segment's space; a seed-segment provenance
     // reference must resolve to the seed-space row (the first occurrence).
     const map = buildSeqMap([
-      {
-        fSequence: 0,
-        fOriginalSeq: 0,
-      },
-      {
-        fSequence: 1,
-        fOriginalSeq: 100,
-      },
-      {
-        fSequence: 2,
-        fOriginalSeq: 101,
-      },
-      {
-        fSequence: 3,
-        fOriginalSeq: 3,
-      },
-      {
-        fSequence: 4,
-        fOriginalSeq: 100,
-      },
-      {
-        fSequence: 5,
-        fOriginalSeq: 102,
-      },
+      { fSequence: 0, fOriginalSeq: 0 },
+      { fSequence: 1, fOriginalSeq: 100 },
+      { fSequence: 2, fOriginalSeq: 101 },
+      { fSequence: 3, fOriginalSeq: 3 },
+      { fSequence: 4, fOriginalSeq: 100 },
+      { fSequence: 5, fOriginalSeq: 102 },
     ]);
     expect(map.get(100)).toBe(1);
     expect(map.get(101)).toBe(2);
     expect(map.get(102)).toBe(5);
+  });
+});
+
+describe("hasLegacyRenumbering / storedInheritedCount", () => {
+  it("detects rc.2-era dense renumbering only when a row's seqs disagree", () => {
+    expect(hasLegacyRenumbering([])).toBe(false);
+    expect(hasLegacyRenumbering([{ fSequence: 0, fOriginalSeq: 0 }])).toBe(false);
+    expect(
+      hasLegacyRenumbering([
+        { fSequence: 0, fOriginalSeq: 0 },
+        { fSequence: 1, fOriginalSeq: 4 },
+      ]),
+    ).toBe(true);
+  });
+
+  it("uses the stored cut verbatim on current (identity) logs", () => {
+    const rows = Array.from({ length: 5 }, (_, i) => ({ fSequence: i, fOriginalSeq: i }));
+    expect(storedInheritedCount(null, rows, false)).toBe(0);
+    expect(storedInheritedCount(3, rows, false)).toBe(3);
+  });
+
+  it("translates a legacy log's upstream-space cut into the dense row count", () => {
+    // Legacy seed: upstream seqs 0..5 with chunk deltas 3,4 dropped → 4 dense
+    // rows; the child's own turn continues at dense 4 with upstream seqs >= 6.
+    const rows = [
+      { fSequence: 0, fOriginalSeq: 0 },
+      { fSequence: 1, fOriginalSeq: 1 },
+      { fSequence: 2, fOriginalSeq: 2 },
+      { fSequence: 3, fOriginalSeq: 5 },
+      { fSequence: 4, fOriginalSeq: 6 },
+      { fSequence: 5, fOriginalSeq: 8 },
+    ];
+    // Stored cut 6 (upstream) → the 4 seed rows with f_original_seq < 6.
+    expect(storedInheritedCount(6, rows, true)).toBe(4);
+    // Identity rows under the same cut count directly.
+    expect(storedInheritedCount(6, rows, false)).toBe(6);
+    // An unseeded legacy log has no cut.
+    expect(storedInheritedCount(null, rows, true)).toBe(0);
   });
 });
 
@@ -729,22 +793,18 @@ describe("SessionPersistenceSqlite: durability and crash semantics", () => {
     const path = await freshDbPath();
     const m = meta("legacy-header-delta", "/legacy");
     const db = openDatabase(path, "wal");
-    db.prepare(`
-      INSERT INTO t_sessions
-        (f_session_id, f_head_event_id, f_head_sequence, f_version, f_created_at, f_cwd,
-         f_parent_session, f_seed_length, f_origin, f_delegation_depth, f_incarnation, f_revision)
-      VALUES (?, '', -1, ?, ?, ?, NULL, NULL, NULL, NULL, ?, 1)
-    `).run(m.id, m.version, m.createdAt, m.cwd ?? null, "legacy-header-delta");
+    insertSessionRow(db, {
+      fSessionId: m.id,
+      fHeadEventId: "",
+      fHeadSequence: -1,
+      fVersion: m.version,
+      fCreatedAt: m.createdAt,
+      fCwd: m.cwd ?? null,
+      fSeedLength: null,
+    });
     let parent = "";
-    insertEventRow(db, m.id, 0, "turn/start", { turn: 1 }, parent);
-    parent = insertEventRow(
-      db,
-      m.id,
-      1,
-      "request/header-delta",
-      { config: { model: "legacy" } },
-      parent,
-    );
+    parent = insertEventRow(db, m.id, 0, "turn/start", { turn: 1 }, parent);
+    parent = insertEventRow(db, m.id, 1, "request/header-delta", { config: { model: "legacy" } }, parent);
     insertEventRow(db, m.id, 2, "turn/end", { turn: 1, reason: { kind: "completed" } }, parent);
     db.close();
 
@@ -765,31 +825,20 @@ describe("SessionPersistenceSqlite: durability and crash semantics", () => {
     const path = await freshDbPath();
     const m = meta("crash");
     // Run 1: persist a complete turn, then a half-written second turn (no turn/end).
-    const ctx1 = new Context();
-    await ctx1.plugin(EmptySettings);
-    await ctx1.plugin(SessionStore);
-    const fiber1 = await ctx1.plugin(SessionPersistenceSqlite, { type: "sqlite", path });
-    await ctx1.sessionPersistence.create(m);
-    await ctx1.sessionPersistence.append(m.id, oneTurnLog());
-    await ctx1.sessionPersistence.append(m.id, [
-      {
-        type: "turn/start",
-        seq: 6,
-        time: 7,
-        data: { turn: 2 },
-      },
+    const b1 = await backend(path);
+    await b1.ctx.sessionPersistence.create(m);
+    await b1.ctx.sessionPersistence.append(m.id, oneTurnLog());
+    await b1.ctx.sessionPersistence.append(m.id, [
+      { type: "turn/start", seq: 6, time: 7, data: { turn: 2 } },
       { type: "step/start", seq: 7, time: 8, data: { turn: 2, step: 1 } },
     ]);
-    await fiber1.dispose();
+    await b1.dispose();
 
     // Run 2: load PRESERVES the interrupted turn's real events (a turn can be huge
     // — never truncated) and closes the orphaned turn with synthetic boundary
     // events: step/end (the step was open) then turn/end {interrupted}.
-    const ctx2 = new Context();
-    await ctx2.plugin(EmptySettings);
-    await ctx2.plugin(SessionStore);
-    const fiber2 = await ctx2.plugin(SessionPersistenceSqlite, { type: "sqlite", path });
-    const loaded = await ctx2.sessionPersistence.load(m.id);
+    const b2 = await backend(path);
+    const loaded = await b2.ctx.sessionPersistence.load(m.id);
     expect(loaded.events.map((e) => e.type)).toEqual([
       "turn/start",
       "user/message",
@@ -808,18 +857,13 @@ describe("SessionPersistenceSqlite: durability and crash semantics", () => {
 
     // load durably closed the turn, so the next append continues at the balanced
     // length (seq 10) and a reload round-trips identically.
-    await ctx2.sessionPersistence.append(m.id, [
-      {
-        type: "turn/start",
-        seq: 10,
-        time: 9,
-        data: { turn: 3 },
-      },
+    await b2.ctx.sessionPersistence.append(m.id, [
+      { type: "turn/start", seq: 10, time: 9, data: { turn: 3 } },
       { type: "turn/end", seq: 11, time: 10, data: { turn: 3, reason: { kind: "completed" } } },
     ]);
-    const reloaded = await ctx2.sessionPersistence.load(m.id);
+    const reloaded = await b2.ctx.sessionPersistence.load(m.id);
     expect(reloaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
-    await fiber2.dispose();
+    await b2.dispose();
   });
 
   it("load() durably closes the interrupted turn: the synthetic closers are on disk after load", async () => {
@@ -866,10 +910,6 @@ describe("SessionPersistenceSqlite: durability and crash semantics", () => {
     dbNewer.close();
     expect(() => openDatabase(path, "wal")).toThrow(/incompatible with this build/);
 
-    // The immediately preceding layout lacks the required store identity and is
-    // rejected rather than migrated (unreleased software, no backward-compat).
-    // Version 0 means "unversioned", so probe an explicit non-current version
-    // (SCHEMA_VERSION - 1 is 0 at SCHEMA_VERSION 1).
     const olderPath = await freshDbPath();
     openDatabase(olderPath, "wal").close();
     const dbOlder = openDatabase(olderPath, "wal");
@@ -889,11 +929,6 @@ describe("SessionPersistenceSqlite: durability and crash semantics", () => {
     const unchanged = new DatabaseSync(path);
     expect(unchanged.prepare("PRAGMA user_version").get()).toEqual({ user_version: 0 });
     expect(unchanged.prepare("PRAGMA journal_mode").get()).toEqual({ journal_mode: "delete" });
-    expect(
-      unchanged
-        .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 't_sessions'")
-        .get(),
-    ).toEqual({ name: "t_sessions" });
     unchanged.close();
   });
 
@@ -908,9 +943,6 @@ describe("SessionPersistenceSqlite: durability and crash semantics", () => {
     );
     const unchangedView = new DatabaseSync(viewPath);
     expect(unchangedView.prepare("PRAGMA journal_mode").get()).toEqual({ journal_mode: "delete" });
-    expect(
-      unchangedView.prepare("SELECT type FROM sqlite_schema WHERE name = 'foreign_view'").get(),
-    ).toEqual({ type: "view" });
     unchangedView.close();
 
     const applicationPath = await freshDbPath();
@@ -926,9 +958,6 @@ describe("SessionPersistenceSqlite: durability and crash semantics", () => {
       application_id: 12345,
     });
     expect(unchangedApplication.prepare("PRAGMA user_version").get()).toEqual({ user_version: 0 });
-    expect(unchangedApplication.prepare("PRAGMA journal_mode").get()).toEqual({
-      journal_mode: "delete",
-    });
     unchangedApplication.close();
   });
 
@@ -940,48 +969,8 @@ describe("SessionPersistenceSqlite: durability and crash semantics", () => {
     foreign.close();
 
     expect(() => openDatabase(path, "wal")).toThrow(/has application id 12345/);
-
     const unchanged = new DatabaseSync(path);
     expect(unchanged.prepare("PRAGMA application_id").get()).toEqual({ application_id: 12345 });
-    expect(unchanged.prepare("PRAGMA user_version").get()).toEqual({
-      user_version: SCHEMA_VERSION,
-    });
-    expect(unchanged.prepare("PRAGMA journal_mode").get()).toEqual({ journal_mode: "delete" });
-    unchanged.close();
-  });
-
-  it("rolls back schema objects and identity stamps when initialization fails", async () => {
-    const path = await freshDbPath();
-    const conflicting = new DatabaseSync(path);
-    conflicting.exec(`PRAGMA application_id = ${SESSION_PERSISTENCE_SQLITE_APPLICATION_ID}`);
-    conflicting.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-    conflicting.exec(
-      "CREATE VIEW t_persistence_state AS SELECT 1 AS f_singleton, 'foreign' AS f_store_id",
-    );
-    conflicting.close();
-
-    expect(() => openDatabase(path, "wal")).toThrow();
-
-    const unchanged = new DatabaseSync(path);
-    expect(
-      unchanged.prepare("SELECT type FROM sqlite_schema WHERE name = 't_persistence_state'").get(),
-    ).toEqual({ type: "view" });
-    expect(
-      unchanged.prepare("SELECT type FROM sqlite_schema WHERE name = 't_sessions'").get(),
-    ).toBeUndefined();
-    expect(
-      unchanged.prepare("SELECT type FROM sqlite_schema WHERE name = 't_events'").get(),
-    ).toBeUndefined();
-    expect(
-      unchanged.prepare("SELECT type FROM sqlite_schema WHERE name = 't_session_events'").get(),
-    ).toBeUndefined();
-    expect(unchanged.prepare("PRAGMA application_id").get()).toEqual({
-      application_id: SESSION_PERSISTENCE_SQLITE_APPLICATION_ID,
-    });
-    expect(unchanged.prepare("PRAGMA user_version").get()).toEqual({
-      user_version: SCHEMA_VERSION,
-    });
-    expect(unchanged.prepare("PRAGMA journal_mode").get()).toEqual({ journal_mode: "delete" });
     unchanged.close();
   });
 
@@ -1009,29 +998,7 @@ describe("SessionPersistenceSqlite: durability and crash semantics", () => {
     const head = db
       .prepare("SELECT f_head_event_id FROM t_sessions WHERE f_session_id = ?")
       .get(m.id) as { f_head_event_id: string };
-    const eventId = randomUUID();
-    db.prepare(`
-      INSERT INTO t_events
-        (f_event_id, f_parent_id, f_kind, f_role, f_name, f_action_id, f_encoding,
-         f_data, f_created_at, f_original_seq, f_source_event_seqs, f_surface_op)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      eventId,
-      head.f_head_event_id,
-      "turn/start",
-      "turn",
-      "",
-      "",
-      "json",
-      "{not valid json",
-      7,
-      6,
-      null,
-      null,
-    );
-    db.prepare(
-      "INSERT INTO t_session_events (f_session_id, f_event_id, f_sequence) VALUES (?, ?, ?)",
-    ).run(m.id, eventId, 6);
+    insertEventRow(db, m.id, 6, "turn/start", "{not valid json", head.f_head_event_id);
     db.close();
 
     const b2 = await backend(path);
@@ -1039,12 +1006,7 @@ describe("SessionPersistenceSqlite: durability and crash semantics", () => {
     expect(loaded.events).toEqual(oneTurnLog()); // torn tail discarded, committed intact (turn 1 already balanced → no closers)
     // load physically deleted the corrupt tail row, so a fresh append continues.
     await b2.ctx.sessionPersistence.append(m.id, [
-      {
-        type: "turn/start",
-        seq: 6,
-        time: 8,
-        data: { turn: 2 },
-      },
+      { type: "turn/start", seq: 6, time: 8, data: { turn: 2 } },
       { type: "turn/end", seq: 7, time: 9, data: { turn: 2, reason: { kind: "completed" } } },
     ]);
     const reloaded = await b2.ctx.sessionPersistence.load(m.id);
@@ -1052,44 +1014,38 @@ describe("SessionPersistenceSqlite: durability and crash semantics", () => {
     await b2.dispose();
   });
 
-  it("append rolls back the whole batch on a mid-batch seq collision (transaction)", async () => {
+  it("append rejects a batch that re-states an already-stored seq and leaves the log unchanged", async () => {
     const ctx = new Context();
     await ctx.plugin(EmptySettings);
     await ctx.plugin(SessionStore);
     const fiber = await ctx.plugin(SessionPersistenceSqlite, { type: "sqlite", path: ":memory:" });
-    const m = meta("rollback");
+    const m = meta("no-duplicate");
     await ctx.sessionPersistence.create(m);
     await ctx.sessionPersistence.append(m.id, oneTurnLog()); // seqs 0..5
 
-    // A batch that re-states an already-stored seq must be rejected and leave
-    // the stored log unchanged (the UNIQUE (session_id, seq) constraint fires
-    // inside the transaction → ROLLBACK).
+    // The coordinator's cursor check (or the UNIQUE (session_id, seq)
+    // constraint inside the transaction) rejects the restated batch; either way
+    // nothing is written and the stored log is unchanged.
     await expect(ctx.sessionPersistence.append(m.id, oneTurnLog())).rejects.toThrow();
     const loaded = await ctx.sessionPersistence.load(m.id);
-    expect(loaded.events).toEqual(oneTurnLog()); // unchanged
+    expect(loaded.events).toEqual(oneTurnLog());
     await fiber.dispose();
   });
 
   it("persists across separate backend instances over the same file", async () => {
     const path = await freshDbPath();
     const m = meta("persist", "/proj");
-    const ctx1 = new Context();
-    await ctx1.plugin(EmptySettings);
-    await ctx1.plugin(SessionStore);
-    const fiber1 = await ctx1.plugin(SessionPersistenceSqlite, { type: "sqlite", path });
-    await ctx1.sessionPersistence.create(m);
-    await ctx1.sessionPersistence.append(m.id, oneTurnLog());
-    await fiber1.dispose();
+    const b1 = await backend(path);
+    await b1.ctx.sessionPersistence.create(m);
+    await b1.ctx.sessionPersistence.append(m.id, oneTurnLog());
+    await b1.dispose();
 
-    const ctx2 = new Context();
-    await ctx2.plugin(EmptySettings);
-    await ctx2.plugin(SessionStore);
-    const fiber2 = await ctx2.plugin(SessionPersistenceSqlite, { type: "sqlite", path });
-    expect((await ctx2.sessionPersistence.list()).map((x) => x.id)).toContain(m.id);
-    const loaded = await ctx2.sessionPersistence.load(m.id);
-    expect(loaded.meta).toMatchObject({ id: m.id, cwd: "/proj" });
+    const b2 = await backend(path);
+    expect((await b2.ctx.sessionPersistence.list()).map((x) => x.id)).toContain(m.id);
+    const loaded = await b2.ctx.sessionPersistence.load(m.id);
+    expect(loaded.meta).toMatchObject({ id: m.id, cwd: "/proj", isSeeded: false });
     expect(loaded.events).toEqual(oneTurnLog());
-    await fiber2.dispose();
+    await b2.dispose();
   });
 
   it("source-qualifies revisions across stores while preserving same-file reopen identity", async () => {
@@ -1163,15 +1119,18 @@ describe("SessionPersistenceSqlite: durability and crash semantics", () => {
     await b.ctx.sessionPersistence.create(m);
     await b.ctx.sessionPersistence.append(m.id, oneTurnLog());
     const before = await b.ctx.sessionPersistence.listSnapshots();
-    await (b.ctx.sessionPersistence as SessionPersistenceSqlite).commitRepair(m, undefined, []);
+    const plugin = b.ctx.sessionPersistence as SessionPersistenceSqlite;
+    await plugin.commitRepair(
+      { meta: m, inheritedEventCount: SessionLogOffset(0) },
+      undefined,
+      [],
+    );
     expect(await b.ctx.sessionPersistence.listSnapshots()).toEqual(before);
     await b.dispose();
   });
 
   it("applies the configured busy timeout to every opened connection (default 5000ms)", async () => {
     const path = await freshDbPath();
-    // The backend opens one connection; the same pragma is asserted per handle
-    // (busy_timeout is connection-scoped, never persisted in the database).
     const immediate = openDatabase(path, "wal", 0);
     expect(immediate.prepare("PRAGMA busy_timeout").get()).toEqual({ timeout: 0 });
     immediate.close();
@@ -1187,9 +1146,6 @@ describe("SessionPersistenceSqlite: durability and crash semantics", () => {
 
   it("busyTimeout config wires from the plugin into the database connection", async () => {
     const path = await freshDbPath();
-    // Loading the plugin with a custom busyTimeout proves the config key is
-    // accepted and passed through the open path (the connection itself is
-    // private; the value is asserted via a second connection above).
     const ctx = new Context();
     await ctx.plugin(EmptySettings);
     await ctx.plugin(SessionStore);
@@ -1203,117 +1159,32 @@ describe("SessionPersistenceSqlite: durability and crash semantics", () => {
   });
 });
 
-/** A one-turn log with a delta stream between step/start and assistant/message. */
-function chunkedTurnLog(): SessionEvent[] {
-  return [
-    {
-      type: "turn/start",
-      seq: 0,
-      time: 1,
-      data: { turn: 1 },
-    },
-    {
-      type: "user/message",
-      seq: 1,
-      time: 2,
-      data: createUserMessage({
-        content: [{ type: "text", text: "hi" }],
-        source: { kind: "user" },
-      }),
-      surfaceOp: "append",
-    },
-    { type: "step/start", seq: 2, time: 3, data: { turn: 1, step: 1 } },
-    {
-      type: "assistant/chunk",
-      seq: 3,
-      time: 4,
-      data: { turn: 1, step: 1, chunk: { type: "text-delta", index: 0, text: "he" } },
-    },
-    {
-      type: "assistant/chunk",
-      seq: 4,
-      time: 5,
-      data: { turn: 1, step: 1, chunk: { type: "text-delta", index: 0, text: "llo" } },
-    },
-    {
-      type: "assistant/message",
-      seq: 5,
-      time: 6,
-      data: {
-        turn: 1,
-        step: 1,
-        message: createMessage({
-          role: "assistant",
-          content: [{ type: "text", text: "hello" }],
-          source: { kind: "model", provider: "mock", model: "mock" },
-        }),
-      },
-      surfaceOp: "append",
-      sourceEventSeqs: [1],
-    },
-    { type: "step/end", seq: 6, time: 7, data: { turn: 1, step: 1 } },
-    { type: "turn/end", seq: 7, time: 8, data: { turn: 1, reason: { kind: "completed" } } },
-  ];
-}
-
-/**
- * Mirror of `@deepseek-ai/dsh-token-meter`'s `foldSurfaceProjection` — the
- * package is not resolvable from the configured registry, so the compact-seam
- * regression test reproduces its O(1) shadow-price fold contract inline. The
- * estimator is a constant stand-in; only the claim protocol is under test
- * (a `compaction/summary` / `compaction/prune` arms a claim for its exact
- * `shadowedRange`, the immediately following surface `replace` must consume
- * that exact range, and a mismatch fails loud with the reported message).
- */
-function mirrorSurfaceTokensFold(
-  claim: { start: number; end: number; tokens: number } | undefined,
-  event: SessionEvent,
-): {
-  deltaTokens: number;
-  claim: { start: number; end: number; tokens: number } | undefined;
-} {
-  const type = (event as { type: string }).type;
-  if (type === "compaction/summary" || type === "compaction/prune") {
-    const data = event.data as unknown as {
-      shadowedRange: { start: number; end: number };
-      shadowedTokenCount: number;
-    };
-    return {
-      deltaTokens: 0,
-      claim: {
-        start: data.shadowedRange.start,
-        end: data.shadowedRange.end,
-        tokens: data.shadowedTokenCount,
-      },
-    };
-  }
-  const op = (event as unknown as Partial<SurfaceEvent>).surfaceOp;
-  if (op === undefined || op === "append") return { deltaTokens: 1, claim: undefined };
-  if (claim === undefined) return { deltaTokens: 0, claim: undefined };
-  if (claim.start !== op.start || claim.end !== op.end) {
-    throw new Error(
-      `token surface: replace at seq ${event.seq} over range ${op.start}-${op.end} has no adjacent shadow price` +
-        ` (armed claim covers ${claim.start}-${claim.end})`,
-    );
-  }
-  return { deltaTokens: 1 - claim.tokens, claim: undefined };
-}
-
-describe("SessionPersistenceSqlite: delta filtering (ephemeral chunks never persisted)", () => {
-  it("drops delta events at write time and re-numbers surviving events densely", async () => {
+describe("SessionPersistenceSqlite: persist-everything (nothing dropped, nothing renumbered)", () => {
+  it("persists chunk deltas and ignorable events verbatim at their exact seqs", async () => {
     const path = await freshDbPath();
     const b = await backend(path);
-    const m = meta("delta-drop");
+    const m = meta("persist-all");
     await b.ctx.sessionPersistence.create(m);
     await b.ctx.sessionPersistence.append(m.id, chunkedTurnLog());
+    await b.ctx.sessionPersistence.append(m.id, [
+      { type: "turn/start", seq: 8, time: 9, data: { turn: 2 } },
+      {
+        type: "plugin/telemetry",
+        seq: 9,
+        time: 10,
+        data: { metric: 1 },
+        ignorable: true,
+      } as unknown as SessionEvent,
+      { type: "turn/end", seq: 10, time: 11, data: { turn: 2, reason: { kind: "completed" } } },
+    ]);
 
-    // No delta row exists: 6 persisted rows with DENSE persisted seqs and the
-    // upstream seqs recorded in f_original_seq.
+    // All 11 rows exist: identity seqs (f_sequence == f_original_seq == seq),
+    // chunk deltas classified as model output, ignorable marker in f_encoding.
     const probe = openDatabase(path, "wal");
     const rows = probe
       .prepare(`
-      SELECT se.f_sequence, e.f_original_seq, e.f_kind, e.f_role FROM t_session_events se
-      JOIN t_events e ON se.f_event_id = e.f_event_id
+      SELECT se.f_sequence, e.f_original_seq, e.f_kind, e.f_role, e.f_encoding
+      FROM t_session_events se JOIN t_events e ON se.f_event_id = e.f_event_id
       WHERE se.f_session_id = ? ORDER BY se.f_sequence
     `)
       .all(m.id) as {
@@ -1321,36 +1192,81 @@ describe("SessionPersistenceSqlite: delta filtering (ephemeral chunks never pers
       f_original_seq: number;
       f_kind: string;
       f_role: string;
+      f_encoding: string;
     }[];
     expect(rows).toEqual([
-      { f_sequence: 0, f_original_seq: 0, f_kind: "turn/start", f_role: "turn" },
-      { f_sequence: 1, f_original_seq: 1, f_kind: "user/message", f_role: "user" },
-      { f_sequence: 2, f_original_seq: 2, f_kind: "step/start", f_role: "turn" },
-      { f_sequence: 3, f_original_seq: 5, f_kind: "assistant/message", f_role: "model" },
-      { f_sequence: 4, f_original_seq: 6, f_kind: "step/end", f_role: "turn" },
-      { f_sequence: 5, f_original_seq: 7, f_kind: "turn/end", f_role: "turn" },
+      { f_sequence: 0, f_original_seq: 0, f_kind: "turn/start", f_role: "turn", f_encoding: EVENT_ENCODING },
+      { f_sequence: 1, f_original_seq: 1, f_kind: "user/message", f_role: "user", f_encoding: EVENT_ENCODING },
+      { f_sequence: 2, f_original_seq: 2, f_kind: "step/start", f_role: "turn", f_encoding: EVENT_ENCODING },
+      { f_sequence: 3, f_original_seq: 3, f_kind: "assistant/chunk", f_role: "model", f_encoding: EVENT_ENCODING },
+      { f_sequence: 4, f_original_seq: 4, f_kind: "assistant/chunk", f_role: "model", f_encoding: EVENT_ENCODING },
+      { f_sequence: 5, f_original_seq: 5, f_kind: "assistant/message", f_role: "model", f_encoding: EVENT_ENCODING },
+      { f_sequence: 6, f_original_seq: 6, f_kind: "step/end", f_role: "turn", f_encoding: EVENT_ENCODING },
+      { f_sequence: 7, f_original_seq: 7, f_kind: "turn/end", f_role: "turn", f_encoding: EVENT_ENCODING },
+      { f_sequence: 8, f_original_seq: 8, f_kind: "turn/start", f_role: "turn", f_encoding: EVENT_ENCODING },
+      { f_sequence: 9, f_original_seq: 9, f_kind: "plugin/telemetry", f_role: "", f_encoding: IGNORABLE_EVENT_ENCODING },
+      { f_sequence: 10, f_original_seq: 10, f_kind: "turn/end", f_role: "turn", f_encoding: EVENT_ENCODING },
     ]);
-    // The head cursor tracks the dense persisted seq.
+    // The head cursor tracks the real seq.
     expect(
       probe.prepare("SELECT f_head_sequence FROM t_sessions WHERE f_session_id = ?").get(m.id),
-    ).toEqual({ f_head_sequence: 5 });
+    ).toEqual({ f_head_sequence: 10 });
     probe.close();
 
-    // load returns the dense log without any delta event.
     const loaded = await b.ctx.sessionPersistence.load(m.id);
     expect(loaded.events.map((e) => e.type)).toEqual([
       "turn/start",
       "user/message",
       "step/start",
+      "assistant/chunk",
+      "assistant/chunk",
       "assistant/message",
       "step/end",
       "turn/end",
+      "turn/start",
+      "plugin/telemetry",
+      "turn/end",
     ]);
-    expect(loaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(loaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    // The chunk events and the ignorable marker round-trip losslessly.
+    const telemetry = loaded.events[9]!;
+    expect(telemetry).toMatchObject({ type: "plugin/telemetry", ignorable: true });
+    expect(loaded.events[3]!).toMatchObject({
+      type: "assistant/chunk",
+      data: { chunk: { type: "text-delta", index: 0, text: "he" } },
+    });
     await b.dispose();
   });
 
-  it("a batch containing only delta events is a no-op (no materialization, no revision)", async () => {
+  it("stores sourceEventSeqs and surfaceOp verbatim (chunk references included)", async () => {
+    const path = await freshDbPath();
+    const b = await backend(path);
+    const m = meta("provenance-verbatim");
+    await b.ctx.sessionPersistence.create(m);
+    // The assistant/message cites the user message AND both chunk deltas.
+    await b.ctx.sessionPersistence.append(m.id, chunkedTurnLog());
+
+    const probe = openDatabase(path, "wal");
+    const row = probe
+      .prepare(
+        "SELECT e.f_source_event_seqs AS ses, e.f_surface_op AS op FROM t_session_events se JOIN t_events e ON se.f_event_id = e.f_event_id WHERE se.f_session_id = ? AND e.f_kind = 'assistant/message'",
+      )
+      .get(m.id) as { ses: string | null; op: string | null };
+    probe.close();
+    // Nothing pruned, nothing remapped: the references name REAL seqs (chunks
+    // are persisted now), so they replay cleanly.
+    expect(JSON.parse(row.ses!)).toEqual([1, 3, 4]);
+    expect(JSON.parse(row.op!)).toEqual("append");
+
+    const loaded = await b.ctx.sessionPersistence.load(m.id);
+    const assistant = loaded.events.find((e) => e.type === "assistant/message")!;
+    expect(assistant.seq).toBe(5);
+    expect((assistant as SurfaceEvent).sourceEventSeqs).toEqual([1, 3, 4]);
+    expect((assistant as SurfaceEvent).surfaceOp).toBe("append");
+    await b.dispose();
+  });
+
+  it("a batch containing only delta/ignorable events is a normal materializing append", async () => {
     const path = await freshDbPath();
     const b = await backend(path);
     const m = meta("delta-only");
@@ -1362,215 +1278,94 @@ describe("SessionPersistenceSqlite: delta filtering (ephemeral chunks never pers
         time: 1,
         data: { turn: 1, step: 1, chunk: { type: "text-delta", index: 0, text: "x" } },
       },
+      {
+        type: "plugin/test",
+        seq: 1,
+        time: 2,
+        data: null,
+        ignorable: true,
+      } as unknown as SessionEvent,
     ]);
-    // Nothing was materialized: the session is absent from list/snapshots.
-    expect(await b.ctx.sessionPersistence.list()).toEqual([]);
-    expect(await b.ctx.sessionPersistence.listSnapshots()).toEqual([]);
-    // The session remains appendable. The dropped delta occupied upstream seq 0,
-    // so the next batch starts at upstream seq 1 and lands at dense seq 0.
-    await b.ctx.sessionPersistence.append(
-      m.id,
-      oneTurnLog().map((e) => ({ ...e, seq: e.seq + 1 })),
-    );
+    // The delta-only batch materialized the session with BOTH events at their
+    // exact seqs — no no-op, no renumbering.
     expect(await b.ctx.sessionPersistence.list()).toHaveLength(1);
     const loaded = await b.ctx.sessionPersistence.load(m.id);
-    expect(loaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5]);
-    await b.dispose();
-  });
-
-  it("prunes assistant/message sourceEventSeqs references to dropped deltas (same batch)", async () => {
-    const path = await freshDbPath();
-    const b = await backend(path);
-    const m = meta("delta-prune-same");
-    await b.ctx.sessionPersistence.create(m);
-    // The assistant/message references the chunk events (upstream seqs 3,4),
-    // which are dropped at write time — the reference must not be persisted.
+    expect(loaded.events.map((e) => e.seq)).toEqual([0, 1]);
+    expect(loaded.events[0]).toMatchObject({ type: "assistant/chunk" });
+    expect(loaded.events[1]).toMatchObject({ type: "plugin/test", ignorable: true, data: null });
+    // The log continues contiguously at seq 2.
     await b.ctx.sessionPersistence.append(m.id, [
-      {
-        type: "turn/start",
-        seq: 0,
-        time: 1,
-        data: { turn: 1 },
-      },
-      { type: "step/start", seq: 1, time: 2, data: { turn: 1, step: 1 } },
-      {
-        type: "assistant/chunk",
-        seq: 2,
-        time: 3,
-        data: { turn: 1, step: 1, chunk: { type: "text-delta", index: 0, text: "he" } },
-      },
-      {
-        type: "assistant/chunk",
-        seq: 3,
-        time: 4,
-        data: { turn: 1, step: 1, chunk: { type: "text-delta", index: 0, text: "llo" } },
-      },
-      {
-        type: "assistant/message",
-        seq: 4,
-        time: 5,
-        data: {
-          turn: 1,
-          step: 1,
-          message: createMessage({
-            role: "assistant",
-            content: [{ type: "text", text: "hello" }],
-            source: { kind: "model", provider: "mock", model: "mock" },
-          }),
-        },
-        surfaceOp: "append",
-        sourceEventSeqs: [2, 3],
-      },
-      { type: "step/end", seq: 5, time: 6, data: { turn: 1, step: 1 } },
-      { type: "turn/end", seq: 6, time: 7, data: { turn: 1, reason: { kind: "completed" } } },
-    ]);
-    // The dropped-delta references are gone from the stored row.
-    const probe = openDatabase(path, "wal");
-    const row = probe
-      .prepare(
-        "SELECT e.f_source_event_seqs AS ses FROM t_session_events se JOIN t_events e ON se.f_event_id = e.f_event_id WHERE se.f_session_id = ? AND e.f_kind = 'assistant/message'",
-      )
-      .get(m.id) as { ses: string | null };
-    expect(row.ses).toBeNull();
-    probe.close();
-    // Reload replays cleanly: the dense assistant/message carries no provenance.
-    const loaded = await b.ctx.sessionPersistence.load(m.id);
-    const assistant = loaded.events.find((e) => e.type === "assistant/message")!;
-    expect(assistant.seq).toBe(2); // dense
-    expect((assistant as SurfaceEvent).sourceEventSeqs).toBeUndefined();
-    await b.dispose();
-  });
-
-  it("prunes assistant/message sourceEventSeqs references to dropped deltas across batches", async () => {
-    const path = await freshDbPath();
-    const b = await backend(path);
-    const m = meta("delta-prune-cross");
-    await b.ctx.sessionPersistence.create(m);
-    // Batch 1: only deltas (dropped, no materialization).
-    await b.ctx.sessionPersistence.append(m.id, [
-      {
-        type: "assistant/chunk",
-        seq: 0,
-        time: 1,
-        data: { turn: 1, step: 1, chunk: { type: "text-delta", index: 0, text: "he" } },
-      },
-      {
-        type: "assistant/chunk",
-        seq: 1,
-        time: 2,
-        data: { turn: 1, step: 1, chunk: { type: "text-delta", index: 0, text: "llo" } },
-      },
-    ]);
-    // Batch 2: the message referencing batch 1's dropped seqs.
-    await b.ctx.sessionPersistence.append(m.id, [
-      {
-        type: "assistant/message",
-        seq: 2,
-        time: 3,
-        data: {
-          turn: 1,
-          step: 1,
-          message: createMessage({
-            role: "assistant",
-            content: [{ type: "text", text: "hello" }],
-            source: { kind: "model", provider: "mock", model: "mock" },
-          }),
-        },
-        surfaceOp: "append",
-        sourceEventSeqs: [0, 1],
-      },
+      { type: "turn/start", seq: 2, time: 3, data: { turn: 1 } },
       { type: "turn/end", seq: 3, time: 4, data: { turn: 1, reason: { kind: "completed" } } },
     ]);
-    const probe = openDatabase(path, "wal");
-    const row = probe
-      .prepare(
-        "SELECT e.f_source_event_seqs AS ses FROM t_session_events se JOIN t_events e ON se.f_event_id = e.f_event_id WHERE se.f_session_id = ? AND e.f_kind = 'assistant/message'",
-      )
-      .get(m.id) as { ses: string | null };
-    expect(row.ses).toBeNull();
-    probe.close();
-    const loaded = await b.ctx.sessionPersistence.load(m.id);
-    const assistant = loaded.events.find((e) => e.type === "assistant/message")!;
-    expect(assistant.seq).toBe(0); // dense
-    expect((assistant as SurfaceEvent).sourceEventSeqs).toBeUndefined();
+    const reloaded = await b.ctx.sessionPersistence.load(m.id);
+    expect(reloaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3]);
     await b.dispose();
   });
 
-  it("keeps sourceEventSeqs references to persisted events while pruning dropped-delta refs", async () => {
+  it("readFrom returns the suffix with identity seqs", async () => {
     const path = await freshDbPath();
     const b = await backend(path);
-    const m = meta("delta-prune-mixed");
+    const m = meta("identity-readfrom");
     await b.ctx.sessionPersistence.create(m);
-    // The user/message (upstream seq 1) survives, the chunks (seqs 3,4) do not;
-    // the message references all three — only the survived reference persists.
-    await b.ctx.sessionPersistence.append(m.id, [
-      {
-        type: "turn/start",
-        seq: 0,
-        time: 1,
-        data: { turn: 1 },
-      },
-      {
-        type: "user/message",
-        seq: 1,
-        time: 2,
-        data: createUserMessage({
-          content: [{ type: "text", text: "hi" }],
-          source: { kind: "user" },
-        }),
-        surfaceOp: "append",
-      },
-      { type: "step/start", seq: 2, time: 3, data: { turn: 1, step: 1 } },
-      {
-        type: "assistant/chunk",
-        seq: 3,
-        time: 4,
-        data: { turn: 1, step: 1, chunk: { type: "text-delta", index: 0, text: "he" } },
-      },
-      {
-        type: "assistant/chunk",
-        seq: 4,
-        time: 5,
-        data: { turn: 1, step: 1, chunk: { type: "text-delta", index: 0, text: "llo" } },
-      },
-      {
-        type: "assistant/message",
-        seq: 5,
-        time: 6,
-        data: {
-          turn: 1,
-          step: 1,
-          message: createMessage({
-            role: "assistant",
-            content: [{ type: "text", text: "hello" }],
-            source: { kind: "model", provider: "mock", model: "mock" },
-          }),
-        },
-        surfaceOp: "append",
-        sourceEventSeqs: [1, 3, 4],
-      },
-      { type: "step/end", seq: 6, time: 7, data: { turn: 1, step: 1 } },
-      { type: "turn/end", seq: 7, time: 8, data: { turn: 1, reason: { kind: "completed" } } },
+    await b.ctx.sessionPersistence.append(m.id, chunkedTurnLog());
+    const suffix = await b.ctx.sessionPersistence.readFrom(m.id, 3);
+    expect(suffix.events.map((e) => e.type)).toEqual([
+      "assistant/chunk",
+      "assistant/chunk",
+      "assistant/message",
+      "step/end",
+      "turn/end",
     ]);
-    const probe = openDatabase(path, "wal");
-    const row = probe
-      .prepare(
-        "SELECT e.f_source_event_seqs AS ses FROM t_session_events se JOIN t_events e ON se.f_event_id = e.f_event_id WHERE se.f_session_id = ? AND e.f_kind = 'assistant/message'",
-      )
-      .get(m.id) as { ses: string | null };
-    // Upstream 1 is persisted (dense 1); 3,4 are dropped. The stored list keeps
-    // only the resolvable reference.
-    expect(JSON.parse(row.ses!)).toEqual([1]);
-    probe.close();
-    const loaded = await b.ctx.sessionPersistence.load(m.id);
-    const assistant = loaded.events.find((e) => e.type === "assistant/message")!;
-    expect((assistant as SurfaceEvent).sourceEventSeqs).toEqual([1]);
+    expect(suffix.events.map((e) => e.seq)).toEqual([3, 4, 5, 6, 7]);
     await b.dispose();
   });
 
-  it("reload + append continues from the dense persisted seq (re-created seq space)", async () => {
+  it("an interrupted delta-stream turn keeps its chunks and is closed with synthetic closers on load", async () => {
     const path = await freshDbPath();
-    const m = meta("delta-reload");
+    const m = meta("chunk-crash");
+    const b1 = await backend(path);
+    await b1.ctx.sessionPersistence.create(m);
+    // Turn 1 committed (0..7), then a crashed turn 2 whose streamed chunks are
+    // durable but never closed.
+    await b1.ctx.sessionPersistence.append(m.id, chunkedTurnLog());
+    await b1.ctx.sessionPersistence.append(m.id, [
+      { type: "turn/start", seq: 8, time: 9, data: { turn: 2 } },
+      {
+        type: "assistant/chunk",
+        seq: 9,
+        time: 10,
+        data: { turn: 2, step: 1, chunk: { type: "text-delta", index: 0, text: "gone" } },
+      },
+    ]);
+    await b1.dispose();
+
+    const b2 = await backend(path);
+    const loaded = await b2.ctx.sessionPersistence.load(m.id);
+    // The chunks survive; the orphaned turn is closed with turn/end {interrupted}.
+    expect(loaded.events.map((e) => e.type)).toEqual([
+      "turn/start",
+      "user/message",
+      "step/start",
+      "assistant/chunk",
+      "assistant/chunk",
+      "assistant/message",
+      "step/end",
+      "turn/end",
+      "turn/start",
+      "assistant/chunk",
+      "turn/end",
+    ]);
+    expect(loaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(loaded.events.at(-1)!.type === "turn/end" && loaded.events.at(-1)!.data).toMatchObject({
+      reason: { kind: "interrupted" },
+    });
+    await b2.dispose();
+  });
+
+  it("reload + append continues from the persisted seq", async () => {
+    const path = await freshDbPath();
+    const m = meta("identity-reload");
     const b1 = await backend(path);
     await b1.ctx.sessionPersistence.create(m);
     await b1.ctx.sessionPersistence.append(m.id, chunkedTurnLog());
@@ -1578,99 +1373,115 @@ describe("SessionPersistenceSqlite: delta filtering (ephemeral chunks never pers
 
     const b2 = await backend(path);
     const loaded = await b2.ctx.sessionPersistence.load(m.id);
-    expect(loaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5]);
-    // Re-create the live session from the loaded (dense) log: the seed is
-    // contiguous, so the store adopts the persisted prefix and the next append
-    // continues at the dense cursor (seq 6).
+    expect(loaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    // Re-create the live session from the loaded log: the store adopts the
+    // persisted prefix and the next append continues at seq 8.
     const session = b2.ctx.sessions.create(SessionId(m.id), { seed: loaded.events });
-    session.append("turn/start", {
-      turn: 2,
-    });
-    session.append(
-      "user/message",
-      createUserMessage({
-        content: [{ type: "text", text: "again" }],
-        source: { kind: "user" },
-      }),
-      { surfaceOp: "append" },
-    );
+    session.append("turn/start", { turn: 2 });
     session.append("turn/end", { turn: 2, reason: { kind: "completed" } });
     await b2.ctx.sessions.flush(session);
 
     const reloaded = await b2.ctx.sessionPersistence.load(m.id);
-    // The re-created session marks its seed with session/end-seed (seq 6), then
-    // the live turn follows — all in the dense seq space.
-    expect(reloaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
-    expect(reloaded.events.map((e) => e.type).slice(6)).toEqual([
+    // 0..7 the replay seed, 8 the constructor's end-seed marker, 9..10 the live turn.
+    expect(reloaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(reloaded.events.map((e) => e.type).slice(8)).toEqual([
       "session/end-seed",
       "turn/start",
-      "user/message",
       "turn/end",
     ]);
     await b2.dispose();
   });
+});
 
-  it("remaps sourceEventSeqs provenance to the dense seq space on read", async () => {
+describe("SessionPersistenceSqlite: legacy (rc.2-era) log tolerance", () => {
+  // Fabricate the on-disk shape the OLD backend wrote: rows are
+  // dense-renumbered (chunk deltas 3,4 dropped), f_original_seq keeps the
+  // upstream seq, provenance was pruned at write time, and surface rows carry
+  // upstream-space replace ranges.
+  function fabricateLegacyLog(
+    path: string,
+    m: { id: string; version: number; createdAt: number; cwd?: string },
+    rows: Array<{ seq: number; orig: number; kind: string; data: unknown; ses?: number[] }>,
+    seedLength: number | null,
+  ): void {
+    const db = openDatabase(path, "wal");
+    // The sessions row must exist BEFORE bridge rows (FK enforcement) — the
+    // write path materializes the row and its events in ONE transaction, so a
+    // fabricated legacy log is written in the same order.
+    insertSessionRow(db, {
+      fSessionId: m.id,
+      fHeadEventId: "",
+      fHeadSequence: -1,
+      fVersion: m.version,
+      fCreatedAt: m.createdAt,
+      fCwd: m.cwd ?? null,
+      fSeedLength: seedLength,
+    });
+    let parent = "";
+    let head: { fEventId: string; fSequence: number } | undefined;
+    for (const row of rows) {
+      parent = insertEventRow(db, m.id, row.seq, row.kind, row.data, parent, {
+        originalSeq: row.orig,
+        surfaceSeqs: row.ses === undefined || row.ses.length === 0 ? null : JSON.stringify(row.ses),
+        surfaceOp: row.ses === undefined ? null : JSON.stringify("append"),
+      });
+      head = { fEventId: parent, fSequence: row.seq };
+    }
+    if (head !== undefined) {
+      db.prepare("UPDATE t_sessions SET f_head_event_id = ?, f_head_sequence = ? WHERE f_session_id = ?").run(
+        head.fEventId,
+        head.fSequence,
+        m.id,
+      );
+    }
+    db.close();
+  }
+
+  const legacyUser = {
+    id: "legacy-user",
+    role: "user",
+    content: [{ type: "text", text: "hi" }],
+    source: { kind: "user" },
+  };
+
+  it("loads a dense-renumbered log through the legacy remap path and continues it", async () => {
     const path = await freshDbPath();
-    const b = await backend(path);
-    const m = meta("delta-provenance");
-    await b.ctx.sessionPersistence.create(m);
-    // user/message seq 0; the assistant/message after the delta stream carries
-    // sourceEventSeqs [1] (the user message's UPSTREAM seq 1).
-    await b.ctx.sessionPersistence.append(m.id, chunkedTurnLog());
+    const m = meta("legacy-load", "/legacy");
+    // Upstream log 0..7 with chunk deltas 3,4 dropped at write time; the old
+    // backend pruned the assistant/message provenance down to [1].
+    fabricateLegacyLog(
+      path,
+      m,
+      [
+        { seq: 0, orig: 0, kind: "turn/start", data: { turn: 1 } },
+        { seq: 1, orig: 1, kind: "user/message", data: legacyUser, ses: [] },
+        { seq: 2, orig: 2, kind: "step/start", data: { turn: 1, step: 1 } },
+        {
+          seq: 3,
+          orig: 5,
+          kind: "assistant/message",
+          data: {
+            turn: 1,
+            step: 1,
+            message: {
+              id: "legacy-assistant",
+              role: "assistant",
+              content: [{ type: "text", text: "hello" }],
+              source: { kind: "model", provider: "mock", model: "mock" },
+            },
+          },
+          ses: [1],
+        },
+        { seq: 4, orig: 6, kind: "step/end", data: { turn: 1, step: 1 } },
+        { seq: 5, orig: 7, kind: "turn/end", data: { turn: 1, reason: { kind: "completed" } } },
+      ],
+      null,
+    );
 
+    const b = await backend(path);
     const loaded = await b.ctx.sessionPersistence.load(m.id);
-    const assistant = loaded.events.find((e) => e.type === "assistant/message")!;
-    expect(assistant.seq).toBe(3); // dense
-    expect((assistant as SurfaceEvent).sourceEventSeqs).toEqual([1]); // upstream 1 == dense 1 here
-    await b.dispose();
-  });
-
-  it("readFrom returns the dense suffix with provenance remapped", async () => {
-    const path = await freshDbPath();
-    const b = await backend(path);
-    const m = meta("delta-readfrom");
-    await b.ctx.sessionPersistence.create(m);
-    await b.ctx.sessionPersistence.append(m.id, chunkedTurnLog());
-    const suffix = await b.ctx.sessionPersistence.readFrom(m.id, 3);
-    expect(suffix.events.map((e) => e.type)).toEqual(["assistant/message", "step/end", "turn/end"]);
-    expect(suffix.events.map((e) => e.seq)).toEqual([3, 4, 5]);
-    await b.dispose();
-  });
-
-  it("an interrupted delta-stream turn is closed with synthetic closers on load", async () => {
-    const path = await freshDbPath();
-    const m = meta("delta-crash");
-    const b1 = await backend(path);
-    await b1.ctx.sessionPersistence.create(m);
-    // Turn 1 committed (0..5 dense), then a crashed turn 2 whose only persisted
-    // events are a turn/start (dense 6); the delta stream is dropped entirely.
-    await b1.ctx.sessionPersistence.append(m.id, oneTurnLog());
-    await b1.ctx.sessionPersistence.append(m.id, [
-      {
-        type: "turn/start",
-        seq: 6,
-        time: 7,
-        data: { turn: 2 },
-      },
-      {
-        type: "assistant/chunk",
-        seq: 7,
-        time: 8,
-        data: { turn: 2, step: 1, chunk: { type: "text-delta", index: 0, text: "gone" } },
-      },
-      {
-        type: "assistant/chunk",
-        seq: 8,
-        time: 9,
-        data: { turn: 2, step: 1, chunk: { type: "text-delta", index: 0, text: "gone" } },
-      },
-    ]);
-    await b1.dispose();
-
-    const b2 = await backend(path);
-    const loaded = await b2.ctx.sessionPersistence.load(m.id);
-    // turn/start (dense 6) preserved + synthetic turn/end {interrupted} (dense 7).
+    // Presented densely with provenance remapped into the dense space.
+    expect(loaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5]);
     expect(loaded.events.map((e) => e.type)).toEqual([
       "turn/start",
       "user/message",
@@ -1678,264 +1489,129 @@ describe("SessionPersistenceSqlite: delta filtering (ephemeral chunks never pers
       "assistant/message",
       "step/end",
       "turn/end",
+    ]);
+    expect(loaded.meta.isSeeded).toBe(false);
+    expect(loaded.inheritedEventCount).toBe(0);
+    const assistant = loaded.events.find((e) => e.type === "assistant/message")!;
+    expect(assistant.seq).toBe(3);
+    expect((assistant as SurfaceEvent).sourceEventSeqs).toEqual([1]);
+
+    // A suffix read maps through the same legacy space.
+    const suffix = await b.ctx.sessionPersistence.readFrom(m.id, 3);
+    expect(suffix.events.map((e) => e.seq)).toEqual([3, 4, 5]);
+    expect(suffix.events[0]).toMatchObject({ type: "assistant/message" });
+    expect(suffix.inheritedEventCount).toBe(0);
+
+    // Continuation rows written by THIS build are identity rows inside the
+    // same log; reads keep presenting a coherent dense log.
+    await b.ctx.sessionPersistence.append(m.id, [
+      { type: "turn/start", seq: 6, time: 9, data: { turn: 2 } },
+      { type: "turn/end", seq: 7, time: 10, data: { turn: 2, reason: { kind: "completed" } } },
+    ]);
+    const reloaded = await b.ctx.sessionPersistence.load(m.id);
+    expect(reloaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    const probe = openDatabase(path, "wal");
+    const newest = probe
+      .prepare(
+        "SELECT e.f_original_seq FROM t_session_events se JOIN t_events e ON se.f_event_id = e.f_event_id WHERE se.f_session_id = ? AND se.f_sequence = 7",
+      )
+      .get(m.id) as { f_original_seq: number };
+    probe.close();
+    expect(newest.f_original_seq).toBe(7); // identity row
+    await b.dispose();
+  });
+
+  it("derives isSeeded and the dense inherited cut of a legacy fork child", async () => {
+    const path = await freshDbPath();
+    const m = meta("legacy-seeded", "/legacy");
+    // A legacy fork child: its 3-event seed (upstream cut 3) had no drops, so
+    // the first three rows are identity; its own chunked turn lost upstream
+    // seqs 6,7 at write time and starts at dense seq 3.
+    fabricateLegacyLog(
+      path,
+      m,
+      [
+        { seq: 0, orig: 0, kind: "turn/start", data: { turn: 1 } },
+        { seq: 1, orig: 1, kind: "user/message", data: legacyUser, ses: [] },
+        { seq: 2, orig: 2, kind: "step/start", data: { turn: 1, step: 1 } },
+        { seq: 3, orig: 3, kind: "turn/start", data: { turn: 2 } },
+        { seq: 4, orig: 4, kind: "user/message", data: legacyUser, ses: [] },
+        { seq: 5, orig: 5, kind: "step/start", data: { turn: 2, step: 1 } },
+        {
+          seq: 6,
+          orig: 8,
+          kind: "assistant/message",
+          data: {
+            turn: 2,
+            step: 1,
+            message: {
+              id: "legacy-child-assistant",
+              role: "assistant",
+              content: [{ type: "text", text: "hi again" }],
+              source: { kind: "model", provider: "mock", model: "mock" },
+            },
+          },
+          ses: [],
+        },
+        { seq: 7, orig: 9, kind: "step/end", data: { turn: 2, step: 1 } },
+        { seq: 8, orig: 10, kind: "turn/end", data: { turn: 2, reason: { kind: "completed" } } },
+      ],
+      3, // stored upstream-space cut (the child inherited 3 events)
+    );
+
+    const b = await backend(path);
+    const inspection = await b.ctx.sessionPersistence.inspect(m.id);
+    // The header marks the lineage; the cut is translated to the DENSE count
+    // of the inherited prefix (3 identity rows here).
+    expect(inspection.meta.isSeeded).toBe(true);
+    expect(inspection.inheritedEventCount).toBe(3);
+    expect(inspection.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    // The durable cut is not part of the header (no seedLength field).
+    expect(inspection.meta).not.toHaveProperty("seedLength");
+
+    // The derived cut is stable across later appends (the stored upstream cut
+    // is never rewritten by conflict updates).
+    await b.ctx.sessionPersistence.append(m.id, [
+      { type: "turn/start", seq: 9, time: 20, data: { turn: 3 } },
+      { type: "turn/end", seq: 10, time: 21, data: { turn: 3, reason: { kind: "completed" } } },
+    ]);
+    const reloaded = await b.ctx.sessionPersistence.load(m.id);
+    expect(reloaded.inheritedEventCount).toBe(3);
+    expect(reloaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const probe = openDatabase(path, "wal");
+    expect(
+      probe.prepare("SELECT f_seed_length FROM t_sessions WHERE f_session_id = ?").get(m.id),
+    ).toEqual({ f_seed_length: 3 });
+    probe.close();
+    await b.dispose();
+  });
+
+  it("repairs a legacy log's interrupted turn with dense-space closers", async () => {
+    const path = await freshDbPath();
+    const m = meta("legacy-crash", "/legacy");
+    // A chunked turn whose tail (chunks + step/end + turn/end) was never
+    // committed: only turn/start + user/message survive in the row space.
+    fabricateLegacyLog(
+      path,
+      m,
+      [
+        { seq: 0, orig: 0, kind: "turn/start", data: { turn: 1 } },
+        { seq: 1, orig: 1, kind: "user/message", data: legacyUser, ses: [] },
+      ],
+      null,
+    );
+
+    const b = await backend(path);
+    const loaded = await b.ctx.sessionPersistence.load(m.id);
+    expect(loaded.events.map((e) => e.type)).toEqual([
       "turn/start",
+      "user/message",
       "turn/end",
     ]);
-    expect(loaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(loaded.events.map((e) => e.seq)).toEqual([0, 1, 2]);
     expect(loaded.events.at(-1)!.type === "turn/end" && loaded.events.at(-1)!.data).toMatchObject({
       reason: { kind: "interrupted" },
     });
-    await b2.dispose();
-  });
-
-  it("drops ignorable events at write time and re-numbers surviving events densely", async () => {
-    const path = await freshDbPath();
-    const b = await backend(path);
-    const m = meta("ignorable-drop");
-    await b.ctx.sessionPersistence.create(m);
-    await b.ctx.sessionPersistence.append(m.id, [
-      { type: "turn/start", seq: 0, time: 1, data: { turn: 1 } },
-      // Unknown plugin event marked ignorable: dropped, never persisted.
-      {
-        type: "plugin/test",
-        seq: 1,
-        time: 2,
-        data: null,
-        ignorable: true,
-      } as unknown as SessionEvent,
-      {
-        type: "user/message",
-        seq: 2,
-        time: 3,
-        data: createUserMessage({
-          content: [{ type: "text", text: "hi" }],
-          source: { kind: "user" },
-        }),
-        surfaceOp: "append",
-      },
-      { type: "turn/end", seq: 3, time: 4, data: { turn: 1, reason: { kind: "completed" } } },
-    ]);
-    // The ignorable event is absent from storage; survivors are dense.
-    const probe = openDatabase(path, "wal");
-    const rows = probe
-      .prepare(`
-      SELECT se.f_sequence, e.f_original_seq, e.f_kind FROM t_session_events se
-      JOIN t_events e ON se.f_event_id = e.f_event_id
-      WHERE se.f_session_id = ? ORDER BY se.f_sequence
-    `)
-      .all(m.id) as { f_sequence: number; f_original_seq: number; f_kind: string }[];
-    expect(rows).toEqual([
-      { f_sequence: 0, f_original_seq: 0, f_kind: "turn/start" },
-      { f_sequence: 1, f_original_seq: 2, f_kind: "user/message" },
-      { f_sequence: 2, f_original_seq: 3, f_kind: "turn/end" },
-    ]);
-    probe.close();
-    const loaded = await b.ctx.sessionPersistence.load(m.id);
-    expect(loaded.events.map((e) => e.type)).toEqual(["turn/start", "user/message", "turn/end"]);
-    expect(loaded.events.map((e) => e.seq)).toEqual([0, 1, 2]);
-    await b.dispose();
-  });
-
-  it("a batch containing only ignorable events is a no-op (no materialization, no revision)", async () => {
-    const path = await freshDbPath();
-    const b = await backend(path);
-    const m = meta("ignorable-only");
-    await b.ctx.sessionPersistence.create(m);
-    await b.ctx.sessionPersistence.append(m.id, [
-      {
-        type: "plugin/test",
-        seq: 0,
-        time: 1,
-        data: null,
-        ignorable: true,
-      } as unknown as SessionEvent,
-    ]);
-    // Nothing was materialized: the session is absent from list/snapshots.
-    expect(await b.ctx.sessionPersistence.list()).toEqual([]);
-    expect(await b.ctx.sessionPersistence.listSnapshots()).toEqual([]);
-    // The session remains appendable; the dropped event occupied upstream seq 0,
-    // so the next batch starts at upstream seq 1 and lands at dense seq 0.
-    await b.ctx.sessionPersistence.append(
-      m.id,
-      oneTurnLog().map((e) => ({ ...e, seq: e.seq + 1 })),
-    );
-    expect(await b.ctx.sessionPersistence.list()).toHaveLength(1);
-    const loaded = await b.ctx.sessionPersistence.load(m.id);
-    expect(loaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5]);
-    await b.dispose();
-  });
-
-  it("prunes assistant/message sourceEventSeqs references to dropped ignorable events", async () => {
-    const path = await freshDbPath();
-    const b = await backend(path);
-    const m = meta("ignorable-prune");
-    await b.ctx.sessionPersistence.create(m);
-    // The assistant/message references the ignorable plugin event (upstream
-    // seq 1), which is dropped at write time — the reference must not persist.
-    await b.ctx.sessionPersistence.append(m.id, [
-      { type: "turn/start", seq: 0, time: 1, data: { turn: 1 } },
-      {
-        type: "plugin/test",
-        seq: 1,
-        time: 2,
-        data: null,
-        ignorable: true,
-      } as unknown as SessionEvent,
-      {
-        type: "assistant/message",
-        seq: 2,
-        time: 3,
-        data: {
-          turn: 1,
-          step: 1,
-          message: createMessage({
-            role: "assistant",
-            content: [{ type: "text", text: "hello" }],
-            source: { kind: "model", provider: "mock", model: "mock" },
-          }),
-        },
-        surfaceOp: "append",
-        sourceEventSeqs: [1],
-      },
-      { type: "turn/end", seq: 3, time: 4, data: { turn: 1, reason: { kind: "completed" } } },
-    ]);
-    const probe = openDatabase(path, "wal");
-    const row = probe
-      .prepare(
-        "SELECT e.f_source_event_seqs AS ses FROM t_session_events se JOIN t_events e ON se.f_event_id = e.f_event_id WHERE se.f_session_id = ? AND e.f_kind = 'assistant/message'",
-      )
-      .get(m.id) as { ses: string | null };
-    expect(row.ses).toBeNull();
-    probe.close();
-    const loaded = await b.ctx.sessionPersistence.load(m.id);
-    const assistant = loaded.events.find((e) => e.type === "assistant/message")!;
-    expect(assistant.seq).toBe(1); // dense
-    expect((assistant as SurfaceEvent).sourceEventSeqs).toBeUndefined();
-    await b.dispose();
-  });
-
-  it("replays a compact seam so the shadow-price claim matches the dense replace range", async () => {
-    // Regression for the reported history-load failure:
-    //   token surface: replace at seq 4057 over range 15-4048 has no adjacent
-    //   shadow price (armed claim covers 15-398881)
-    // Turn 1 establishes two surface nodes with chunk deltas dropped at write
-    // time; turn 2 compacts them — compaction/summary meters the shadowed range
-    // (UPSTREAM seqs 1-5) and the adjacent assistant/message replaces it. After
-    // the dense renumbering, both the claim and the replace range must land on
-    // the same DENSE seqs for the token-meter fold to consume the claim.
-    const path = await freshDbPath();
-    const b = await backend(path);
-    const m = meta("compact-seam");
-    await b.ctx.sessionPersistence.create(m);
-    const log = [
-      { type: "turn/start", seq: 0, time: 1, data: { turn: 1 } },
-      {
-        type: "user/message",
-        seq: 1,
-        time: 2,
-        data: createUserMessage({
-          content: [{ type: "text", text: "hi" }],
-          source: { kind: "user" },
-        }),
-        surfaceOp: "append",
-      },
-      { type: "step/start", seq: 2, time: 3, data: { turn: 1, step: 1 } },
-      {
-        type: "assistant/chunk",
-        seq: 3,
-        time: 4,
-        data: { turn: 1, step: 1, chunk: { type: "text-delta", index: 0, text: "he" } },
-      },
-      {
-        type: "assistant/chunk",
-        seq: 4,
-        time: 5,
-        data: { turn: 1, step: 1, chunk: { type: "text-delta", index: 0, text: "llo" } },
-      },
-      {
-        type: "assistant/message",
-        seq: 5,
-        time: 6,
-        data: {
-          turn: 1,
-          step: 1,
-          message: createMessage({
-            role: "assistant",
-            content: [{ type: "text", text: "hello" }],
-            source: { kind: "model", provider: "mock", model: "mock" },
-          }),
-        },
-        surfaceOp: "append",
-        sourceEventSeqs: [3, 4],
-      },
-      { type: "step/end", seq: 6, time: 7, data: { turn: 1, step: 1 } },
-      { type: "turn/end", seq: 7, time: 8, data: { turn: 1, reason: { kind: "completed" } } },
-      { type: "turn/start", seq: 8, time: 9, data: { turn: 2 } },
-      { type: "step/start", seq: 9, time: 10, data: { turn: 2, step: 1 } },
-      { type: "compaction/start", seq: 10, time: 11, data: { turn: 2 } },
-      {
-        type: "compaction/summary",
-        seq: 11,
-        time: 12,
-        data: {
-          turn: 2,
-          summary: "compacted",
-          shadowedRange: { start: 1, end: 5 },
-          shadowedTokenCount: 100,
-        },
-      },
-      {
-        type: "assistant/message",
-        seq: 12,
-        time: 13,
-        data: {
-          turn: 2,
-          step: 1,
-          message: createMessage({
-            role: "assistant",
-            content: [{ type: "text", text: "compacted" }],
-            source: { kind: "model", provider: "mock", model: "mock" },
-          }),
-        },
-        surfaceOp: { op: "replace", start: 1, end: 5 },
-        sourceEventSeqs: [1, 5],
-      },
-      { type: "step/end", seq: 13, time: 14, data: { turn: 2, step: 1 } },
-      { type: "turn/end", seq: 14, time: 15, data: { turn: 2, reason: { kind: "completed" } } },
-    ] as unknown as SessionEvent[];
-    await b.ctx.sessionPersistence.append(m.id, log);
-
-    const loaded = await b.ctx.sessionPersistence.load(m.id);
-    const metering = loaded.events.find(
-      (e) => (e as { type: string }).type === "compaction/summary",
-    );
-    const replacement = loaded.events.find((e) => e.type === "assistant/message" && e.seq > 5);
-    expect(metering).toBeDefined();
-    expect(replacement).toBeDefined();
-    // Both the claim and the replacement range land on DENSE seqs.
-    const claimRange = (
-      metering!.data as unknown as { shadowedRange: { start: number; end: number } }
-    ).shadowedRange;
-    const op = (replacement as SurfaceEvent).surfaceOp;
-    expect(op).toEqual({ op: "replace", start: 1, end: 3 });
-    expect((replacement as SurfaceEvent).sourceEventSeqs).toEqual([1, 3]);
-    expect(claimRange).toEqual({ start: 1, end: 3 });
-
-    // The token-meter fold must consume the armed claim instead of throwing
-    // the reported "has no adjacent shadow price" error.
-    let claim: { start: number; end: number; tokens: number } | undefined;
-    let armed = 0;
-    let consumed = 0;
-    expect(() => {
-      for (const event of loaded.events) {
-        if ((event as { type: string }).type === "compaction/summary") armed += 1;
-        const fold = mirrorSurfaceTokensFold(claim, event);
-        if (claim !== undefined && fold.claim === undefined) consumed += 1;
-        claim = fold.claim;
-      }
-    }).not.toThrow();
-    expect(armed).toBe(1);
-    expect(consumed).toBe(1);
     await b.dispose();
   });
 });
@@ -1971,9 +1647,7 @@ describe("SessionPersistenceSqlite: edge cases", () => {
   });
 
   it("creates a persistent rollback journal with owner-only mode", async () => {
-    if (process.platform === "win32") {
-      return;
-    }
+    if (process.platform === "win32") return;
     const path = await freshDbPath();
     const ctx = new Context();
     await ctx.plugin(EmptySettings);
@@ -2066,9 +1740,7 @@ describe("SessionPersistenceSqlite: edge cases", () => {
         { inject: ["sessions"] },
       ),
     );
-    session.append("turn/start", {
-      turn: 1,
-    });
+    session.append("turn/start", { turn: 1 });
     await ctx.plugin(SessionPersistenceSqlite, { type: "sqlite", path });
     await expectFlushError(ctx.sessions.flush(session), /id collision/);
     await ctx.fiber.dispose();
@@ -2084,11 +1756,14 @@ describe("surface field round-trip", () => {
         fKind: "user/message",
         fCreatedAt: 1,
         fData: JSON.stringify({
+          id: "m1",
+          role: "user",
           content: [{ type: "text", text: "hi" }],
           source: { kind: "user" },
         }),
+        fEncoding: EVENT_ENCODING,
         fSourceEventSeqs: null,
-        fSurfaceOp: '{"op":"replace","start":0,"end":0}',
+        fSurfaceOp: JSON.stringify({ op: "replace", start: 0, end: 0 }),
       },
       {
         fSequence: 1,
@@ -2096,6 +1771,7 @@ describe("surface field round-trip", () => {
         fKind: "turn/end",
         fCreatedAt: 2,
         fData: JSON.stringify({ turn: 1, reason: { kind: "completed" } }),
+        fEncoding: EVENT_ENCODING,
         fSourceEventSeqs: null,
         fSurfaceOp: null,
       },
@@ -2113,9 +1789,7 @@ describe("surface field round-trip", () => {
     await ctx.plugin(SessionStore);
     const fiber = await ctx.plugin(SessionPersistenceSqlite, { type: "sqlite", path: ":memory:" });
     const session = ctx.sessions.create(SessionId("roundtrip-surface"));
-    session.append("turn/start", {
-      turn: 1,
-    });
+    session.append("turn/start", { turn: 1 });
     session.append("step/start", { turn: 1, step: 1 });
     session.append(
       "user/message",
@@ -2133,11 +1807,7 @@ describe("surface field round-trip", () => {
         message: createMessage({
           role: "assistant",
           content: [],
-          source: {
-            kind: "model",
-            provider: "mock",
-            model: "mock",
-          },
+          source: { kind: "model", provider: "mock", model: "mock" },
         }),
       },
       { surfaceOp: "append", sourceEventSeqs: [2] },

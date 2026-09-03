@@ -1,25 +1,42 @@
 /**
- * 会话 log 的表示转换：把持久化行（`t_sessions` / joined `t_session_events` +
- * `t_events` 行）转换为上游 `SessionHeader` / `SessionEvent`，以及反向的
- * 分类/映射辅助。全部为方言无关的纯函数，无 I/O——测试直接单测（见
- * `tests/rdb.spec.ts`）。
+ * Representation conversion for a session log: persisted rows (`t_sessions` /
+ * joined `t_session_events` + `t_events` rows) → the upstream
+ * `SessionHeader` / `SessionEvent`, and the reverse column mapping helpers.
+ * All functions are dialect-free and I/O-free — unit-tested directly.
  *
- * delta 过滤（`assistant/chunk` 不落库）后，持久化 seq 是稠密重编号的；
- * `buildSeqMap` 提供 上游 seq → 持久化 seq 的映射，`rowToEvent` /
- * `remapSurfaceOp` / `remapShadowedRange` 经它把 `sourceEventSeqs`、
- * `replace` 范围与 compact 计量事件的 `shadowedRange` 重映射回稠密
- * seq 空间。`scanRows` 实现崩溃尾部语义（torn tail 切割 + 提交区损坏拒绝）。
+ * Since 0.1.2 the backend persists EVERY event the coordinator delivers with
+ * its exact seq (`f_sequence` == `f_original_seq` == the logical seq), so the
+ * write path needs no renumbering and reads pass through as identity.
  *
- * @module @morlay/session-persistence-rdb/log
+ * Backward read tolerance: rows written by the rc.2-era backend may still be
+ * dense-renumbered (`f_original_seq` != `f_sequence`, delta events dropped).
+ * `hasLegacyRenumbering` detects that shape and routes the read through the
+ * old remap path: `buildSeqMap` maps upstream seqs to persisted seqs and
+ * `rowToEvent` / `remapSurfaceOp` / `remapShadowedRange` translate provenance
+ * into the dense space the log presents. Rows written by this build pass
+ * through identity (no map). A legacy log's stored inherited cut
+ * (`f_seed_length`, recorded in the UPSTREAM space of its first generation)
+ * is translated to the dense row space by `storedInheritedCount`.
+ *
+ * `scanRows` implements the crash-tail semantics (torn-tail cut + committed
+ * corruption refusal), unchanged by persist-everything.
+ *
+ * @module @visecy/dsh-session-persistence-rdb/log
  */
 
 import type { SessionEvent, SessionHeader, SessionId, SurfaceOp } from "@deepseek-ai/dsh-session";
+import { IGNORABLE_EVENT_ENCODING } from "./schema.ts";
 import type { EventRow, SessionRow } from "./backend.ts";
 
 /**
- * Reconstruct the {@link SessionHeader} from a `t_sessions` row.
+ * Reconstruct the {@link SessionHeader} from a `t_sessions` row. `NULL`
+ * columns map to omitted optional fields. `f_seed_length` (the out-of-log
+ * inherited-prefix cut) is NOT part of the logical header anymore: its
+ * PRESENCE is the `isSeeded` marker (mirroring the JSONL backend's
+ * `seedLength` line field); the cut itself travels out of band on every read
+ * (see {@link storedInheritedCount}).
  * @param row - the `t_sessions` table row.
- * @returns the header, `NULL` columns mapped to omitted optional fields.
+ * @returns the header; `isSeeded` is derived, never stored in the header.
  */
 export function rowToMeta(row: SessionRow): SessionHeader {
   if (!Number.isSafeInteger(row.fCreatedAt) || row.fCreatedAt < 0) {
@@ -31,21 +48,26 @@ export function rowToMeta(row: SessionRow): SessionHeader {
     createdAt: row.fCreatedAt,
     ...(row.fCwd !== null ? { cwd: row.fCwd } : {}),
     ...(row.fParentSession !== null ? { parentSession: row.fParentSession as SessionId } : {}),
-    ...(row.fSeedLength !== null ? { seedLength: row.fSeedLength } : {}),
+    isSeeded: row.fSeedLength !== null,
     ...(row.fOrigin !== null ? { origin: row.fOrigin as "subagent" } : {}),
     ...(row.fDelegationDepth === null ? {} : { delegationDepth: row.fDelegationDepth }),
   };
 }
 
 /**
- * `t_sessions` 的 INSERT 列值：`SessionHeader` 的持久化字段 + 初始 head 游标
- * （空事件 id、seq -1）+ materialization identity（`f_incarnation`）+ revision 0。
- * 方言无关的纯映射——SQLite 与 PostgreSQL 后端的 `upsertSession` 共用，列名
- * 与 `src/entities/sessions.ts` 对齐（改一处即两方言生效）。`f_id` serial 由
- * 数据库生成，不在映射内。
+ * `t_sessions` INSERT column values: the `SessionHeader` persistence columns +
+ * the inherited-prefix cut (`f_seed_length`, stored only for a seeded
+ * header — mirroring the JSONL header line) + the initial head cursor +
+ * materialization identity (`f_incarnation`) + revision 0.
+ * Dialect-free; both backends share it via `upsertSession`.
+ * @param meta - the header being materialized.
+ * @param inheritedEventCount - exact inherited prefix length (row space);
+ *   required when `meta.isSeeded`, ignored (stored NULL) otherwise.
+ * @param incarnation - the materialization identity for the new row.
  */
 export function sessionInsertRow(
   meta: SessionHeader,
+  inheritedEventCount: number,
   incarnation: string,
 ): {
   fSessionId: string;
@@ -69,7 +91,7 @@ export function sessionInsertRow(
     fCreatedAt: meta.createdAt,
     fCwd: meta.cwd ?? null,
     fParentSession: meta.parentSession ?? null,
-    fSeedLength: meta.seedLength ?? null,
+    fSeedLength: meta.isSeeded ? inheritedEventCount : null,
     fOrigin: meta.origin ?? null,
     fDelegationDepth: meta.delegationDepth ?? null,
     fIncarnation: incarnation,
@@ -78,17 +100,21 @@ export function sessionInsertRow(
 }
 
 /**
- * `t_sessions` 的 ON CONFLICT 更新列值：只刷新 header 列，保留 head 游标
- * （`f_head_event_id`/`f_head_sequence`）与 materialization identity
- * （`f_incarnation`/`f_revision`）。方言无关，两后端共用（见
- * {@link sessionInsertRow}）。
+ * `t_sessions` ON CONFLICT update columns: refresh the header columns, but
+ * PRESERVE the head cursor (`f_head_event_id`/`f_head_sequence`), the
+ * materialization identity (`f_incarnation`/`f_revision`), and
+ * `f_seed_length`. The cut is deliberately not refreshed: on a legacy
+ * (rc.2-era) log the stored cut lives in the first generation's UPSTREAM seq
+ * space and must stay untouched so every later read translates it
+ * consistently (see {@link storedInheritedCount}); on a current log the
+ * coordinator passes back exactly the stored value, so refreshing would be a
+ * no-op anyway.
  */
 export function sessionConflictRow(meta: SessionHeader): {
   fVersion: number;
   fCreatedAt: number;
   fCwd: string | null;
   fParentSession: string | null;
-  fSeedLength: number | null;
   fOrigin: string | null;
   fDelegationDepth: number | null;
 } {
@@ -97,19 +123,60 @@ export function sessionConflictRow(meta: SessionHeader): {
     fCreatedAt: meta.createdAt,
     fCwd: meta.cwd ?? null,
     fParentSession: meta.parentSession ?? null,
-    fSeedLength: meta.seedLength ?? null,
     fOrigin: meta.origin ?? null,
     fDelegationDepth: meta.delegationDepth ?? null,
   };
 }
 
 /**
+ * Whether stored rows were written by the rc.2-era delta-filtering backend:
+ * any row whose persisted seq differs from its recorded original seq proves a
+ * dense renumbering happened at write time. Rows written by this build always
+ * satisfy `f_original_seq == f_sequence` (identity), so a log with no
+ * mismatch needs no legacy remap.
+ * @param rows - one session's seq rows (upstream + persisted).
+ * @returns true when the log contains a dense-renumbered legacy segment.
+ */
+export function hasLegacyRenumbering(
+  rows: readonly { fSequence: number; fOriginalSeq: number }[],
+): boolean {
+  return rows.some((row) => row.fOriginalSeq !== row.fSequence);
+}
+
+/**
+ * Translate a stored `f_seed_length` cut into the count this log's read
+ * presents. For rows written by this build (identity), the stored cut IS the
+ * row-space count. For a legacy log the cut was recorded in the first
+ * generation's UPSTREAM seq space: the inherited prefix of the dense
+ * presentation is exactly the rows whose original seq falls below that cut
+ * (a delta-dropped seed compresses to fewer rows than its upstream cut).
+ * @param storedCut - `t_sessions.f_seed_length`; null when unseeded.
+ * @param seqRows - ALL of the session's seq rows (upstream + persisted).
+ * @param legacy - whether the log carries a dense-renumbered segment.
+ * @returns the inherited event count of the presented (row-space) log.
+ */
+export function storedInheritedCount(
+  storedCut: number | null,
+  seqRows: readonly { fSequence: number; fOriginalSeq: number }[],
+  legacy: boolean,
+): number {
+  if (storedCut === null) return 0;
+  if (!legacy) return storedCut;
+  let count = 0;
+  for (const row of seqRows) {
+    if (row.fOriginalSeq < storedCut) count += 1;
+  }
+  return count;
+}
+
+/**
  * Remap a stored {@link SurfaceOp} from upstream seqs to persisted seqs. An
  * `append` op carries no seqs; a positional `replace`'s `start`/`end` name
  * surface nodes by UPSTREAM seq and must follow {@link SessionEvent.sourceEventSeqs}
- * through the same upstream→persisted map when delta filtering re-numbered the
- * log — otherwise the replacement range is looked up against DENSE seqs and the
- * surface fold rejects the log ("start seq N not found in surface").
+ * through the same upstream→persisted map when a legacy segment
+ * re-numbered the log — otherwise the replacement range is looked up against
+ * DENSE seqs and the surface fold rejects the log ("start seq N not found in
+ * surface"). With current rows the mapping is identity.
  * @param op - the stored surface op.
  * @param remap - upstream→persisted seq mapping (identity when absent).
  * @returns the remapped surface op.
@@ -128,7 +195,7 @@ export function remapSurfaceOp(op: SurfaceOp, remap: (seq: number) => number): S
  * fold compares claim and replacement ranges for exact equality, and an
  * un-remapped claim (upstream) next to a remapped replacement range (dense)
  * makes replay fail loud ("token surface: replace ... has no adjacent shadow
- * price").
+ * price"). With current rows the mapping is identity.
  * @param range - the stored shadowed range (upstream seqs).
  * @param remap - upstream→persisted seq mapping (identity when absent).
  * @returns the remapped shadowed range.
@@ -142,14 +209,18 @@ export function remapShadowedRange(
 
 /**
  * Reconstruct a {@link SessionEvent} from a joined row. The emitted event
- * carries the DENSE persisted seq (`row.fSequence`); `sourceEventSeqs` entries,
- * a positional `replace` {@link SurfaceOp}'s range, and the compact metering
+ * carries the PRESENTED seq (`row.fSequence`). For a legacy
+ * (rc.2-era, dense-renumbered) segment, `sourceEventSeqs` entries, a
+ * positional `replace` {@link SurfaceOp}'s range, and the compact metering
  * events' `shadowedRange` are remapped from upstream seqs to persisted seqs
- * through `seqMap` when the log was delta-filtered (an entry missing from the
- * map is kept verbatim — tolerated like a scan hole, not corruption).
+ * through `seqMap` (an entry missing from the map is kept verbatim —
+ * tolerated like a scan hole, not corruption). Current rows pass through
+ * identity (no map). An event whose envelope marked `ignorable: true` is
+ * stored with the ignorable encoding and re-marked here, so the coordinator's
+ * unknown-type tolerance sees the marker.
  * @param row - the joined `t_session_events` + `t_events` row.
- * @param seqMap - upstream→persisted seq map, present only when delta filtering
- *   re-numbered the log (optional).
+ * @param seqMap - upstream→persisted seq map, present only when a legacy
+ *   segment re-numbered the log (optional).
  * @returns the reconstructed event; throws when a JSON column fails to parse
  *   ({@link scanRows} treats that as a hole, not corruption, in the tail).
  */
@@ -185,12 +256,13 @@ export function rowToEvent(row: EventRow, seqMap?: ReadonlyMap<number, number>):
     seq: row.fSequence,
     time: row.fCreatedAt,
     data,
+    ...(row.fEncoding === IGNORABLE_EVENT_ENCODING ? { ignorable: true } : {}),
     ...surfaceFields,
   } as SessionEvent;
 }
 
 /**
- * Build the upstream→persisted seq map for one session's persisted events
+ * Build the upstream→persisted seq map for one session's legacy segment
  * (only meaningful when delta filtering re-numbered the log).
  *
  * A session re-opened by resume (or forked) persists the seed segment and the
@@ -217,33 +289,6 @@ export function buildSeqMap(
 }
 
 /**
- * Prune `sourceEventSeqs` references that cannot be remapped on read.
- *
- * `sourceEventSeqs` references events by UPSTREAM seq; on read the references
- * are remapped to the DENSE persisted seq through {@link buildSeqMap}. A
- * reference whose event never got a persisted row (a dropped delta, or a seq
- * that never existed) has no map entry and would replay as a `source >=
- * current seq` provenance violation, so the write path prunes it. A fully
- * pruned list is stored as null (no provenance) by the serializer.
- *
- * The `keep` predicate is the CALLER's view of resolvability: the write path
- * knows which upstream seqs THIS INSTANCE dropped (`WriteGuard.pruneRefs` —
- * per-instance knowledge, which must not prune references to rows another
- * instance persisted, e.g. a resume seed segment), while the one-shot repair
- * script knows which upstream seqs exist on DISK (full-database view). The
- * filter itself is shared so the rule lives in one place.
- * @param refs - the event's `sourceEventSeqs` (upstream seqs).
- * @param keep - true for a seq whose referenced event is resolvable.
- * @returns the pruned list.
- */
-export function pruneSourceEventSeqs(
-  refs: readonly number[],
-  keep: (seq: number) => boolean,
-): number[] {
-  return refs.filter(keep);
-}
-
-/**
  * Find the preserved prefix of ordered event rows. Fully written rows in an
  * interrupted final turn remain in the prefix. The first unparsable row or seq
  * gap after the last `turn/end` marks a tolerated torn tail; the same hole in
@@ -252,7 +297,8 @@ export function pruneSourceEventSeqs(
  * @param rows - one session's event rows, ordered by persisted seq ascending.
  * @param base - the persisted seq the first row is expected to carry; `0` for
  *   a whole log, the requested `fromSeq` for a suffix read (`loadStoredFrom`).
- * @param seqMap - upstream→persisted seq map forwarded to {@link rowToEvent}.
+ * @param seqMap - upstream→persisted seq map forwarded to {@link rowToEvent};
+ *   present only for a legacy (dense-renumbered) log.
  * @returns the preserved event prefix, plus `tornFrom` — the persisted seq the
  *   physical delete starts at — when a torn tail exists.
  */

@@ -11,7 +11,7 @@ import { K8sPodController, type PodController, type WorkspacePodSpec } from './k
 import { registerWorkspaceApi } from './api.ts'
 import { WorkspaceManagement } from './management.ts'
 import { WorkspaceMetricsSampler } from './metrics.ts'
-import { ApiProxyWorkspaceRegistry } from './registry.ts'
+import { HostWorkspaceRegistry } from './registry.ts'
 import { WorkspaceReconciler } from './reconciler.ts'
 import { wireWorkspaceLifecycle } from './wire.ts'
 
@@ -167,9 +167,12 @@ export function apply(ctx: Context, config: Config | undefined): void {
   ctx.provide('workspaceCommandTracker', commandTracker)
   ctx.provide('workspaceStatus', workspaceStatus)
 
-  // Official dsh registry bridge + reconciler: k8s resources are authoritative;
-  // the registry is only what the frontend/session.create consume.
-  const registry = new ApiProxyWorkspaceRegistry(
+  // Official dsh workspace registry bridge + reconciler: k8s resources are
+  // authoritative; the registry is only what the frontend/session.create
+  // consume. DSH 0.1.2 removed apiProxy.workspace.*; the bridge now writes
+  // host-to-host through ctx.workspaceRegistry (dsh-workspace) and the
+  // official workspace controller serves the browser from the same records.
+  const registry = new HostWorkspaceRegistry(
     { get: (name) => ctx.get(name) },
     '/workspaces',
   )

@@ -4,7 +4,7 @@
  * DDL 都由这些描述生成——实体定义是唯一来源，不再手写两套 drizzle 表与裸
  * SQL DDL。
  *
- * @module @morlay/session-persistence-rdb/entities/types
+ * @module @visecy/dsh-session-persistence-rdb/entities/types
  */
 
 /**

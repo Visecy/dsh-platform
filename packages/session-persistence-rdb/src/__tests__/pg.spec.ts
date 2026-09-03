@@ -11,7 +11,7 @@
  * `BEGIN IMMEDIATE` / busy-timeout torn-tail window), so it structurally cannot
  * produce a torn tail — the coordinator contract's torn-tail case therefore
  * asserts `corruptTail` is absent rather than injecting one.
- * @module @morlay/session-persistence-rdb/tests/pg
+ * @module @visecy/dsh-session-persistence-rdb/tests/pg
  */
 
 import { randomUUID } from "node:crypto";
@@ -61,6 +61,7 @@ describe.skipIf(!process.env.TEST_PG_URL)("PostgreSQL backend", () => {
       connectionString,
     });
     return {
+      ctx,
       persistence: ctx.sessionPersistence,
       dispose: async () => {
         await fiber.dispose();

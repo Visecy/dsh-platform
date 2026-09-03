@@ -1,11 +1,10 @@
 /**
- * @deepseek-ai/dsh-host-webserver — Web route-registration plugin: a node:http
- * server plus the `webServer` service (HTTP and upgrade route registries,
- * index transform taps, and the single fallback seat for everything no route
- * claims). Knows no harness concepts and serves no files; the composing
- * application's frontend plugin owns dist serving through the fallback hook.
- * Web shape only — Electron loads dist over file:// and carries fetch over an
- * IPC bridge. This package never prints: the URL line belongs to the shell.
+ * @visecy/dsh-web-auth — the DeepSeek Harness Web webserver fork: official
+ * `dsh-host-webserver` 0.1.2 surface (route/upgrade/fallback registries,
+ * structured index injections incl. script-preload and the boot-readiness
+ * tail, optional gzip) plus the platform request-gate extension used by
+ * dsh-auth-oidc (registerGate; the gate runs before route matching and before
+ * upgrade dispatch and owns denial responses).
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Duplex } from 'node:stream';
@@ -54,12 +53,34 @@ export interface WebGateResponse {
  * false means the gate already wrote the response (or ended the socket).
  */
 export type WebRequestGate = (req: IncomingMessage, res: WebGateResponse, kind: WebRequestKind) => boolean | Promise<boolean>;
-/** Gateway config: the listen address. */
+/** Document region a rendered row lands in: after the opening head or body tag. */
+export type IndexInjectionPlacement = 'head' | 'body';
+/** One structured index injection row (official dsh-host-webserver 0.1.2 shape). */
+export type IndexInjection =
+    /** Assign a JSON-serializable value to a `globalThis` property, ahead of later script rows. */
+    { kind: 'global'; name: string; value: unknown }
+    /** Inline classic script. `text` must not contain `</script`, which would close the element early. */
+    | { kind: 'script'; placement: IndexInjectionPlacement; text: string }
+    /** External classic script, executed in table order (parser-blocking when served). */
+    | { kind: 'script-src'; placement: IndexInjectionPlacement; src: string }
+    /** Advisory preload for an external classic script; static workers may ignore it. */
+    | { kind: 'script-preload'; src: string }
+    /** A `<style>` element in the head. `text` must not contain `</style`. */
+    | { kind: 'style'; text: string }
+    /** Raw markup fragment. */
+    | { kind: 'html'; placement: IndexInjectionPlacement; html: string };
+/** Gateway config: the listen address plus optional response gzip. */
 export interface Config {
     /** Listen host; the two supported values are loopback and all-interfaces. */
     host: '127.0.0.1' | '0.0.0.0';
     /** Listen port; zero requests an OS-assigned port. */
     port: number;
+    /** Response compression; default `none`. */
+    compression?: 'none' | 'gzip';
+    /** gzip level when `compression: 'gzip'`; default 1. */
+    compressionLevel?: number;
+    /** gzip threshold in bytes; default 1024. */
+    compressionThresholdBytes?: number;
 }
 /**
  * The browser HTTP carrier service. Activation listens immediately. Route
@@ -79,6 +100,7 @@ export declare class WebServer extends Service {
     private fallback;
     private gate;
     private server;
+    private gzip;
     private listenedPort;
     constructor(ctx: Context, config: Config);
     /** The listening port (the OS-assigned value when config.port is 0). */
@@ -138,6 +160,24 @@ export declare class WebServer extends Service {
      * @returns the transformed body.
      */
     applyIndexTaps(html: string): string;
+    /**
+     * Gather the structured injection table: one `webserver/index-inject` emit,
+     * every subscriber pushes its current rows. Fresh per call.
+     * @returns rows in subscriber activation order.
+     */
+    collectIndexInjections(): IndexInjection[];
+    /**
+     * Render one index.html body: the structured injection table first, then
+     * the raw `tapIndex` transforms over the result.
+     * @param html - the raw index.html body.
+     * @returns the transformed body.
+     */
+    renderIndex(html: string): string;
 }
+/**
+ * Render rows into an index.html body: head rows immediately after the
+ * opening head tag, body rows immediately after the opening body tag, each
+ * group in table order, and the boot-readiness tail after the last body row.
+ */
+export declare function renderIndexInjections(html: string, rows: readonly IndexInjection[]): string;
 export default WebServer;
-//# sourceMappingURL=webserver.d.ts.map

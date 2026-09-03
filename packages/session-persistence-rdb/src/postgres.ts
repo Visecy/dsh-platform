@@ -9,7 +9,7 @@
  *   `PRAGMA user_version` / `application_id`（PG 无等价 pragma）；
  * - 事务用 drizzle 的异步 `db.transaction`（PG 无 `BEGIN IMMEDIATE`，写锁靠
  *   `busy_timeout` 之外的数据库行锁/唯一约束兜底）。
- * @module @morlay/session-persistence-rdb/postgres
+ * @module @visecy/dsh-session-persistence-rdb/postgres
  */
 
 import { randomUUID } from "node:crypto";
@@ -164,7 +164,8 @@ export class PostgresBackend<THKT extends PgQueryResultHKT = PgQueryResultHKT> i
   /** Bind the {@link BackendTx} primitives to one drizzle PG transaction handle. */
   private txFor(tx: PgAsyncTransaction<THKT>): BackendTx {
     return {
-      upsertSession: (meta, incarnation) => this.upsertSession(tx, meta, incarnation),
+      upsertSession: (meta, inheritedEventCount, incarnation) =>
+      this.upsertSession(tx, meta, inheritedEventCount, incarnation),
       getHead: (id) => this.getHead(tx, id),
       insertEvents: (events) => this.insertEvents(tx, events),
       insertBridges: (rows) => this.insertBridges(tx, rows),
@@ -193,11 +194,12 @@ export class PostgresBackend<THKT extends PgQueryResultHKT = PgQueryResultHKT> i
   private async upsertSession(
     exec: PgAsyncDatabase<THKT>,
     meta: SessionHeader,
+    inheritedEventCount: number,
     incarnation: string,
   ): Promise<void> {
     await exec
       .insert(pgSessions)
-      .values(sessionInsertRow(meta, incarnation))
+      .values(sessionInsertRow(meta, inheritedEventCount, incarnation))
       .onConflictDoUpdate({
         target: pgSessions.fSessionId,
         set: sessionConflictRow(meta),
@@ -310,6 +312,7 @@ export class PostgresBackend<THKT extends PgQueryResultHKT = PgQueryResultHKT> i
         fKind: pgEvents.fKind,
         fCreatedAt: pgEvents.fCreatedAt,
         fData: pgEvents.fData,
+        fEncoding: pgEvents.fEncoding,
         fSourceEventSeqs: pgEvents.fSourceEventSeqs,
         fSurfaceOp: pgEvents.fSurfaceOp,
       })

@@ -25,8 +25,6 @@ const external = [
   'react-dom/client',
   'cordis',
   '@deepseek-ai/cordis',
-  '@deepseek-ai/dsh-client-runtime',
-  '@deepseek-ai/dsh-client-runtime/client',
   '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-conversation',
   '@deepseek-ai/dsh-client-ui-conversation/client',

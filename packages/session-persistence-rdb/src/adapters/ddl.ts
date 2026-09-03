@@ -3,7 +3,7 @@
  * SQLite 表附带 `STRICT`，PostgreSQL 用 `SERIAL` / `BIGINT` 等方言类型。
  * 这是实体的唯一 DDL 来源——不手写 SQL 字符串。
  *
- * @module @morlay/session-persistence-rdb/entities/ddl
+ * @module @visecy/dsh-session-persistence-rdb/entities/ddl
  */
 
 import type { ColumnDef, TableDef } from "../entities/types.ts";

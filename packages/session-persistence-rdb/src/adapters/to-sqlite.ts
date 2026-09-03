@@ -4,7 +4,7 @@
  * `EventInsert`）与显式投影兜底——drizzle 无法从运行时构建的列映射保留
  * 精确的列类型。
  *
- * @module @morlay/session-persistence-rdb/entities/to-sqlite
+ * @module @visecy/dsh-session-persistence-rdb/entities/to-sqlite
  */
 
 import { sql } from "drizzle-orm";

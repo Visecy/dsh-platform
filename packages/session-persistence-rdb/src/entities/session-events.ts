@@ -2,8 +2,8 @@ import type { TableDef } from "./types.ts";
 
 /**
  * `t_session_events` — 会话↔事件桥接表。`(f_session_id, f_sequence)` 唯一且
- * 有序，会话 log 按稠密 seq 读取；删除 torn tail 只删桥接行（事件实体作为
- * 全局行保留）。
+ * 有序，会话 log 按持久化 seq 读取（0.1.2 起即逻辑 seq——persist-everything
+ * 无重编号）；删除 torn tail 只删桥接行（事件实体作为全局行保留）。
  */
 export const sessionEvents: TableDef = {
   name: "t_session_events",

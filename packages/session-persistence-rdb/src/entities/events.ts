@@ -4,8 +4,10 @@ import type { TableDef } from "./types.ts";
  * `t_events` — 全局可寻址的持久化事件实体：`f_event_id`（UUID 唯一）、
  * `f_parent_id`（事件链，空串为 root）、`f_kind`（= 上游 `type`）、
  * `f_role` / `f_name` / `f_action_id`（playpen 事件维度）、`f_encoding`
- * （`json`）、`f_data`（JSON 文本）、`f_created_at`（= `time`）、
- * `f_original_seq`（上游 seq）以及 surface 元数据列（JSON 文本或 NULL）。
+ * （`json`；envelope 标记 `ignorable` 的行用 `json-ignorable`）、`f_data`
+ * （JSON 文本）、`f_created_at`（= `time`）、`f_original_seq`（0.1.2 起 =
+ * `f_sequence` = 逻辑 seq；rc.2 时代稠密重编号的行保留上游 seq）以及 surface
+ * 元数据列（JSON 文本或 NULL）。
  */
 export const events: TableDef = {
   name: "t_events",

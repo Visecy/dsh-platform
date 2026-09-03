@@ -1,12 +1,21 @@
 /**
- * Workspace registry bridge.
+ * Workspace registry bridge (DSH 0.1.2).
  *
- * Frontend menus and session.create use the OFFICIAL dsh workspace registry
- * (`apiProxy.workspace.*`), so the platform keeps it as a thin bridge while
- * k8s remains the source of truth for execution resources. Both directions
- * are reconciled by the reconciler.
+ * Frontend menus, session.create and the official workspace controller
+ * consume the OFFICIAL `ctx.workspaceRegistry` (dsh-workspace: durable
+ * workspace records over the domain data form), so the platform keeps it as a
+ * thin bridge while k8s remains the source of truth for execution resources.
+ *
+ * 0.1.2 delta: the old `apiProxy.workspace.*` RPC surface was removed (the
+ * release notes: "旧版 APIProxy 已迁移并移除"); the browser-facing remote is
+ * now the official workspace controller over the SAME host registry, so the
+ * bridge talks host-to-host to `ctx.workspaceRegistry` directly.
+ *
+ * Both directions are reconciled by the reconciler: registry records keyed by
+ * official UUID over canonical paths (`fs.realpath`), platform ids are the
+ * stable path segment (/workspaces/<id>) that is also the pod name, cwd
+ * segment and PVC name — the bridge maps between the two.
  */
-import { randomUUID } from 'node:crypto'
 
 export interface RegistryWorkspace {
   workspaceId: string
@@ -22,102 +31,86 @@ export interface WorkspaceRegistry {
   delete(workspaceId: string): Promise<void>
 }
 
-interface ApiProxyChannel {
-  get(name: 'apiProxy'): {
-    workspace: Record<string, (req: { rpcId: string; payload: unknown }) => Promise<unknown>>
-  }
+/** Duck-typed official workspace registry surface (dsh-workspace 0.1.2). */
+interface OfficialWorkspaceRegistry {
+  /** Create or reuse the workspace owning an EXISTING canonical directory. */
+  create(path: string, title?: string): Promise<OfficialWorkspace>
+  /** Synchronous durable-order projection. */
+  list(): readonly OfficialWorkspace[]
+  /** Delete one registration (retains the directory and session logs). */
+  delete(id: string): Promise<boolean>
 }
 
-/** Normalize the server-response envelope used by the dsh RPC surface. */
-function unwrap(raw: unknown): any {
-  const root = raw as any
-  if (root?.result !== undefined) {
-    const result = root.result
-    if (result?.ok !== undefined && result?.value !== undefined) return result.value
-    return result
-  }
-  if (root?.ok !== undefined && root?.data !== undefined) return root.data
-  if (root?.value !== undefined) return root.value
-  return root
+/** One official registry row: UUID id + canonical path (realpath). */
+interface OfficialWorkspace {
+  id: string
+  path: string
+  title?: string
 }
 
-function idOf(workspace: any, hostRoot: string): string {
-  // Platform workspaces are identified by the stable path segment
-  // (/workspaces/<id>). The official registry may attach an opaque internal
-  // workspaceId (UUID); we must never let that replace the id that is also
-  // the pod name, cwd segment, and PVC name.
-  const path: unknown = workspace?.path ?? workspace?.cwd
-  if (typeof path === 'string' && path.startsWith(hostRoot + '/')) {
+function pathSegment(path: string, hostRoot: string): string {
+  if (path.startsWith(hostRoot + '/')) {
     const rest = path.slice(hostRoot.length + 1)
-    const id = rest.split('/')[0]
-    if (id !== '') return id
+    const seg = rest.split('/')[0]
+    if (seg !== '') return seg
   }
-  const raw = workspace?.workspaceId ?? workspace?.id ?? workspace?.key
-  if (typeof raw === 'string' && raw !== '') return raw
-  if (typeof path !== 'string') return String(workspace?.name ?? '')
-  const m = path.startsWith(hostRoot + '/') ? path.slice(hostRoot.length + 1) : path
-  return m.split('/')[0]
+  // Foreign/default rows (e.g. a root row at '/') have no platform segment.
+  return path.split('/').filter(Boolean)[0] ?? ''
 }
 
-export class ApiProxyWorkspaceRegistry implements WorkspaceRegistry {
+export class HostWorkspaceRegistry implements WorkspaceRegistry {
   constructor(
-    private channel: ApiProxyChannel,
+    private channel: { get: <T>(name: string) => T | undefined },
     private hostRoot: string,
   ) {}
 
+  private official(): OfficialWorkspaceRegistry | undefined {
+    return this.channel.get('workspaceRegistry') as OfficialWorkspaceRegistry | undefined
+  }
+
+  private mapRow(ws: OfficialWorkspace): RegistryWorkspace {
+    return {
+      workspaceId: pathSegment(ws.path, this.hostRoot),
+      path: ws.path,
+      title: ws.title,
+      internalId: ws.id,
+    }
+  }
+
   async list(): Promise<RegistryWorkspace[]> {
-    const raw = await this.call('list', {})
-    const value = unwrap(raw)
-    const items = Array.isArray(value)
-      ? value
-      : (value?.workspaces ?? value?.items ?? [])
-    return (Array.isArray(items) ? items : []).map((item: any) => {
-      const path = typeof item?.path === 'string' ? item.path : `${this.hostRoot}/${idOf(item, this.hostRoot)}`
-      return {
-        workspaceId: idOf(item, this.hostRoot),
-        path,
-        title: item?.title,
-        internalId: typeof item?.workspaceId === 'string' && item.workspaceId !== ''
-          ? item.workspaceId
-          : typeof item?.id === 'string' && item.id !== ''
-            ? item.id
-            : undefined,
-      }
-    }).filter((ws: RegistryWorkspace) => ws.workspaceId !== '')
+    const registry = this.official()
+    if (registry === undefined) return []
+    try {
+      return registry
+        .list()
+        .filter((ws) => ws.path === this.hostRoot || ws.path.startsWith(this.hostRoot + '/'))
+        .map((ws) => this.mapRow(ws))
+    } catch {
+      // A failing registry (storage fault) must never be mistaken for an
+      // empty one by the reconciler; surface the failure so the reconcile
+      // pass skips and retries.
+      throw new Error('workspace registry unavailable')
+    }
   }
 
   async create(path: string): Promise<RegistryWorkspace> {
-    const raw = await this.call('create', { path })
-    const value = unwrap(raw)
-    const workspace = value?.workspace ?? value
-    const workspaceId = idOf(workspace, this.hostRoot)
-    return {
-      workspaceId,
-      path: typeof workspace?.path === 'string' ? workspace.path : path,
-      title: workspace?.title,
-    }
+    const registry = this.official()
+    if (registry === undefined) throw new Error('workspace registry unavailable')
+    // create validates via fs.realpath and rejects nonexistent paths; the
+    // caller (reconciler/management) creates the anchor directory first.
+    const ws = await registry.create(path)
+    return this.mapRow(ws)
   }
 
   async delete(workspaceId: string): Promise<void> {
-    // The official registry keys records by its own opaque internal id. The
-    // platform id is the path segment (/workspaces/<id>), so resolve the
-    // record before deleting; a direct fallback supports non-platform records.
-    let internalId = workspaceId
+    const registry = this.official()
+    if (registry === undefined) return
+    // The official registry keys records by UUID; the platform id is the
+    // path segment, so resolve the record before deleting. When the row is
+    // gone or foreign, fall back to a direct delete (unknown ids are an
+    // idempotent no-op on the official side).
     const rows = await this.list().catch(() => [])
     const row = rows.find((r) => r.workspaceId === workspaceId || r.path.endsWith('/' + workspaceId))
-    if (row?.internalId !== undefined) internalId = row.internalId
-    await this.call('delete', { workspaceId: internalId })
-  }
-
-  private async call(method: string, payload: unknown): Promise<unknown> {
-    const apiProxy = this.channel.get('apiProxy')
-    if (apiProxy?.workspace?.[method] === undefined) {
-      // The official workspace domain is optional (headless/dev/test hosts).
-      return method === 'list' ? { value: [] } : { value: {} }
-    }
-    return apiProxy.workspace[method]({
-      rpcId: randomUUID(),
-      payload,
-    })
+    await registry.delete(row?.internalId ?? workspaceId)
   }
 }

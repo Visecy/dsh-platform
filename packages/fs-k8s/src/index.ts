@@ -127,6 +127,19 @@ export class FsK8s extends FileSystem {
     return this.podPathOf(target)
   }
 
+  /**
+   * DSH 0.1.2 adds this member to the fs seam: the harness asks whether an
+   * absolute HOST path names the same file inside the execution world (image
+   * attachments reach the model through it). A workspace pod is a separate
+   * execution world — the PVC copy is not the host file — and no control-plane
+   * directory is shared into the pod by default, so no host path ever maps.
+   * Revisit when a real shared mount (e.g. an attachments volume bind-mounted
+   * into workspace pods) is introduced.
+   */
+  override processPathFromHostPath(_hostPath: string): string | undefined {
+    return undefined
+  }
+
   override fileUrl(target: FsTarget): string {
     return 'file://' + this.podPathOf(target)
   }

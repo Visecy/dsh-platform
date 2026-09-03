@@ -2,7 +2,7 @@
  * 从方言无关的表描述生成 PostgreSQL 的 drizzle `pgTable` 对象。查询的类型
  * 安全由调用方的手写行接口与显式投影兜底（同 `to-sqlite.ts`）。
  *
- * @module @morlay/session-persistence-rdb/entities/to-postgres
+ * @module @visecy/dsh-session-persistence-rdb/entities/to-postgres
  */
 
 import { sql } from "drizzle-orm";

@@ -5,25 +5,38 @@
  * and a head cursor, `t_events` stores each event as a globally addressable
  * entity (event id + parent chain + kind/role/name/action-id dimensions), and
  * `t_session_events` bridges sessions to events in per-session seq order.
- * Delta content (`assistant/chunk`) is never persisted: those events are
- * dropped and the surviving events are re-numbered to a dense persisted seq
- * (`f_original_seq` keeps the upstream seq for provenance remapping).
+ *
+ * Since 0.1.2 the backend persists EVERY event the coordinator delivers —
+ * `assistant/chunk` deltas and events the writer marked `ignorable` included —
+ * under its exact logical seq (`f_original_seq` == `f_sequence` == event.seq).
+ * Nothing is dropped or renumbered at write time, so provenance columns are
+ * stored verbatim and reads pass through as identity. Logs written by the
+ * rc.2-era backend (which dropped deltas and dense-renumbered survivors) stay
+ * readable: a legacy segment is detected by `f_original_seq != f_sequence`
+ * rows and routed through the old upstream→persisted remap path (see
+ * `log.ts`); rows written by this build need no remap. The stored
+ * `f_seed_length` cut keeps the JSONL backend's semantics: its presence is
+ * `isSeeded`, and the cut itself rides out of band on every read
+ * (`StoredPrefix`/`StoredSuffix` carry `inheritedEventCount`) because the
+ * 0.1.2 `SessionHeader` forbids `seedLength`.
  *
  * The database is chosen by configuration (discriminated union on `type`):
  * `{ type: "sqlite", path }` or `{ type: "postgres", connectionString }`.
  * All access goes through drizzle; the schema is declared once per dialect
  * (`schema.ts` / `postgres.ts`) and the hand-written DDL there is the only
  * migration story (no migration toolchain — incompatible stores are rejected,
- * never migrated).
+ * never migrated). The physical layout is unchanged from the rc.2 era, so no
+ * DDL migration exists; column semantics only tightened (`f_original_seq` is
+ * now always the event seq on rows this build writes).
  *
  * It delegates write-path orchestration to {@link PersistenceCoordinator} and
  * has no independent per-session artifact, so its locator returns `undefined`.
- * @module @morlay/session-persistence-rdb
+ * @module @visecy/dsh-session-persistence-rdb
  */
 
 import { Context } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import { settingsNamespace, type SettingsProvider } from "@deepseek-ai/dsh-settings";
+import type { SettingsProvider } from "@deepseek-ai/dsh-settings";
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { drizzle as drizzlePg } from "drizzle-orm/node-postgres";
@@ -31,32 +44,45 @@ import {
   SessionPersistence,
   SessionPersistenceRevision,
   PersistenceCoordinator,
+  type BorrowedSessionSource,
   type PersistenceBackend,
+  type SessionEventSuffix,
+  type SessionInspection,
   type SessionLocation,
   type SessionPersistenceSnapshot,
+  type SessionStorageMetadata,
   type StoredPrefix,
   type StoredSuffix,
 } from "@deepseek-ai/dsh-session-persistence";
-import type {
-  SessionEvent,
-  SurfaceEventType,
-  SessionId,
-  SessionHeader,
+import {
+  SessionLogOffset,
+  type Session,
+  type SessionEvent,
+  type SessionHeader,
+  type SessionId,
+  type SessionPreparation,
+  type SurfaceEventType,
 } from "@deepseek-ai/dsh-session";
-import { type Backend, type BackendTx, type EventInsert, type EventRow } from "./backend.ts";
+import type { Backend, BackendTx, EventInsert, EventRow } from "./backend.ts";
 import { WriteGuard } from "./write-guard.ts";
-import { buildSeqMap, rowToMeta, scanRows } from "./log.ts";
+import {
+  buildSeqMap,
+  hasLegacyRenumbering,
+  rowToMeta,
+  scanRows,
+  storedInheritedCount,
+} from "./log.ts";
 import {
   DEFAULT_BUSY_TIMEOUT_MS,
-  eventDimensions,
   EVENT_ENCODING,
-  isPersistedEvent,
+  IGNORABLE_EVENT_ENCODING,
+  eventDimensions,
   type JournalMode,
 } from "./schema.ts";
 import { SqliteBackend } from "./sqlite.ts";
 import { PostgresBackend } from "./postgres.ts";
 
-export { SCHEMA_VERSION, EPHEMERAL_EVENT_TYPES } from "./schema.ts";
+export { SCHEMA_VERSION } from "./schema.ts";
 
 /**
  * Plugin configuration — a discriminated union on `type`. The SQLite arm keeps
@@ -105,7 +131,7 @@ export type Config =
  *
  * Configuration resolution: `$DSH_HOME/settings.yaml` 的
  * `session-persistence-rdb` namespace（settings 服务）覆盖 cordis 层 entry
- * config，见 {@link installSettingsSection}。
+ * config，见 {@link SessionPersistenceRdb.settingsNs}。
  */
 export class SessionPersistenceRdb
   extends SessionPersistence
@@ -126,8 +152,12 @@ export class SessionPersistenceRdb
     }),
   ]);
 
-  /** settings namespace：`$DSH_HOME/settings.yaml` 的 `session-persistence-rdb` section。 */
-  static readonly settingsNs = settingsNamespace("session-persistence-rdb");
+  /**
+   * settings namespace：`$DSH_HOME/settings.yaml` 的 `session-persistence-rdb`
+   * section。0.1.2 的 dsh-settings 移除了 `settingsNamespace()` 帮助函数 —
+   * 字面量本身即合法 namespace（小写连字符标识符）。
+   */
+  static readonly settingsNs = "session-persistence-rdb" as const;
 
   /**
    * Backend label for the coordinator's dispose diagnostics. Intentionally
@@ -144,9 +174,8 @@ export class SessionPersistenceRdb
   private readonly ready: Promise<void>;
   private readonly coordinator: PersistenceCoordinator<number>;
   /**
-   * Write-authority state: the confirmed dense head per session (concurrent-
-   * writer detection) and the dropped delta seqs per session (provenance
-   * pruning). See {@link WriteGuard} for the timing contract.
+   * Write-authority state: the confirmed head per session (concurrent-writer
+   * detection). See {@link WriteGuard} for the timing contract.
    */
   private readonly writeGuard = new WriteGuard();
 
@@ -203,30 +232,39 @@ export class SessionPersistenceRdb
     return undefined;
   }
 
-  create(meta: SessionHeader): Promise<void> {
-    return this.coordinator.create(meta);
+  create(meta: SessionHeader, inheritedEventCount?: SessionLogOffset): Promise<void> {
+    return this.coordinator.create(meta, inheritedEventCount);
+  }
+
+  ensureMaterialized(session: Session): Promise<void> {
+    return this.coordinator.ensureMaterialized(session);
   }
 
   append(id: SessionId, events: readonly SessionEvent[]): Promise<void> {
     return this.coordinator.append(id, events);
   }
 
-  load(id: SessionId): Promise<{ meta: SessionHeader; events: readonly SessionEvent[] }> {
+  prepare(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation> {
+    return this.coordinator.prepare(id, signal);
+  }
+
+  load(id: SessionId): Promise<SessionInspection> {
     return this.coordinator.load(id);
   }
 
-  inspect(
-    id: SessionId,
-    signal?: AbortSignal,
-  ): Promise<{ meta: SessionHeader; events: readonly SessionEvent[] }> {
+  inspect(id: SessionId, signal?: AbortSignal): Promise<SessionInspection> {
     return this.coordinator.inspect(id, signal);
+  }
+
+  borrowSession(id: SessionId, signal?: AbortSignal): Promise<BorrowedSessionSource> {
+    return this.coordinator.borrowSession(id, signal);
   }
 
   readFrom(
     id: SessionId,
-    fromSeq: number,
+    fromSeq: SessionLogOffset,
     signal?: AbortSignal,
-  ): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+  ): Promise<SessionEventSuffix> {
     return this.coordinator.readFrom(id, fromSeq, signal);
   }
 
@@ -242,26 +280,32 @@ export class SessionPersistenceRdb
 
   /**
    * Seek-capable suffix read: the backend selects `f_sequence >= fromSeq`
-   * directly, so the read scales with the suffix, not the log. Provenance
-   * remapping still needs every row's upstream seq, so a lightweight
-   * two-column map is read alongside. Torn rows past the preserved region are
-   * dropped, never repaired (non-mutating read).
+   * directly, so the read scales with the suffix, not the log. A legacy
+   * (rc.2-era, dense-renumbered) log still needs every row's upstream seq for
+   * provenance remapping, so a lightweight two-column map is read alongside.
+   * The read is non-mutating: torn rows past the preserved region are dropped,
+   * never repaired. The returned metadata carries the session's inherited cut
+   * exactly like {@link loadStored}.
    */
   async loadStoredFrom(
     id: SessionId,
-    fromSeq: number,
+    fromSeq: SessionLogOffset,
     signal?: AbortSignal,
   ): Promise<StoredSuffix | undefined> {
     const log = await this.readLog(id, { fromSeq }, signal);
     if (log === undefined) return undefined;
-    return { meta: log.meta, events: log.events };
+    return {
+      meta: log.meta,
+      inheritedEventCount: SessionLogOffset(log.inheritedEventCount),
+      events: log.events,
+    };
   }
 
   /**
    * Read a session's row + ordered events into a {@link StoredPrefix}. The
    * torn-tail marker is the persisted seq from which a never-committed tail
    * must be deleted (`scanRows` already returns it as `number | undefined`).
-   * Records the confirmed dense head (or confirmed absence) so a later
+   * Records the confirmed head (or confirmed absence) so a later
    * `appendBatch` can detect a second writer that advanced the log.
    */
   private async readPrefix(
@@ -280,6 +324,10 @@ export class SessionPersistenceRdb
     this.writeGuard.confirmHead(id, log.events.at(-1)?.seq ?? -1);
     return {
       meta: log.meta,
+      // The inherited cut travels OUT of band: the 0.1.2 header forbids
+      // `seedLength`, so every body-bearing read carries it alongside the
+      // header (mirrors the JSONL backend's fromHeaderLine pairing).
+      inheritedEventCount: SessionLogOffset(log.inheritedEventCount),
       events: log.events,
       // The revision must identify exactly these values and match
       // readStoredRevision's representation (see listSnapshots).
@@ -311,18 +359,25 @@ export class SessionPersistenceRdb
   }
 
   /**
-   * Shared read pipeline: session row → meta, event rows → preserved prefix.
-   * A whole-log read (`fromSeq` absent) builds the seq map from the same rows;
-   * a suffix read keeps the backend's lightweight two-column seq-map source so
-   * the query still scales with the suffix, not the log.
+   * Shared read pipeline: session row → meta + inherited cut, event rows →
+   * preserved prefix. A whole-log read (`fromSeq` absent) builds the legacy
+   * seq map from the same rows; a suffix read keeps the backend's lightweight
+   * two-column seq-map source so the query still scales with the suffix, not
+   * the log. The session is LEGACY when any of its rows carries
+   * `f_original_seq != f_sequence` (written by the rc.2-era delta-filtering
+   * backend): such logs are read through the upstream→persisted remap path
+   * and their stored cut is translated from upstream space to row space.
+   * Logs written by this build (`f_original_seq == f_sequence` everywhere)
+   * pass through as identity and use the stored cut verbatim.
    */
   private async readLog(
     id: SessionId,
-    options: { fromSeq?: number } = {},
+    options: { fromSeq?: SessionLogOffset } = {},
     signal?: AbortSignal,
   ): Promise<
     | {
         meta: SessionHeader;
+        inheritedEventCount: number;
         events: SessionEvent[];
         tornFrom?: number;
         /** The session row's stable identity (see {@link listSnapshots}). */
@@ -339,22 +394,31 @@ export class SessionPersistenceRdb
     if (row === undefined) return undefined;
     const meta = rowToMeta(row);
     let eventRows: EventRow[];
-    let seqMap: ReadonlyMap<number, number> | undefined;
+    let seqRows: Array<{ fSequence: number; fOriginalSeq: number }>;
+    let fromSeq = 0;
     if (options.fromSeq === undefined) {
-      // Whole-log read: build the seq map from the same rows (no extra query).
+      // Whole-log read: the event rows ARE the seq source (no extra query).
       eventRows = await this.backend.getEventRows(id);
-      seqMap = buildSeqMap(eventRows);
+      seqRows = eventRows;
     } else {
-      // Suffix read: rows are only the suffix, but provenance remapping needs
-      // every row's upstream seq, so a lightweight two-column map is read
-      // alongside — the query still scales with the suffix, not the log.
-      eventRows = await this.backend.getEventRows(id, options.fromSeq);
-      seqMap = buildSeqMap(await this.backend.getSeqMapRows(id));
+      // Suffix read: rows are only the suffix, but legacy provenance remapping
+      // needs every row's upstream seq, so a lightweight two-column map is
+      // read alongside — the query still scales with the suffix, not the log.
+      fromSeq = options.fromSeq;
+      eventRows = await this.backend.getEventRows(id, fromSeq);
+      seqRows = await this.backend.getSeqMapRows(id);
     }
     signal?.throwIfAborted();
-    const { preserved, tornFrom } = scanRows(eventRows, options.fromSeq ?? 0, seqMap);
+    // Legacy detection is per log, not per row: a log mixing rc.2-era rows
+    // with rows written by this build (resume continuing a legacy session)
+    // stays on the remap path — modern rows are identity-mapped there too.
+    const legacy = hasLegacyRenumbering(seqRows);
+    const seqMap = legacy ? buildSeqMap(seqRows) : undefined;
+    const inheritedEventCount = storedInheritedCount(row.fSeedLength, seqRows, legacy);
+    const { preserved, tornFrom } = scanRows(eventRows, fromSeq, seqMap);
     return {
       meta,
+      inheritedEventCount,
       events: preserved,
       incarnation: row.fIncarnation,
       revision: row.fRevision,
@@ -364,13 +428,13 @@ export class SessionPersistenceRdb
 
   /**
    * Durably append a batch in ONE transaction: materialize the sessions row (if
-   * lazy) and INSERT every persisted event (plus its bridge row), or roll back
-   * entirely. Delta events and events the writer marked `ignorable` are dropped
-   * and the surviving events are re-numbered densely from the session's head
-   * cursor; a batch that contains only dropped events is a no-op (no row
-   * materialization, no revision bump). Dropped events' upstream seqs are
-   * recorded per session so a later batch's surface provenance can prune
-   * references to them (see {@link surfaceBindings}).
+   * lazy) and INSERT every event (plus its bridge row), or roll back entirely.
+   * Since 0.1.2 NOTHING is dropped or renumbered: every event the coordinator
+   * delivers — deltas and ignorable events included — is persisted verbatim
+   * with its exact seq, so a batch that is only delta/ignorable events is a
+   * normal append (and a seeded session's first materializing batch includes
+   * its complete inherited prefix — the coordinator only invokes this hook
+   * once a batch reaches the declared cut).
    * The transaction is the atomicity + durability boundary, so a mid-batch
    * failure (a UNIQUE violation on a duplicated seq) leaves the stored log
    * untouched.
@@ -378,50 +442,44 @@ export class SessionPersistenceRdb
    * SQLite acquires the write lock up front (`BEGIN IMMEDIATE`, queued behind
    * `busy_timeout`); PostgreSQL relies on the transaction's row locks and the
    * `UNIQUE (f_session_id, f_sequence)` constraint to reject a colliding batch.
-   * Either way {@link assertNoConcurrentWriter} rejects a second writer before
-   * re-numbering — a session has exactly one writer per log, and a second
-   * writer fails loud instead of corrupting the log.
+   * Either way {@link WriteGuard.assertNoConcurrentWriter} rejects a second
+   * writer before any row lands — a session has exactly one writer per log,
+   * and a second writer fails loud instead of corrupting the log.
    *
-   * The row upsert runs UNCONDITIONALLY, not only when `!isMaterialized`: a
-   * delta-only batch leaves the coordinator's materialized flag true while no
-   * row exists, so the flag cannot be trusted as the row's existence signal.
-   * The upsert keeps an existing row's head cursor (only header columns are
-   * refreshed on conflict), so a fresh row still starts at the initial head.
+   * The row upsert runs UNCONDITIONALLY, not only when `!isMaterialized`:
+   * the materialized flag is coordinator memory and cannot be trusted as the
+   * row's existence signal. On conflict only the header columns refresh —
+   * the head cursor, identity, revision, and the stored inherited cut are
+   * preserved (the cut deliberately survives: a legacy row's cut lives in its
+   * first generation's upstream space, and rewriting it would corrupt every
+   * later translation — see `sessionConflictRow` in `log.ts`).
+   * @param storage - the session's header plus its exact inherited cut.
+   * @param events - the contiguous batch to persist, in seq order.
+   * @param _isMaterialized - whether a sessions row already exists (lazy
+   *   materialization is handled by the unconditional upsert).
    */
   async appendBatch(
-    meta: SessionHeader,
+    storage: SessionStorageMetadata,
     events: readonly SessionEvent[],
     _isMaterialized: boolean,
   ): Promise<void> {
     await this.ready;
-    // Record every dropped delta's UPSTREAM seq (pure-delta batches included)
-    // so a later batch's assistant/message can prune sourceEventSeqs references
-    // to events that never got a persisted row (see {@link surfaceBindings}).
-    const droppedSeqs = new Set<number>();
-    for (const event of events) {
-      if (!isPersistedEvent(event)) droppedSeqs.add(event.seq);
-    }
-    if (droppedSeqs.size > 0) this.writeGuard.noteDropped(meta.id, droppedSeqs);
-    const persisted = events.filter(isPersistedEvent);
-    if (persisted.length === 0) return;
+    const { meta } = storage;
     let confirmedHead = -1;
     await this.backend.transaction(async (tx) => {
-      await tx.upsertSession(meta, randomUUID());
+      await tx.upsertSession(meta, storage.inheritedEventCount, randomUUID());
       const head = await tx.getHead(meta.id);
-      // Reject a second writer BEFORE re-numbering: each coordinator instance
-      // maintains its own upstream cursor, so a second instance (or process)
-      // sharing this database would append through a stale view of the log —
-      // the batch's events would be silently re-numbered onto the other
-      // writer's tail and corrupt the log. The on-disk head must equal the
-      // last head this instance confirmed (via its own writes or loadStored).
+      // Reject a second writer BEFORE any row lands: each coordinator instance
+      // maintains its own cursor, so a second instance (or process) sharing
+      // this database would append through a stale view of the log — the
+      // batch's seqs would collide with (or silently overwrite) the other
+      // writer's tail. The on-disk head must equal the last head this instance
+      // confirmed (via its own writes or loadStored).
       this.writeGuard.assertNoConcurrentWriter(meta.id, head.fHeadSequence);
-      const { headEventId, headSequence } = await appendEventTail(
-        tx,
-        meta,
-        persisted,
-        { parentId: head.fHeadEventId, nextSeq: head.fHeadSequence + 1 },
-        (refs) => this.writeGuard.pruneRefs(meta.id, refs),
-      );
+      const { headEventId, headSequence } = await appendEventTail(tx, storage, events, {
+        parentId: head.fHeadEventId,
+        nextSeq: head.fHeadSequence + 1,
+      });
       await tx.updateHead(meta.id, headEventId, headSequence);
       await tx.bumpRevision(meta.id);
       confirmedHead = headSequence;
@@ -432,19 +490,36 @@ export class SessionPersistenceRdb
   }
 
   /**
+   * Durably materialize a header-only session: create the `t_sessions` row (in
+   * one transaction) WITHOUT any event row. This is the backend half of the
+   * service's `ensureMaterialized` — an explicitly durable EMPTY session, so
+   * unlike {@link appendBatch} there is no head-cursor advance and no revision
+   * bump (a fresh row already starts at revision 0; row existence IS the
+   * materialization signal). The inherited cut is stored exactly like a
+   * materializing append's.
+   */
+  async materializeHeader(storage: SessionStorageMetadata): Promise<void> {
+    await this.ready;
+    await this.backend.transaction(async (tx) => {
+      await tx.upsertSession(storage.meta, storage.inheritedEventCount, randomUUID());
+    });
+  }
+
+  /**
    * Make a crash repair durable in ONE transaction: DELETE the torn tail (from
    * `tornMarker`), rewind the head cursor to the last surviving event, INSERT
    * the synthetic `closers`, and bump the revision once. After COMMIT the
-   * stored rows == the balanced log.
+   * stored rows == the balanced log. Closers are persisted verbatim like any
+   * other event (they never carry dropped content).
    */
   async commitRepair(
-    meta: SessionHeader,
+    storage: SessionStorageMetadata,
     tornMarker: number | undefined,
     closers: readonly SessionEvent[],
   ): Promise<void> {
     await this.ready;
-    const persistedClosers = closers.filter(isPersistedEvent);
-    if (tornMarker === undefined && persistedClosers.length === 0) return;
+    const { meta } = storage;
+    if (tornMarker === undefined && closers.length === 0) return;
     await this.backend.transaction(async (tx) => {
       if (tornMarker !== undefined) {
         await tx.deleteBridgeTail(meta.id, tornMarker);
@@ -457,12 +532,12 @@ export class SessionPersistenceRdb
           await tx.updateHead(meta.id, prev.fEventId, prev.fSequence);
         }
       }
-      if (persistedClosers.length > 0) {
+      if (closers.length > 0) {
         // Anchor at the ACTUAL tail row: the head cursor can lag the rows (a
         // hand-written torn tail never updated it), so a closer must follow the
         // last physical row, not the cursor.
         const last = await tx.getLastBridge(meta.id);
-        const { headEventId, headSequence } = await appendEventTail(tx, meta, persistedClosers, {
+        const { headEventId, headSequence } = await appendEventTail(tx, storage, closers, {
           parentId: last?.fEventId ?? "",
           nextSeq: (last?.fSequence ?? -1) + 1,
         });
@@ -472,7 +547,7 @@ export class SessionPersistenceRdb
     });
     // Re-confirm the head AFTER repair: truncation can rewind it and the
     // closers advance it, and the next append must not be rejected (or worse,
-    // silently re-numbered) against a stale confirmation.
+    // silently renumbered) against a stale confirmation.
     const row = await this.backend.getSession(meta.id);
     this.writeGuard.confirmHead(meta.id, row?.fHeadSequence ?? -1);
   }
@@ -540,25 +615,18 @@ function createBackend(config: Config): Backend {
 
 /**
  * Serialize an event's surface-metadata fields for SQL binding. Both fields are
- * nullable TEXT columns — null when the event has no surface metadata (non-surface
- * events, events written before surface support).
+ * nullable TEXT columns — null when the event has no surface metadata
+ * (non-surface events, events written before surface support).
  *
- * `sourceEventSeqs` references events by UPSTREAM seq. Delta events dropped at
- * write time never get a persisted row, so a reference to one can never be
- * remapped on read — keeping it verbatim produces a `source >= current seq`
- * provenance violation when the log is replayed as a session seed. The write
- * path therefore prunes references through {@link WriteGuard.pruneRefs}; a
- * fully pruned list is stored as null (no provenance).
+ * Since 0.1.2 every delivered event is persisted with its exact seq, so
+ * `sourceEventSeqs` needs no write-time pruning: the references always name
+ * persisted rows and reads pass them through (identity) or remap them from
+ * upstream space on a legacy log.
  * @param event - the event to serialize.
- * @param prune - prunes references to dropped deltas before binding. Defaults
- *   to identity (e.g. repair closers, which never carry provenance).
  */
-function surfaceBindings(
-  event: SessionEvent,
-  prune: (refs: readonly number[]) => readonly number[] = (refs) => refs,
-): [string | null, string | null] {
+function surfaceBindings(event: SessionEvent): [string | null, string | null] {
   const se = event as SessionEvent<SurfaceEventType>;
-  const sourceSeqs = se.sourceEventSeqs === undefined ? undefined : prune(se.sourceEventSeqs);
+  const sourceSeqs = se.sourceEventSeqs;
   return [
     sourceSeqs !== undefined && sourceSeqs.length > 0 ? JSON.stringify(sourceSeqs) : null,
     se.surfaceOp !== undefined ? JSON.stringify(se.surfaceOp) : null,
@@ -566,11 +634,18 @@ function surfaceBindings(
 }
 
 /**
- * Durably append one batch of persisted events to a session's tail inside the
- * enclosing transaction: mint each event's row (parent chain + playpen
- * dimensions + surface-metadata columns) and its bridge row, land both as ONE
- * multi-row INSERT each (N events are 2 statements instead of 2N), and return
- * the resulting head cursor.
+ * Durably append one batch of events to a session's tail inside the enclosing
+ * transaction: mint each event's row (parent chain + playpen dimensions +
+ * surface-metadata columns + ignorable-encoding marker) and its bridge row,
+ * land both as ONE multi-row INSERT each (N events are 2 statements instead
+ * of 2N), and return the resulting head cursor.
+ *
+ * Every event is persisted under its OWN seq: the bridge `f_sequence` equals
+ * the event's logical seq (asserted — a mismatch means the physical tail and
+ * the batch disagree, which must fail loud rather than renumber), and
+ * `f_original_seq` records the same value. Events the writer marked
+ * `ignorable` keep the marker in `f_encoding`, so reads can reproduce the
+ * envelope for the coordinator's unknown-type tolerance.
  *
  * The anchor is the caller's responsibility: a normal append starts from the
  * head cursor (`head.fHeadEventId` / `head.fHeadSequence + 1`), while
@@ -578,21 +653,19 @@ function surfaceBindings(
  * a hand-written torn tail). Both callers then persist the returned cursor via
  * {@link BackendTx.updateHead}.
  * @param tx - the enclosing transaction.
- * @param meta - the session being written (`meta.id` drives the bridge rows).
- * @param events - persisted events to append (callers already filtered out
- *   ephemeral/ignorable events; non-empty).
- * @param anchor - the parent event id to chain from and the next dense seq.
- * @param prune - forwarded to {@link surfaceBindings}; defaults to identity
- *   (repair closers never carry provenance).
- * @returns the new head cursor (last event id + its dense seq).
+ * @param storage - the session being written (header + inherited cut; the id
+ *   drives the bridge rows and the cut feeds a lazy row materialization).
+ * @param events - the events to append, in seq order (non-empty).
+ * @param anchor - the parent event id to chain from and the next seq.
+ * @returns the new head cursor (last event id + its seq).
  */
 async function appendEventTail(
   tx: BackendTx,
-  meta: SessionHeader,
+  storage: SessionStorageMetadata,
   events: readonly SessionEvent[],
   anchor: { parentId: string; nextSeq: number },
-  prune: (refs: readonly number[]) => readonly number[] = (refs) => refs,
 ): Promise<{ headEventId: string; headSequence: number }> {
+  const { meta } = storage;
   let parentId = anchor.parentId;
   let nextSeq = anchor.nextSeq;
   // Build both batches up front, then land them in ONE multi-row INSERT each:
@@ -601,9 +674,14 @@ async function appendEventTail(
   const eventRows: EventInsert[] = [];
   const bridgeRows: Array<{ fSessionId: SessionId; fEventId: string; fSequence: number }> = [];
   for (const event of events) {
+    if (event.seq !== nextSeq) {
+      throw new Error(
+        `append seq mismatch for "${meta.id}": physical tail is at ${nextSeq - 1}, batch event carries seq ${event.seq} — refusing to renumber`,
+      );
+    }
     const eventId = randomUUID();
     const { role, name, actionId } = eventDimensions(event);
-    const [surfaceSeqs, surfaceOp] = surfaceBindings(event, prune);
+    const [surfaceSeqs, surfaceOp] = surfaceBindings(event);
     eventRows.push({
       fEventId: eventId,
       fParentId: parentId,
@@ -611,7 +689,7 @@ async function appendEventTail(
       fRole: role,
       fName: name,
       fActionId: actionId,
-      fEncoding: EVENT_ENCODING,
+      fEncoding: event.ignorable === true ? IGNORABLE_EVENT_ENCODING : EVENT_ENCODING,
       fData: JSON.stringify(event.data),
       fCreatedAt: event.time,
       fOriginalSeq: event.seq,

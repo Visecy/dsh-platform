@@ -9,6 +9,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { Context } from "@deepseek-ai/cordis";
 import {
   SESSION_FORMAT_VERSION,
   Session,
@@ -22,21 +23,39 @@ import type {
   SurfaceEventType,
   SurfaceIntent,
 } from "@deepseek-ai/dsh-session";
-import { CallId, MessageId, createMessage, freezeMessage } from "@deepseek-ai/dsh-llm";
+import { MessageId, ToolCallId, createMessage, freezeMessage } from "@deepseek-ai/dsh-llm";
 import type { SessionPersistence } from "@deepseek-ai/dsh-session-persistence";
 
 /** A backend under test plus its teardown. */
 export interface ContractBackend {
+  /** The context the backend is mounted on (for live-session flows). */
+  ctx: Context;
   persistence: SessionPersistence;
   dispose: () => Promise<void>;
 }
 
-/** Build a minimal {@link SessionHeader} for a session id. */
+/** Build a minimal UNSEEDED {@link SessionHeader} for a session id. */
 export function meta(id: string, cwd?: string): SessionHeader {
   return {
     version: SESSION_FORMAT_VERSION,
     id: SessionId(id),
     createdAt: 1000,
+    isSeeded: false,
+    ...(cwd === undefined ? {} : { cwd }),
+  };
+}
+
+/**
+ * Build a SEEDED {@link SessionHeader} for a session id (a fork child). The
+ * exact inherited prefix length travels OUT of band — it is not header
+ * metadata in 0.1.2, so callers pass it to `create`/`append`-adjacent APIs.
+ */
+export function seededMeta(id: string, cwd?: string): SessionHeader {
+  return {
+    version: SESSION_FORMAT_VERSION,
+    id: SessionId(id),
+    createdAt: 1000,
+    isSeeded: true,
     ...(cwd === undefined ? {} : { cwd }),
   };
 }
@@ -239,7 +258,7 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
               message: createMessage({
                 role: "assistant",
                 content: [
-                  { type: "tool-call", id: CallId("call-x"), name: "bash", arguments: "{}" },
+                  { type: "tool-call", id: ToolCallId("call-x"), name: "bash", arguments: "{}" },
                 ],
                 source: {
                   kind: "model",
@@ -273,8 +292,8 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
         const synthetic = loaded.events.find((e) => e.type === "tool/result");
         expect(synthetic?.type === "tool/result" && synthetic.data).toMatchObject({
           message: {
-            source: { kind: "tool", callId: CallId("call-x") },
-            content: [{ type: "tool-result", toolCallId: CallId("call-x"), isError: true }],
+            source: { kind: "tool", callId: ToolCallId("call-x") },
+            content: [{ type: "tool-result", toolCallId: ToolCallId("call-x"), isError: true }],
           },
           error: { code: TOOL_NOT_STARTED },
         });
@@ -284,7 +303,7 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
         const callId =
           call?.type === "assistant/message" &&
           call.data.message.content.find((b) => b.type === "tool-call");
-        expect(callId && callId.type === "tool-call" && callId.id).toBe(CallId("call-x"));
+        expect(callId && callId.type === "tool-call" && callId.id).toBe(ToolCallId("call-x"));
       } finally {
         await dispose();
       }
@@ -308,7 +327,7 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
               message: createMessage({
                 role: "assistant",
                 content: [
-                  { type: "tool-call", id: CallId("call-risk"), name: "write", arguments: "{}" },
+                  { type: "tool-call", id: ToolCallId("call-risk"), name: "write", arguments: "{}" },
                 ],
                 source: {
                   kind: "model",
@@ -323,7 +342,7 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
             type: "tool/call",
             seq: 3,
             time: 4,
-            data: { turn: 1, step: 1, callId: CallId("call-risk"), name: "write", arguments: "{}" },
+            data: { turn: 1, step: 1, callId: ToolCallId("call-risk"), name: "write", arguments: "{}" },
           },
         ]);
 
@@ -345,13 +364,13 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
         expect(synthetic.data.message.content[0].content[0].text).toContain(
           "if it may have side effects, first verify external state or ask the user",
         );
-        const resumed = Session.create(m.id, loaded.events, loaded.meta);
+        const resumed = Session.create(m.id, loaded.events, loaded.meta, loaded.inheritedEventCount);
         const resumedResult = resumed
           .deriveMessages()
           .find((message) => message.content.some((block) => block.type === "tool-result"));
         expect(resumedResult?.content[0]).toMatchObject({
           type: "tool-result",
-          toolCallId: CallId("call-risk"),
+          toolCallId: ToolCallId("call-risk"),
           isError: true,
         });
       } finally {
@@ -535,6 +554,82 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
             /losslessly JSON-serializable/,
           );
         }
+      } finally {
+        await dispose();
+      }
+    });
+
+    it("persist-everything: chunk deltas and ignorable events round-trip at their exact seqs", async () => {
+      // 0.1.2 persists EVERY event the writer produced: no delta filtering, no
+      // dense renumbering. A batch containing ONLY delta/ignorable events is a
+      // normal append (materializing) instead of a no-op.
+      const { persistence, dispose } = await make();
+      try {
+        const m = meta("persist-everything", "/work");
+        await persistence.create(m);
+        await persistence.append(m.id, [
+          {
+            type: "assistant/chunk",
+            seq: 0,
+            time: 1,
+            data: { turn: 1, step: 1, chunk: { type: "text-delta", index: 0, text: "he" } },
+          },
+          {
+            type: "plugin/telemetry",
+            seq: 1,
+            time: 2,
+            data: { metric: 1 },
+            ignorable: true,
+          } as unknown as SessionEvent,
+          { type: "turn/start", seq: 2, time: 3, data: { turn: 1 } },
+          { type: "turn/end", seq: 3, time: 4, data: { turn: 1, reason: { kind: "completed" } } },
+        ]);
+
+        // A delta/ignorable-only prefix still materialized the session.
+        expect((await persistence.list()).map((h) => h.id)).toContain(m.id);
+        const inspection = await persistence.inspect(m.id);
+        expect(inspection.events).toHaveLength(4);
+        expect(inspection.events.map((e) => e.seq)).toEqual([0, 1, 2, 3]);
+        // The chunk is stored verbatim, and the unknown ignorable event keeps
+        // its ignorable marker (a reader that knows the type may skip it; the
+        // log itself is intact).
+        expect(inspection.events[0]).toMatchObject({ type: "assistant/chunk" });
+        expect(inspection.events[1]).toMatchObject({ type: "plugin/telemetry", ignorable: true });
+        const suffix = await persistence.readFrom(m.id, 1);
+        expect(suffix.events.map((e) => e.seq)).toEqual([1, 2, 3]);
+      } finally {
+        await dispose();
+      }
+    });
+
+    it("ensureMaterialized durably materializes a live EMPTY session (header only, no events)", async () => {
+      const { ctx, persistence, dispose } = await make();
+      try {
+        const session = ctx.sessions.create(SessionId("materialized-empty"), {
+          meta: { cwd: "/work" },
+        });
+        // Unmaterialized: an empty live session is absent from storage.
+        expect((await persistence.list()).map((h) => h.id)).not.toContain(session.id);
+
+        await persistence.ensureMaterialized(session);
+        // The durable header exists WITHOUT any invented session event, so the
+        // empty session is now a resumable resource.
+        const headers = await persistence.list();
+        expect(headers.map((h) => h.id)).toContain(session.id);
+        const snapshots = await persistence.listSnapshots();
+        expect(snapshots.find((s) => s.header.id === session.id)?.header).toMatchObject({
+          id: session.id,
+          isSeeded: false,
+        });
+        // A later append still starts at seq 0 (the header-only materialization
+        // wrote no events).
+        session.append("turn/start", { turn: 1 });
+        session.append("turn/end", { turn: 1, reason: { kind: "completed" } });
+        await ctx.sessions.flush(session);
+        const loaded = await persistence.load(session.id);
+        expect(loaded.events.map((e) => e.seq)).toEqual([0, 1]);
+        // And a load while the session is live reports the same events.
+        expect((await persistence.load(session.id)).events.map((e) => e.seq)).toEqual([0, 1]);
       } finally {
         await dispose();
       }

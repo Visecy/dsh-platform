@@ -16,6 +16,10 @@ export const sessions: TableDef = {
     { name: "f_created_at", type: "bigint", notNull: true },
     { name: "f_cwd", type: "text" },
     { name: "f_parent_session", type: "text" },
+    // 0.1.2：out-of-log 的继承前缀 cut。存在性 = 头部 isSeeded（镜像 JSONL
+    // header 行的 seedLength 字段）；无该列的 rc.2 时代行仍按旧语义读取（见
+    // log.ts 的 storedInheritedCount）。写路径在 INSERT 时写入 cut、CONFLICT
+    // 时保留原值（sessionConflictRow 不含此列）。
     { name: "f_seed_length", type: "integer" },
     { name: "f_origin", type: "text" },
     { name: "f_delegation_depth", type: "integer" },

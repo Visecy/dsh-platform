@@ -6,7 +6,7 @@
  *
  * 事务：SQLite 单连接，`BEGIN IMMEDIATE` 提前获取写锁（受 `busy_timeout`
  * pragma 排队保护）；`COMMIT`/`ROLLBACK` 之后同一连接继续服务普通查询。
- * @module @morlay/session-persistence-rdb/sqlite
+ * @module @visecy/dsh-session-persistence-rdb/sqlite
  */
 
 import { randomUUID } from "node:crypto";
@@ -324,7 +324,8 @@ export class SqliteBackend implements Backend {
    * row primitives used by the non-transactional reads.
    */
   private readonly tx: BackendTx = {
-    upsertSession: (meta, incarnation) => this.upsertSession(meta, incarnation),
+    upsertSession: (meta, inheritedEventCount, incarnation) =>
+      this.upsertSession(meta, inheritedEventCount, incarnation),
     getHead: (id) => this.getHead(id),
     insertEvents: (events) => this.insertEvents(events),
     insertBridges: (rows) => this.insertBridges(rows),
@@ -337,10 +338,14 @@ export class SqliteBackend implements Backend {
 
   // --- row primitives (transaction-internal or standalone) ---
 
-  private async upsertSession(meta: SessionHeader, incarnation: string): Promise<void> {
+  private async upsertSession(
+    meta: SessionHeader,
+    inheritedEventCount: number,
+    incarnation: string,
+  ): Promise<void> {
     this.db
       .insert(tSessions)
-      .values(sessionInsertRow(meta, incarnation))
+      .values(sessionInsertRow(meta, inheritedEventCount, incarnation))
       .onConflictDoUpdate({
         target: tSessions.fSessionId,
         set: sessionConflictRow(meta),
@@ -438,6 +443,7 @@ export class SqliteBackend implements Backend {
         fKind: tEvents.fKind,
         fCreatedAt: tEvents.fCreatedAt,
         fData: tEvents.fData,
+        fEncoding: tEvents.fEncoding,
         fSourceEventSeqs: tEvents.fSourceEventSeqs,
         fSurfaceOp: tEvents.fSurfaceOp,
       })

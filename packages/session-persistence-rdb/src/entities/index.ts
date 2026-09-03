@@ -2,7 +2,7 @@
  * 实体纯定义：每张表一个文件，方言无关的表描述（列 / 约束 / 索引 / 外键）。
  * 具体后端的 drizzle 表对象与建表 DDL 由 `src/adapters/` 从这里转化生成。
  *
- * @module @morlay/session-persistence-rdb/entities
+ * @module @visecy/dsh-session-persistence-rdb/entities
  */
 
 import { persistenceState } from "./persistence-state.ts";

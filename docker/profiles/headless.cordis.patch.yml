@@ -4,8 +4,6 @@
   disabled: true
 - id: permission
   disabled: true
-- id: permission-presets
-  disabled: true
 - id: session-persistence-jsonl
   disabled: true
 - id: fs-sandbox

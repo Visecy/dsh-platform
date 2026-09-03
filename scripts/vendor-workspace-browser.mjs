@@ -3,9 +3,10 @@
  * Vendor the official dsh-client-ui-workspace browser bundle into
  * @visecy/dsh-workspace-k8s with the platform status additions applied.
  *
- * The official WorkspaceBrowser has no row-level injection point, so the
- * platform vendors the bundle and applies 13 surgical patches (validated on
- * the live DSH):
+ * Consumes the official bundle installed under
+ * packages/workspace-k8s/node_modules/@deepseek-ai/dsh-client-ui-workspace
+ * (currently 0.1.2-rc.1) and applies the same 14 surgical patches that were
+ * validated on the live DSH against the 0.1.1-rc.2 bundle:
  *   1. module id           2. WorkspaceBrowser signature (+useStatus/runStatusAction)
  *   3. status wiring       4. SessionTree signature
  *   5. ProjectRowItem sig  6. workspace menu platform items
@@ -13,6 +14,33 @@
  *   9. projectText inline status  10. SessionTree call props
  *  11. ProjectRowItem call props  12. browserInjected hooks.status
  *  13. sidebar registration (children hole kept)  14. locale register guard
+ *
+ * 0.1.2-rc.1 anchor re-anchoring notes (semantics unchanged; anchors follow
+ * upstream text drift):
+ *  - WorkspaceBrowser/SessionTree gained `useSessionPendingInteraction`
+ *    (session-level pending-approval/plan/question statuses — orthogonal to
+ *    the platform's k8s workspace phase; no patch needed for it) and the
+ *    browser gained `useHostInfo` in place of the old `useHostDescription`
+ *    hook (host facts now come from ctx.remote.$host via a hostInfo
+ *    observable, bound the same way through the register `hooks`
+ *    compartment). The old component-level `home` derivation and the
+ *    hooks-compartment injection pattern (hooks.* -> use* selector props,
+ *    object root keys -> plain props) are unchanged, so the platform's
+ *    `status: statusSource` hook + `runStatusAction` root prop patch the
+ *    same way as before.
+ *  - The apply() body now reads `ctx.get("sessions")/ctx.get("workspaces")`
+ *    and ctx.remote.* instead of ctx.workspaces/ctx.sessions/ctx.get
+ *    ("connection"), so the inject-hooks anchor uses `workspaces.create`
+ *    now. A new UiWorkspaceService (connectWorkspace/startSession/archive +
+ *    watchNavigation auto-open policy) and `slots.provideRoot({ hooks:
+ *    { workspaces } })` run in the vendored apply exactly as they do in an
+ *    official 0.1.2 deployment — no platform patch.
+ *  - locale: the 0.1.2 dsh-client-locale register() still throws
+ *    synchronously when the (ns, locale) pair is already registered, so
+ *    patch 14's duplicate-NS try/catch guard is kept verbatim.
+ *  - Nothing in the official 0.1.2 code supersedes any of the 14 intents:
+ *    official status work is session-pending-interaction state, not the k8s
+ *    workspace lifecycle the platform renders.
  *
  * The official ui-workspace row is DISABLED in the deployment, so this
  * vendored browser is the sole occupant of sidebar.workspaces (and the
@@ -46,8 +74,11 @@ const patch = (anchorLines, replLines, label) => {
 const L = (text, rel) => [text, rel]
 
 patch([L('id: "@deepseek-ai/dsh-client-ui-workspace"', 0)], [L('id: "@visecy/dsh-workspace-k8s/vendored-browser"', 0)], 'id')
-patch([L('function WorkspaceBrowser({ wide, expandSidebar, useSessions, useWorkspaces, useStore, actions, startSession, open, renameSession, forkSession, renameWorkspace, deleteWorkspace, insertWorkspaceBefore, archiveSession, insertSessionBefore, createWorkspace, searchSessions, searchResultLimit, useDirectoryFlow, useHostDescription, renderSlot, t }) {', 0)],
-  [L('function WorkspaceBrowser({ wide, expandSidebar, useSessions, useWorkspaces, useStore, actions, startSession, open, renameSession, forkSession, renameWorkspace, deleteWorkspace, insertWorkspaceBefore, archiveSession, insertSessionBefore, createWorkspace, searchSessions, searchResultLimit, useDirectoryFlow, useHostDescription, useStatus, runStatusAction, renderSlot, t }) {', 0)], 'signature')
+// 0.1.2 signature: + useSessionPendingInteraction (after useSessions) and
+// useHostInfo (replacing useHostDescription); insert the platform params
+// before renderSlot exactly as before.
+patch([L('function WorkspaceBrowser({ wide, expandSidebar, useSessions, useSessionPendingInteraction, useWorkspaces, useStore, actions, startSession, open, renameSession, forkSession, renameWorkspace, deleteWorkspace, insertWorkspaceBefore, archiveSession, insertSessionBefore, createWorkspace, searchSessions, searchResultLimit, useDirectoryFlow, useHostInfo, renderSlot, t }) {', 0)],
+  [L('function WorkspaceBrowser({ wide, expandSidebar, useSessions, useSessionPendingInteraction, useWorkspaces, useStore, actions, startSession, open, renameSession, forkSession, renameWorkspace, deleteWorkspace, insertWorkspaceBefore, archiveSession, insertSessionBefore, createWorkspace, searchSessions, searchResultLimit, useDirectoryFlow, useHostInfo, useStatus, runStatusAction, renderSlot, t }) {', 0)], 'signature')
 patch([L('const directoryFlowAvailable = useDirectoryFlow((occupied) => occupied);', 0)], [
   L('const directoryFlowAvailable = useDirectoryFlow((occupied) => occupied);', 0),
   L('(0, react.useEffect)(() => {', 0),
@@ -59,8 +90,8 @@ patch([L('const directoryFlowAvailable = useDirectoryFlow((occupied) => occupied
   L('for (const statusRow of statusSnapshot.rows) statusById[statusRow.nativeWorkspaceId ?? statusRow.workspaceId] = statusRow;', 1),
   L('}', 0),
 ], 'status-wiring')
-patch([L('function SessionTree({ useSessions, startSession, open, forkSession, workspaces, archivedSessionIds, onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive, insertWorkspaceBefore, insertSessionBefore, orderBy, groupExpansion, setGroupExpanded, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, home, t }) {', 0)],
-  [L('function SessionTree({ useSessions, startSession, open, forkSession, workspaces, archivedSessionIds, onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive, insertWorkspaceBefore, insertSessionBefore, orderBy, groupExpansion, setGroupExpanded, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, home, statusById, runStatusAction, t }) {', 0)], 'sessiontree-sig')
+patch([L('function SessionTree({ useSessions, useSessionPendingInteraction, startSession, open, forkSession, workspaces, archivedSessionIds, onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive, insertWorkspaceBefore, insertSessionBefore, orderBy, groupExpansion, setGroupExpanded, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, home, t }) {', 0)],
+  [L('function SessionTree({ useSessions, useSessionPendingInteraction, startSession, open, forkSession, workspaces, archivedSessionIds, onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive, insertWorkspaceBefore, insertSessionBefore, orderBy, groupExpansion, setGroupExpanded, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, home, statusById, runStatusAction, t }) {', 0)], 'sessiontree-sig')
 patch([L('function ProjectRowItem({ group, onToggle, onCreate, actions, drag, home, t }) {', 0)],
   [L('function ProjectRowItem({ group, onToggle, onCreate, actions, drag, home, t, status, runStatusAction }) {', 0)], 'projectrow-sig')
 patch([L('const workspaceMenuItems = [{', 0)], [
@@ -71,14 +102,16 @@ patch([L('const workspaceMenuItems = [{', 0)], [
   L('[{', 1),
 ], 'menu-head')
 patch([L('danger: true', 0), L('}];', 0)], [L('danger: true', 0), L('}]);', 0)], 'menu-tail')
-patch([L('onSelect: (id) => {', 0), L('setMenuOpen(false);', 0), L('/* v8 ignore next -- workspaceMenuItems carries exactly these two rows today. */', 0)], [
+// 0.1.2 reworded the upstream v8-ignore comment; dispatch block inserted
+// between setMenuOpen(false) and the narrowed rename/delete branch as before.
+patch([L('onSelect: (id) => {', 0), L('setMenuOpen(false);', 0), L('/* v8 ignore next -- Menu can emit only the rename and delete rows supplied above. */', 0)], [
   L('onSelect: (id) => {', 0),
   L('setMenuOpen(false);', 0),
   L('if (id === "ws-ensure" || id === "ws-sleep" || id === "ws-cleanup") {', 0),
   L('runStatusAction(status.workspaceId, id.slice(3));', 1),
   L('return;', 1),
   L('}', 0),
-  L('/* v8 ignore next -- workspaceMenuItems carries exactly these two rows today. */', 0),
+  L('/* v8 ignore next -- Menu can emit only the rename and delete rows supplied above. */', 0),
 ], 'onselect')
 patch([L('(0, react_jsx_runtime.jsx)("span", {', 0), L('className: Rows_module_css_default.projectText,', 0), L('children: (0, react_jsx_runtime.jsx)("span", {', 0), L('className: Rows_module_css_default.title,', 0), L('children: label', 0), L('})', 0), L('}),', 0)], [
   L('(0, react_jsx_runtime.jsxs)("span", {', 0),
@@ -100,9 +133,12 @@ patch([L('(0, react_jsx_runtime.jsx)("span", {', 0), L('className: Rows_module_c
   L(']', 1),
   L('}),', 0),
 ], 'projecttext')
-patch([L('}) : (0, react_jsx_runtime.jsx)(SessionTree, {', 0), L('useSessions,', 0), L('onSessionRename,', 0), L('onSessionArchive,', 0), L('forkSession,', 0), L('workspaces,', 0)], [
+// SessionTree call in WorkspaceBrowser: 0.1.2 threads useSessionPendingInteraction
+// between useSessions and onSessionRename; keep inserting after workspaces.
+patch([L('}) : (0, react_jsx_runtime.jsx)(SessionTree, {', 0), L('useSessions,', 0), L('useSessionPendingInteraction,', 0), L('onSessionRename,', 0), L('onSessionArchive,', 0), L('forkSession,', 0), L('workspaces,', 0)], [
   L('}) : (0, react_jsx_runtime.jsx)(SessionTree, {', 0),
   L('useSessions,', 1),
+  L('useSessionPendingInteraction,', 1),
   L('onSessionRename,', 1),
   L('onSessionArchive,', 1),
   L('forkSession,', 1),
@@ -118,8 +154,12 @@ patch([L('(0, react_jsx_runtime.jsx)(ProjectRowItem, {', 0), L('group,', 0), L('
   L('status: group.workspaceId === void 0 ? void 0 : statusById[group.workspaceId],', 1),
   L('runStatusAction,', 1),
 ], 'call-site')
-patch([L('createWorkspace: (input) => ctx.workspaces.create(input),', 0), L('hooks: {', 0), L('directoryFlow: browserFlowSource,', 0)], [
-  L('createWorkspace: (input) => ctx.workspaces.create(input),', 0),
+// apply() reads ctx.get("workspaces") at 0.1.2, so the injected action is
+// `workspaces.create` now (pickerInjected keeps its own same-named line
+// followed by a one-line hooks literal — the three-line anchor still selects
+// browserInjected).
+patch([L('createWorkspace: (input) => workspaces.create(input),', 0), L('hooks: {', 0), L('directoryFlow: browserFlowSource,', 0)], [
+  L('createWorkspace: (input) => workspaces.create(input),', 0),
   L('runStatusAction,', 0),
   L('hooks: {', 0),
   L('directoryFlow: browserFlowSource,', 1),
@@ -127,7 +167,8 @@ patch([L('createWorkspace: (input) => ctx.workspaces.create(input),', 0), L('hoo
 ], 'inject-hooks')
 // sidebar.workspaces: the official ui-workspace row is DISABLED in the
 // deployment, so this vendored browser is the sole occupant and keeps the
-// original registration (children hole included, default priority).
+// original registration (children hole included, default priority). The
+// 0.1.2 register additionally passes inject/locale below store — untouched.
 patch([L('ctx.slots.inject("sidebar.workspaces", () => ctx.slots.register({', 0), L('name: "sidebar.workspaces",', 0), L('children: { "sidebar.workspaces.directoryFlow": {', 0), L('kind: "single",', 0), L('scope: "root"', 0), L('} },', 0), L('store: createWorkspaceViewStore(),', 0)], [
   L('ctx.slots.inject("sidebar.workspaces", () => ctx.slots.register({', 0),
   L('name: "sidebar.workspaces",', 1),
@@ -165,8 +206,8 @@ const out = join(pkgRoot, 'src', 'client', 'vendored-workspace.ts')
 const ts = `/**
  * GENERATED FILE — do not edit by hand.
  * Regenerate with: node scripts/vendor-workspace-browser.mjs
- * Vendored official dsh-client-ui-workspace browser bundle with the platform
- * status patches applied (see the script header for the patch list).
+ * Vendored official dsh-client-ui-workspace browser bundle (0.1.2-rc.1) with
+ * the platform status patches applied (see the script header for the patch list).
  */
 export const VENDORED_WORKSPACE_BROWSER: string = ${JSON.stringify(source)}
 `

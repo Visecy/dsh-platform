@@ -13,7 +13,7 @@ import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { describe, expect, it, vi } from "vitest";
 import { Context, type Fiber } from "@deepseek-ai/cordis";
 import { scopeTarget } from "@deepseek-ai/dsh-scope";
-import SessionStore, { SESSION_FORMAT_VERSION, Session, SessionId } from "@deepseek-ai/dsh-session";
+import SessionStore, { SESSION_FORMAT_VERSION, Session, SessionId, SessionLogOffset } from "@deepseek-ai/dsh-session";
 import type { SessionEvent } from "@deepseek-ai/dsh-session";
 import { meta, oneTurnLog, appendLog } from "./contract.ts";
 
@@ -372,10 +372,13 @@ export function runCoordinatorContract(
       }
     });
 
-    it("round-trips the seed boundary (seedLength) through persistence", async () => {
-      // A forked child records how many leading events were inherited via the seed; the
-      // boundary must survive a reload (so a resume/replay can tell the inherited prefix from
-      // the child's own events). JSONL stores it in the header; SQLite uses `seed_length`.
+    it("round-trips the seed boundary (isSeeded + inheritedEventCount) through persistence", async () => {
+      // A forked child records how many leading events were inherited via the
+      // seed; the boundary must survive a reload (so a resume/replay can tell
+      // the inherited prefix from the child's own events). 0.1.2 keeps the cut
+      // OUT of the header: `isSeeded` marks the lineage and the exact count is
+      // returned on every read alongside the header. The constructor seed may
+      // carry child-owned setup events after the cut.
       const fix = await makeFixture();
       const { ctx, fiber } = await freshCtx(fix);
       try {
@@ -384,18 +387,41 @@ export function runCoordinatorContract(
           Object.assign(
             (inner: Context) => {
               session = inner.sessions.create(SessionId("forked-child"), {
-                meta: { cwd: WORK, seedLength: 3 },
+                meta: {
+                  cwd: WORK,
+                  parentSession: SessionId("root"),
+                  isSeeded: true,
+                },
+                seed: oneTurnLog(), // 6 inherited events (balanced)
+                inheritedEventCount: SessionLogOffset(3),
               });
             },
             { inject: ["sessions"] },
           ),
         );
-        send(session, oneTurnLog());
+        send(session, [
+          { type: "turn/start", seq: 7, time: 10, data: { turn: 2 } },
+          { type: "turn/end", seq: 8, time: 11, data: { turn: 2, reason: { kind: "completed" } } },
+        ]);
         await ctx.sessions.flush(session);
         await sessionFiber.dispose();
 
         const loaded = await ctx.sessionPersistence.load(SessionId("forked-child"));
-        expect(loaded.meta.seedLength).toBe(3);
+        expect(loaded.meta.isSeeded).toBe(true);
+        expect(loaded.meta.parentSession).toBe("root");
+        // 0..5 the inherited seed, 6 the constructor's end-seed marker, 7..8
+        // the child's own turn — and the durable cut rides alongside the header.
+        expect(loaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        expect(loaded.inheritedEventCount).toBe(3);
+        // A resumed session reconstructs the same cut.
+        const resumed = Session.create(
+          SessionId("forked-child"),
+          loaded.events,
+          loaded.meta,
+          loaded.inheritedEventCount,
+        );
+        expect(resumed.header.isSeeded).toBe(true);
+        expect(resumed.inheritedEventCount).toBe(3);
       } finally {
         await fiber.dispose();
         await fix.cleanup();
@@ -519,7 +545,7 @@ export function runCoordinatorContract(
           ]);
           expect(messages.every((message) => Object.isFrozen(message))).toBe(true);
 
-          const resumed = Session.create(id, snapshot.events, snapshot.meta);
+          const resumed = Session.create(id, snapshot.events, snapshot.meta, snapshot.inheritedEventCount);
           expect(resumed.deriveMessages().map((message) => message.id)).toEqual([
             `legacy-message:${id}:1`,
             `legacy-message:${id}:3`,
@@ -604,7 +630,7 @@ export function runCoordinatorContract(
             },
           ]);
 
-          const resumed = Session.create(id, snapshot.events, snapshot.meta);
+          const resumed = Session.create(id, snapshot.events, snapshot.meta, snapshot.inheritedEventCount);
           expect(resumed.deriveMessages().map((message) => message.content)).toEqual([
             [{ type: "text", text: "old prompt" }],
             [{ type: "text", text: "old steering" }],
@@ -829,6 +855,10 @@ export function runCoordinatorContract(
           );
         }
 
+        // An unknown type marked ignorable is still persisted VERBATIM since
+        // 0.1.2 (nothing is dropped at write time; its ignorable marker makes
+        // the event skippable for readers that do not know the type, and the
+        // coordinator tolerates it on read instead of refusing the log).
         const pluginId = SessionId("non-object-plugin-event");
         await ctx.sessionPersistence.create(meta(pluginId, WORK));
         await ctx.sessionPersistence.append(pluginId, [
@@ -837,14 +867,23 @@ export function runCoordinatorContract(
             seq: 0,
             time: 1,
             data: null,
-            // An ignorable event's loss cannot affect reconstruction (envelope
-            // contract on SessionEvent.ignorable), so this backend drops it at
-            // write time instead of persisting a marker for it.
             ignorable: true,
           } as unknown as SessionEvent,
         ]);
-        await expect(ctx.sessionPersistence.inspect(pluginId)).rejects.toThrow(/not found/);
-        await expect(ctx.sessionPersistence.readFrom(pluginId, 0)).rejects.toThrow(/not found/);
+        const ignorableInspection = await ctx.sessionPersistence.inspect(pluginId);
+        expect(ignorableInspection.events).toHaveLength(1);
+        expect(ignorableInspection.events[0]).toMatchObject({
+          type: "plugin/test",
+          ignorable: true,
+          data: null,
+        });
+        const ignorableSuffix = await ctx.sessionPersistence.readFrom(pluginId, 0);
+        expect(ignorableSuffix.events[0]).toMatchObject({
+          type: "plugin/test",
+          ignorable: true,
+          data: null,
+        });
+
 
         // Contrast: an unknown type WITHOUT the ignorable marker is a REQUIRED
         // event — it is persisted (loss would affect reconstruction) and the
@@ -1623,6 +1662,82 @@ export function runCoordinatorContract(
         await ctx.sessions.flush(session);
         const loaded = await ctx.sessionPersistence.load(SessionId("flush-nostate"));
         expect(loaded.events).toHaveLength(3);
+      } finally {
+        await fiber.dispose();
+        await fix.cleanup();
+      }
+    });
+
+    it("prepare and borrowSession surface the exact cold unpublished Session", async () => {
+      // 0.1.2 service primitives: prepare() yields the exact Session a resume
+      // publishes (revision-checked), and borrowSession() pins the reusable
+      // prepared source while a caller observes it.
+      const fix = await makeFixture();
+      const { ctx, fiber } = await freshCtx(fix);
+      try {
+        const id = SessionId("prepare-borrow");
+        const m = meta(id, WORK);
+        await ctx.sessionPersistence.create(m);
+        await ctx.sessionPersistence.append(id, oneTurnLog());
+
+        // While the session is LIVE, an observation borrows its immutable view
+        // and prepare must refuse the id.
+        let live!: Session;
+        const liveFiber = await ctx.plugin(
+          Object.assign(
+            (inner: Context) => {
+              live = inner.sessions.create(id, {
+                seed: oneTurnLog(),
+                meta: { cwd: WORK },
+              });
+            },
+            { inject: ["sessions"] },
+          ),
+        );
+        try {
+          const liveObservation = await ctx.sessionPersistence.borrowSession(id);
+          try {
+            expect(liveObservation.source).toBe("live");
+            expect(liveObservation.inspection.meta.id).toBe(id);
+            expect(liveObservation.inspection.events.map((e) => e.seq)).toEqual([
+              0, 1, 2, 3, 4, 5, 6,
+            ]);
+          } finally {
+            liveObservation[Symbol.dispose]();
+          }
+          await expect(ctx.sessionPersistence.prepare(id)).rejects.toThrow(/while it is live/);
+        } finally {
+          await liveFiber.dispose();
+          void live;
+        }
+
+        // Cold: prepare yields the exact unpublished Session whose log is the
+        // stored log (the constructor only appends an end-seed marker when the
+        // stored log does not already end with one).
+        const preparation = await ctx.sessionPersistence.prepare(id);
+        try {
+          expect(preparation.session.header).toMatchObject({ id, cwd: WORK, isSeeded: false });
+          const seqs = preparation.session.snapshotEvents().map((e) => e.seq);
+          expect(seqs).toEqual(Array.from({ length: seqs.length }, (_, k) => k));
+          expect(preparation.session.snapshotEvents().at(-1)).toMatchObject({
+            type: "session/end-seed",
+          });
+          expect(preparation.session.inheritedEventCount).toBe(0);
+        } finally {
+          preparation[Symbol.dispose]();
+        }
+
+        const observation = await ctx.sessionPersistence.borrowSession(id);
+        try {
+          expect(observation.inspection.meta.id).toBe(id);
+          const seqs = observation.inspection.events.map((e) => e.seq);
+          expect(seqs).toEqual(Array.from({ length: seqs.length }, (_, k) => k));
+          if (observation.source === "prepared") {
+            expect(observation.preparedSession.header.id).toBe(id);
+          }
+        } finally {
+          observation[Symbol.dispose]();
+        }
       } finally {
         await fiber.dispose();
         await fix.cleanup();

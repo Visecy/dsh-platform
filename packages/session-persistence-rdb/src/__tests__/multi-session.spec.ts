@@ -86,8 +86,8 @@ describe("multi-session repro (cold-path verification)", () => {
       const loaded = await b2.ctx.sessionPersistence.load(SessionId(`live-${i}`));
       const seqs = loaded.events.map((e) => e.seq);
       expect(seqs).toEqual(Array.from({ length: seqs.length }, (_, k) => k));
-      expect(seqs.length).toBe(12); // 每轮 6 个持久化事件 × 2
-      expect(loaded.events.every((e) => e.type !== "assistant/chunk")).toBe(true);
+      expect(seqs.length).toBe(14); // 每轮 7 个事件 × 2（0.1.2：chunk 也落库）
+      expect(loaded.events.filter((e) => e.type === "assistant/chunk")).toHaveLength(2);
     }
     await b2.dispose();
   });
@@ -107,8 +107,8 @@ describe("multi-session repro (cold-path verification)", () => {
     const b3 = await mount(path);
     const l1 = await b3.ctx.sessionPersistence.load(SessionId("inst-1"));
     const l2 = await b3.ctx.sessionPersistence.load(SessionId("inst-2"));
-    expect(l1.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5]);
-    expect(l2.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(l1.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(l2.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6]);
     await b3.dispose();
   });
 
@@ -126,7 +126,7 @@ describe("multi-session repro (cold-path verification)", () => {
     const b2 = await mount(path);
     for (let i = 0; i < N; i++) {
       const loaded = await b2.ctx.sessionPersistence.load(SessionId(`p-${i}`));
-      expect(loaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5]);
+      expect(loaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6]);
     }
     await b2.dispose();
   });
@@ -174,11 +174,11 @@ describe("multi-session repro (cold-path verification)", () => {
     for (let i = 0; i < N; i++) {
       const loaded = await b2.ctx.sessionPersistence.load(SessionId(`child-${i}`));
       const seqs = loaded.events.map((e) => e.seq);
-      // child log = parent 前缀（delta 过滤后 6）+ session/end-seed（1）+
-      // 自身 turn（delta 过滤后 6）= 13：稠密连续、无 chunk、无跨 session 拼接。
+      // child log = parent 前缀（7，chunk 全量继承）+ session/end-seed（1）+
+      // 自身 turn（7）= 15：seq 连续、无 chunk 丢失、无跨 session 拼接。
       expect(seqs).toEqual(Array.from({ length: seqs.length }, (_, k) => k));
-      expect(seqs.length).toBe(13);
-      expect(loaded.events.every((e) => e.type !== "assistant/chunk")).toBe(true);
+      expect(seqs.length).toBe(15);
+      expect(loaded.events.filter((e) => e.type === "assistant/chunk")).toHaveLength(2);
     }
     await b2.dispose();
   });
@@ -207,11 +207,12 @@ describe("multi-session repro (cold-path verification)", () => {
     await b.dispose();
 
     const b2 = await mount(path);
+    const expected = Array.from({ length: 14 }, (_, k) => k); // 每轮 7 个事件 × 2 轮
     const parentLoaded = await b2.ctx.sessionPersistence.load(SessionId("parent-2"));
-    expect(parentLoaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(parentLoaded.events.map((e) => e.seq)).toEqual(expected);
     for (let i = 0; i < N; i++) {
       const loaded = await b2.ctx.sessionPersistence.load(SessionId(`sib-${i}`));
-      expect(loaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+      expect(loaded.events.map((e) => e.seq)).toEqual(expected);
     }
     await b2.dispose();
   });
