@@ -184,11 +184,39 @@ export function apply(ctx: Context, config: Config | undefined): void {
     hostRoot,
   )
   // The session store is the join key for the association repair: durable
-  // session headers carry the `cwd` each stored session was created in. Resolve
-  // it lazily, per pass, so the plugin still loads in a composition without
-  // session persistence and never caches a torn view.
+  // session headers carry the `cwd` each stored session was created in.
+  //
+  // Read it through `ctx.get`, NOT through the `ctx.sessionPersistence` proxy,
+  // and deliberately do NOT declare `sessionPersistence` in this plugin's
+  // `inject`:
+  //
+  //  - A hard inject gates this plugin's WHOLE activation (pod lifecycle,
+  //    endpoint resolver, workspace API routes, reconciler) on a storage row
+  //    that has nothing to do with the k8s resources it owns. The shipped
+  //    profiles mount `workspace-runtime` BEFORE `session-persistence-rdb`, so
+  //    the plugin would simply sit pending until the store row activates, and a
+  //    composition without that row would lose the workspace runtime entirely.
+  //  - `ctx.get` is the inject-free read the proxy error message points at. The
+  //    proxy THROWS for a service the fiber does not inject (and a sibling row's
+  //    service is not reachable through the parent walk), which is exactly how
+  //    every rebind pass died with `cannot get property "sessionPersistence"
+  //    without inject` while the failure was swallowed by a sink-less logger.
+  //  - Resolving per pass (never cached) means a store that appears later is
+  //    picked up without re-activating this plugin, and a torn view is never
+  //    held across passes. `strict: false` accepts a registered provider whose
+  //    fiber is still initializing — its own `list()` awaits its readiness —
+  //    instead of reporting the composition as missing a row it has.
   const sessionHeaders: SessionHeaderSource = {
-    list: async () => await ctx.sessionPersistence.list(),
+    list: async () => {
+      const persistence = ctx.get('sessionPersistence', false) as SessionHeaderSource | undefined
+      if (persistence === undefined) {
+        // Naming the service is the point: "no session source" and "no sessions
+        // to rebind" are otherwise indistinguishable, and the pass reports this
+        // once per uninterrupted occurrence rather than on every tick.
+        throw new Error("the 'sessionPersistence' service is not provided by this composition")
+      }
+      return await persistence.list()
+    },
   }
   const reconciler = new WorkspaceReconciler({
     controller: runtime.podController,

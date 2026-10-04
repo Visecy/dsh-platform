@@ -174,16 +174,16 @@ class MemoryDomain {
   }
 }
 
-/**
- * Boot a real official `WorkspaceRegistry` over an in-memory medium.
- *
- * `[Service.init]()` is awaited explicitly — that call IS the registry's
- * lifecycle (open the domain, run the one-shot `replaceHeaderIndex`, history
- * bootstrap, live-session index, entity rebuild). cordis would invoke it from
- * `ctx.plugin`; calling it directly keeps the fixture free of fiber scheduling
- * without skipping a single official line.
- */
-export async function startRegistry(options: HarnessOptions = {}): Promise<Harness> {
+/** The medium + seams every harness composition starts from, before it is mounted. */
+interface Composition {
+  durable: DurableState
+  writes: string[]
+  warnings: string[]
+  sessions: Harness['sessions']
+}
+
+/** Seed the durable medium and the session seam, shared by both composition shapes. */
+function prepare(options: HarnessOptions): Composition {
   const durable: DurableState = { records: new Map(), global: options.global }
   const writes: string[] = []
   const warnings: string[] = []
@@ -200,21 +200,44 @@ export async function startRegistry(options: HarnessOptions = {}): Promise<Harne
     })
   }
 
-  const ctx = new Context()
-  // Keep the official registry's own diagnostics visible to the test: the
-  // "filtered session" warning it emits at init is part of the bug's evidence.
+  return {
+    durable,
+    writes,
+    warnings,
+    sessions: {
+      list: async (): Promise<readonly { readonly header: StoredHeader }[]> =>
+        storedSessions.map((header) => ({ header })),
+    },
+  }
+}
+
+/** Keep the official registry's own diagnostics visible to the test. */
+function recordWarnings(ctx: Context, warnings: string[]): void {
+  // The "filtered session" warning the registry emits at init is part of the
+  // bug's evidence; it must not be swallowed by the fixture.
   ctx.logger.warn = ((message: unknown, ...rest: unknown[]) => {
     warnings.push(String(message))
     return undefined
   }) as never
+}
+
+/**
+ * Boot a real official `WorkspaceRegistry` over an in-memory medium.
+ *
+ * `[Service.init]()` is awaited explicitly — that call IS the registry's
+ * lifecycle (open the domain, run the one-shot `replaceHeaderIndex`, history
+ * bootstrap, live-session index, entity rebuild). cordis would invoke it from
+ * `ctx.plugin`; calling it directly keeps the fixture free of fiber scheduling
+ * without skipping a single official line.
+ */
+export async function startRegistry(options: HarnessOptions = {}): Promise<Harness> {
+  const { durable, writes, warnings, sessions } = prepare(options)
+  const ctx = new Context()
+  recordWarnings(ctx, warnings)
 
   const domain = new MemoryDomain(ctx, durable, writes)
   // The two seams `WorkspaceRegistry.inject` declares. The registry reads them
   // through `this.ctx`, so a plain provision is exactly what it sees.
-  const sessions = {
-    list: async (): Promise<readonly { readonly header: StoredHeader }[]> =>
-      storedSessions.map((header) => ({ header })),
-  }
   ctx.provide('storageDomain' as never, { open: async () => domain } as never)
   ctx.provide('sessionPersistence' as never, sessions as never)
 
@@ -222,6 +245,43 @@ export async function startRegistry(options: HarnessOptions = {}): Promise<Harne
     [Service.init]?: () => Promise<void>
   }
   await registry[Service.init]?.()
+
+  return { ctx, registry, durable, writes, warnings, sessions }
+}
+
+/**
+ * Boot the same real official `WorkspaceRegistry`, but as a PLUGIN ROW — the
+ * shape the profile loader actually mounts.
+ *
+ * The difference is not cosmetic. `startRegistry` provisions both seams on the
+ * ROOT context, so cordis's service proxy resolves them from any child by
+ * walking up to the root fiber. A profile mounts every seam as its own row, so
+ * `sessionPersistence` lives on a SIBLING fiber, and a plugin that reads
+ * `ctx.sessionPersistence` without declaring it in `inject` gets
+ * `cannot get property "sessionPersistence" without inject` — the defect that
+ * silently disabled the session<->workspace rebind for its whole life. Tests
+ * about a plugin's own wiring must therefore mount the plugin here, not on
+ * `startRegistry`.
+ */
+export async function startPluginComposition(options: HarnessOptions = {}): Promise<Harness> {
+  const { durable, writes, warnings, sessions } = prepare(options)
+  const ctx = new Context()
+  recordWarnings(ctx, warnings)
+
+  const domain = new MemoryDomain(ctx, durable, writes)
+  await ctx.plugin({
+    name: 'harness-storage-domain',
+    apply: (row: Context) => { row.provide('storageDomain' as never, { open: async () => domain } as never) },
+  })
+  await ctx.plugin({
+    name: 'harness-session-persistence',
+    apply: (row: Context) => { row.provide('sessionPersistence' as never, sessions as never) },
+  })
+  // The official registry is a plugin like any other: its `static inject` is
+  // what makes cordis hold it back until both seams above are active.
+  await ctx.plugin(WorkspaceRegistry as never)
+  const registry = ctx.get('workspaceRegistry') as unknown as WorkspaceRegistry
+  assert(registry !== undefined, 'harness: the official registry did not activate')
 
   return { ctx, registry, durable, writes, warnings, sessions }
 }
