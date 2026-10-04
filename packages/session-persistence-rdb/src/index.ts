@@ -67,7 +67,6 @@
 
 import { Context } from "@deepseek-ai/cordis";
 import z from "@deepseek-ai/schemastery";
-import type { SettingsProvider } from "@deepseek-ai/dsh-settings";
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { drizzle as drizzlePg } from "drizzle-orm/node-postgres";
@@ -162,12 +161,14 @@ export type Config =
  * `ctx.sessionPersistence` and installs the live write-path routing. Callers
  * address one stored session through the handle `create`/`open` return.
  *
- * Configuration resolution: `$DSH_HOME/settings.yaml` 的
- * `session-persistence-rdb` namespace（settings 服务）覆盖 cordis 层 entry
- * config，见 {@link SessionPersistenceRdb.settingsNs}。
+ * Configuration comes from this plugin's own Loader entry (the profile row),
+ * exactly like the official 0.2 backends: 0.2's `ctx.settings` is the
+ * `SettingsForms` editor over loader-entry config and no longer exposes a
+ * `SettingsProvider.register` seam, so there is nothing for the plugin to read
+ * itself. An operator changes the row's config and restarts.
  */
 export class SessionPersistenceRdb extends SessionPersistence implements RdbHandleStorage {
-  static inject = ["sessions", "settings"];
+  static inject = ["sessions"];
 
   static Config: z<Config> = z.union([
     z.object({
@@ -181,13 +182,6 @@ export class SessionPersistenceRdb extends SessionPersistence implements RdbHand
       connectionString: z.string().required(),
     }),
   ]);
-
-  /**
-   * settings namespace：`$DSH_HOME/settings.yaml` 的 `session-persistence-rdb`
-   * section。0.1.2 的 dsh-settings 移除了 `settingsNamespace()` 帮助函数 —
-   * 字面量本身即合法 namespace（小写连字符标识符）。
-   */
-  static readonly settingsNs = "session-persistence-rdb" as const;
 
   /**
    * Backend label for teardown diagnostics and live-routing warnings.
@@ -218,34 +212,11 @@ export class SessionPersistenceRdb extends SessionPersistence implements RdbHand
      */
     injectedBackend?: Backend,
   ) {
-    // settings.yaml 的 `session-persistence-rdb` namespace 覆盖 cordis 层 entry
-    // config（base）。settings 服务已注册时（dsh 环境；服务注册完成即初始
-    // publish 完成，见 SettingsProvider[Service.init]）同步 register 读取；settings
-    // 服务缺失时（纯 cordis 装配/测试）退化为 entry config。经 ctx.reflect
-    // 查询避免未 inject 的 ctx 服务访问守卫。
-    let resolved: Config = config;
-    const settings = ctx.reflect.get("settings") as unknown as SettingsProvider | undefined;
-    if (settings !== undefined) {
-      const scope = settings.register(
-        SessionPersistenceRdb.settingsNs,
-        SessionPersistenceRdb.Config,
-        { base: config },
-      );
-      resolved = scope.get();
-      scope.watch(() => {
-        // 后端在构造时建成（数据库连接 + 写路径监听），settings 变更后需重启
-        // dsh 生效；热重建会与已打开的 handle 冲突。
-        ctx.logger.warn(
-          "session-persistence-rdb: settings changed; restart to apply the new configuration",
-        );
-      });
-    }
     super(ctx);
     // Open asynchronously so connection setup (file creation / DB connect +
     // schema check) does not block plugin apply; every storage operation awaits
     // the same readiness promise.
-    this.config = resolved;
-    this.backend = injectedBackend ?? createBackend(resolved);
+    this.backend = injectedBackend ?? createBackend(config);
     this.ready = this.init();
     // Live routing + teardown are effects of this fiber: closing every open
     // handle (close drains the routed buffer) and then the database connection.

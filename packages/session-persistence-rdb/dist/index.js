@@ -1,4 +1,4 @@
-// src/index.ts
+// packages/session-persistence-rdb/src/index.ts
 import z from "@deepseek-ai/schemastery";
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { Pool } from "pg";
@@ -16,7 +16,7 @@ import {
   SessionLogOffset as SessionLogOffset2
 } from "@deepseek-ai/dsh-session";
 
-// src/write-guard.ts
+// packages/session-persistence-rdb/src/write-guard.ts
 import { SessionOwnershipLostError } from "@deepseek-ai/dsh-session-persistence";
 var WriterDivergenceError = class extends SessionOwnershipLostError {
   /** @param id - the session whose durable head diverged. */
@@ -72,7 +72,7 @@ var WriteGuard = class {
   }
 };
 
-// src/catalog.ts
+// packages/session-persistence-rdb/src/catalog.ts
 import { SESSION_FORMAT_VERSION } from "@deepseek-ai/dsh-session";
 import {
   createSessionFormatCatalogWithChildren,
@@ -125,7 +125,7 @@ function childCatalogFact(source) {
   }
 }
 
-// src/migrate.ts
+// packages/session-persistence-rdb/src/migrate.ts
 import {
   sessionFormatCatalog as sessionFormatCatalog2,
   SessionFormatUnsupportedMigrationError
@@ -139,7 +139,7 @@ import {
   validateStoredEvents
 } from "@deepseek-ai/dsh-session-persistence";
 
-// src/adapters/to-sqlite.ts
+// packages/session-persistence-rdb/src/adapters/to-sqlite.ts
 import { sql } from "drizzle-orm";
 import {
   check as sqliteCheck,
@@ -150,12 +150,12 @@ import {
   unique
 } from "drizzle-orm/sqlite-core";
 
-// src/entities/types.ts
+// packages/session-persistence-rdb/src/entities/types.ts
 function toProperty(name) {
   return name.replace(/_([a-z])/g, (_match, char) => char.toUpperCase());
 }
 
-// src/adapters/to-sqlite.ts
+// packages/session-persistence-rdb/src/adapters/to-sqlite.ts
 function buildColumn(c, tables) {
   let col;
   switch (c.type) {
@@ -211,7 +211,7 @@ function toSqliteSchema(defs) {
   return tables;
 }
 
-// src/adapters/to-postgres.ts
+// packages/session-persistence-rdb/src/adapters/to-postgres.ts
 import { sql as sql2 } from "drizzle-orm";
 import {
   bigint,
@@ -282,7 +282,7 @@ function toPostgresSchema(defs) {
   return tables;
 }
 
-// src/adapters/ddl.ts
+// packages/session-persistence-rdb/src/adapters/ddl.ts
 function sqlType(dialect, type) {
   switch (type) {
     case "serial":
@@ -339,7 +339,7 @@ function createTablesSql(dialect, defs) {
   return statements;
 }
 
-// src/entities/persistence-state.ts
+// packages/session-persistence-rdb/src/entities/persistence-state.ts
 var persistenceState = {
   name: "t_persistence_state",
   columns: [
@@ -349,7 +349,7 @@ var persistenceState = {
   checks: [{ name: "ck_persistence_state_singleton", expression: "f_singleton = 1" }]
 };
 
-// src/entities/schema-meta.ts
+// packages/session-persistence-rdb/src/entities/schema-meta.ts
 var schemaMeta = {
   name: "t_schema_meta",
   columns: [
@@ -358,7 +358,7 @@ var schemaMeta = {
   ]
 };
 
-// src/entities/sessions.ts
+// packages/session-persistence-rdb/src/entities/sessions.ts
 var sessions = {
   name: "t_sessions",
   columns: [
@@ -387,7 +387,7 @@ var sessions = {
   // existing v1 database gains it without a SCHEMA_VERSION bump.
 };
 
-// src/entities/events.ts
+// packages/session-persistence-rdb/src/entities/events.ts
 var events = {
   name: "t_events",
   columns: [
@@ -411,7 +411,7 @@ var events = {
   // 的查询——不再为不可达查询维护索引（写放大）。
 };
 
-// src/entities/session-events.ts
+// packages/session-persistence-rdb/src/entities/session-events.ts
 var sessionEvents = {
   name: "t_session_events",
   columns: [
@@ -437,7 +437,7 @@ var sessionEvents = {
   // 已覆盖本表的全部访问模式（按 session 过滤 + 按 seq 范围/排序/取尾）。
 };
 
-// src/entities/index.ts
+// packages/session-persistence-rdb/src/entities/index.ts
 var sqliteTableDefs = [persistenceState, sessions, events, sessionEvents];
 var postgresTableDefs = [
   persistenceState,
@@ -447,7 +447,7 @@ var postgresTableDefs = [
   sessionEvents
 ];
 
-// src/schema.ts
+// packages/session-persistence-rdb/src/schema.ts
 var SCHEMA_VERSION = 1;
 var SESSION_PERSISTENCE_SQLITE_APPLICATION_ID = 1146308688;
 var EVENT_ENCODING = "json";
@@ -487,7 +487,7 @@ function eventDimensions(event) {
   }
 }
 
-// src/log.ts
+// packages/session-persistence-rdb/src/log.ts
 function replaceRange(op) {
   const start = op.start ?? op.startSeq;
   const end = op.end ?? op.endSeq;
@@ -652,7 +652,7 @@ function scanRows(rows, base = 0) {
   return preserved.length < rows.length ? { preserved, tornFrom: base + preserved.length } : { preserved };
 }
 
-// src/migrate.ts
+// packages/session-persistence-rdb/src/migrate.ts
 if (sessionFormatCatalog2.currentVersion !== SESSION_FORMAT_VERSION2) {
   throw new Error(
     `session-persistence-rdb: format catalog v${sessionFormatCatalog2.currentVersion} does not match Session v${SESSION_FORMAT_VERSION2}`
@@ -798,7 +798,7 @@ function decodeArtifact(catalog, row, rows, location, policy) {
   return { artifact, ...tornFrom !== void 0 ? { tornFrom } : {}, legacy };
 }
 
-// src/handle.ts
+// packages/session-persistence-rdb/src/handle.ts
 import {
   SessionHandleClosedError,
   SessionPersistenceNotFoundError,
@@ -1023,7 +1023,7 @@ var RdbSessionHandle = class {
   }
 };
 
-// src/tracker.ts
+// packages/session-persistence-rdb/src/tracker.ts
 import {
   SessionAlreadyExistsError,
   SessionAlreadyOwnedError,
@@ -1208,7 +1208,7 @@ var RdbTracker = class {
   }
 };
 
-// src/sqlite.ts
+// packages/session-persistence-rdb/src/sqlite.ts
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { mkdir, open } from "node:fs/promises";
@@ -1431,7 +1431,7 @@ var SqliteBackend = class {
   }
 };
 
-// src/postgres.ts
+// packages/session-persistence-rdb/src/postgres.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { and as and2, desc as desc2, eq as eq2, gte as gte2, sql as sql4 } from "drizzle-orm";
 var pgTables = toPostgresSchema(postgresTableDefs);
@@ -1582,28 +1582,12 @@ var PostgresBackend = class {
   }
 };
 
-// src/index.ts
-var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersistence {
+// packages/session-persistence-rdb/src/index.ts
+var SessionPersistenceRdb = class extends SessionPersistence {
   constructor(ctx, config, injectedBackend) {
-    let resolved = config;
-    const settings = ctx.reflect.get("settings");
-    if (settings !== void 0) {
-      const scope = settings.register(
-        _SessionPersistenceRdb.settingsNs,
-        _SessionPersistenceRdb.Config,
-        { base: config }
-      );
-      resolved = scope.get();
-      scope.watch(() => {
-        ctx.logger.warn(
-          "session-persistence-rdb: settings changed; restart to apply the new configuration"
-        );
-      });
-    }
     super(ctx);
     this.config = config;
-    this.config = resolved;
-    this.backend = injectedBackend ?? createBackend(resolved);
+    this.backend = injectedBackend ?? createBackend(config);
     this.ready = this.init();
     this.tracker.install(ctx, async () => {
       await this.ready;
@@ -1611,7 +1595,7 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
     });
   }
   config;
-  static inject = ["sessions", "settings"];
+  static inject = ["sessions"];
   static Config = z.union([
     z.object({
       type: z.const("sqlite"),
@@ -1624,12 +1608,6 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
       connectionString: z.string().required()
     })
   ]);
-  /**
-   * settings namespace：`$DSH_HOME/settings.yaml` 的 `session-persistence-rdb`
-   * section。0.1.2 的 dsh-settings 移除了 `settingsNamespace()` 帮助函数 —
-   * 字面量本身即合法 namespace（小写连字符标识符）。
-   */
-  static settingsNs = "session-persistence-rdb";
   /**
    * Backend label for teardown diagnostics and live-routing warnings.
    * Intentionally shadows cordis `Service.name` (set to `'sessionPersistence'`

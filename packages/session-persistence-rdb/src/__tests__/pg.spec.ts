@@ -21,7 +21,6 @@ import { describe } from "vitest";
 import { Client } from "pg";
 import { Context } from "@deepseek-ai/cordis";
 import { SessionStore } from "@deepseek-ai/dsh-session";
-import { EmptySettings } from "./testing/helpers.ts";
 import SessionPersistenceRdb from "../index.ts";
 import { runPersistenceContract } from "./testing/contract.ts";
 
@@ -55,7 +54,6 @@ describe.skipIf(!process.env.TEST_PG_URL)("PostgreSQL backend", () => {
   runPersistenceContract("postgres", async () => {
     const { connectionString, drop } = await createTestDatabase();
     const ctx = new Context();
-    await ctx.plugin(EmptySettings);
     await ctx.plugin(SessionStore);
     const fiber = await ctx.plugin(SessionPersistenceRdb, {
       type: "postgres",

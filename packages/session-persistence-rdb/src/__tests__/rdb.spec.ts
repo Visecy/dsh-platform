@@ -51,7 +51,6 @@ import { openDatabase } from "../sqlite.ts";
 import { runPersistenceContract, meta } from "./testing/contract.ts";
 import { runAgentLoopContract, type AgentLoopFixture } from "./testing/agent-loop.ts";
 import { createSqliteRawStore } from "./testing/sqlite-raw.ts";
-import { EmptySettings } from "./testing/helpers.ts";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -73,7 +72,6 @@ async function backend(
   path = ":memory:",
 ): Promise<{ ctx: Context; dispose: () => Promise<void> }> {
   const ctx = new Context();
-  await ctx.plugin(EmptySettings);
   await ctx.plugin(SessionStore);
   const fiber = await ctx.plugin(SessionPersistenceRdb, { type: "sqlite", path });
   return { ctx, dispose: () => fiber.dispose() };
@@ -83,7 +81,6 @@ async function backend(
 
 runPersistenceContract("sqlite", async () => {
   const ctx = new Context();
-  await ctx.plugin(EmptySettings);
   await ctx.plugin(SessionStore);
   const fiber = await ctx.plugin(SessionPersistenceRdb, { type: "sqlite", path: ":memory:" });
   return {
@@ -106,7 +103,6 @@ runAgentLoopContract("sqlite", async (): Promise<AgentLoopFixture> => {
   return {
     context: async () => {
       const ctx = new Context();
-      await ctx.plugin(EmptySettings);
       await ctx.plugin(SessionStore);
       return ctx;
     },
@@ -156,6 +152,34 @@ function oneTurn(): SessionEvent[] {
     },
   ];
 }
+
+describe("SessionPersistenceRdb: loader-entry configuration", () => {
+  /**
+   * The 0.2 settings service is `SettingsForms`: a form editor over
+   * loader-entry config. It has no `register`, so a backend must not reach for
+   * one — this stand-in is the exact shape whose presence used to kill the
+   * constructor with `settings.register is not a function` and take seven
+   * suites down with it.
+   */
+  it("activates beside 0.2's SettingsForms service, taking its config from its own entry", async () => {
+    let configured = 0;
+    const settingsForms = { configure: () => void configured++ };
+    const ctx = new Context();
+    ctx.provide("settings", settingsForms);
+    await ctx.plugin(SessionStore);
+    await ctx.plugin(SessionPersistenceRdb, { type: "sqlite", path: ":memory:" });
+    const persistence = ctx.sessionPersistence as SessionPersistenceRdb;
+    expect(persistence).toBeInstanceOf(SessionPersistenceRdb);
+    // The entry config (with the schema defaults) is the whole configuration.
+    expect(persistence.config).toEqual({
+      type: "sqlite",
+      path: ":memory:",
+      journalMode: "wal",
+      busyTimeout: DEFAULT_BUSY_TIMEOUT_MS,
+    });
+    expect(configured).toBe(0);
+  });
+});
 
 describe("scanRows", () => {
   it("preserves the full log when it ends exactly on a turn/end (no torn tail)", () => {
@@ -687,7 +711,6 @@ describe("SessionPersistenceSqlite: database schema and lifecycle", () => {
   it("busyTimeout config wires from the plugin into the database connection", async () => {
     const path = await freshDbPath();
     const ctx = new Context();
-    await ctx.plugin(EmptySettings);
     await ctx.plugin(SessionStore);
     const fiber = await ctx.plugin(SessionPersistenceRdb, {
       type: "sqlite",
@@ -729,7 +752,6 @@ describe("SessionPersistenceSqlite: database schema and lifecycle", () => {
     if (process.platform === "win32") return;
     const path = await freshDbPath();
     const ctx = new Context();
-    await ctx.plugin(EmptySettings);
     await ctx.plugin(SessionStore);
     const fiber = await ctx.plugin(SessionPersistenceRdb, {
       type: "sqlite",
@@ -752,7 +774,6 @@ describe("SessionPersistenceSqlite: database schema and lifecycle", () => {
     await chmod(path, 0o644);
 
     const ctx = new Context();
-    await ctx.plugin(EmptySettings);
     await ctx.plugin(SessionStore);
     const fiber = await ctx.plugin(SessionPersistenceRdb, {
       type: "sqlite",
@@ -780,7 +801,6 @@ describe("SessionPersistenceSqlite: database schema and lifecycle", () => {
 
     const deletePath = await freshDbPath();
     const ctx = new Context();
-    await ctx.plugin(EmptySettings);
     await ctx.plugin(SessionStore);
     const fiber = await ctx.plugin(SessionPersistenceRdb, {
       type: "sqlite",
@@ -888,7 +908,6 @@ describe("SessionPersistenceSqlite: database schema and lifecycle", () => {
   it("HMR: reloading the backend leaves a still-live session's log readable and continuable", async () => {
     const path = await freshDbPath();
     const ctx = new Context();
-    await ctx.plugin(EmptySettings);
     await ctx.plugin(SessionStore);
     const first = await ctx.plugin(SessionPersistenceRdb, { type: "sqlite", path });
     const session = ctx.sessions.create(SessionId("hmr-reload"));

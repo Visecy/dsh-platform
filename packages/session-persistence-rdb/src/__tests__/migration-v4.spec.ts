@@ -41,7 +41,6 @@ import type { SessionHeader } from "@deepseek-ai/dsh-session";
 import { SessionFormatUnsupportedError } from "@deepseek-ai/dsh-session-persistence";
 import SessionPersistenceRdb from "../index.ts";
 import { oneTurnLog } from "./testing/contract.ts";
-import { EmptySettings } from "./testing/helpers.ts";
 import type { AgentLoopRawStore, StoredRowSpec } from "./testing/agent-loop.ts";
 import { createSqliteRawStore } from "./testing/sqlite-raw.ts";
 
@@ -64,7 +63,6 @@ async function freshStore(): Promise<{ path: string; raw: AgentLoopRawStore }> {
 /** Mount the backend over one database path. */
 async function mount(path: string): Promise<{ ctx: Context; dispose: () => Promise<void> }> {
   const ctx = new Context();
-  await ctx.plugin(EmptySettings);
   await ctx.plugin(SessionStore);
   const fiber = await ctx.plugin(SessionPersistenceRdb, { type: "sqlite", path });
   return { ctx, dispose: () => fiber.dispose() };

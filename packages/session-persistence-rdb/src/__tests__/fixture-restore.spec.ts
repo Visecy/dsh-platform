@@ -33,7 +33,6 @@ import {
 import type { SessionEvent } from "@deepseek-ai/dsh-session";
 import SessionPersistenceRdb from "../index.ts";
 import { oneTurnLog } from "./testing/contract.ts";
-import { EmptySettings } from "./testing/helpers.ts";
 
 /** The committed golden database, as portable SQL. */
 const FIXTURE = new URL("../../tests/fixtures/v3-golden.sql", import.meta.url);
@@ -65,7 +64,6 @@ async function mount(
   path: string,
 ): Promise<{ ctx: Context; dispose: () => Promise<void> }> {
   const ctx = new Context();
-  await ctx.plugin(EmptySettings);
   await ctx.plugin(SessionStore);
   const fiber = await ctx.plugin(SessionPersistenceRdb, { type: "sqlite", path });
   return { ctx, dispose: () => fiber.dispose() };

@@ -22,7 +22,6 @@ import {
   type SessionPersistence,
 } from "@deepseek-ai/dsh-session-persistence";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
-import { EmptySettings } from "./testing/helpers.ts";
 import SessionPersistenceRdb from "../index.ts";
 
 const dirs: string[] = [];
@@ -38,7 +37,6 @@ async function freshDbPath(): Promise<string> {
 
 async function mount(path: string): Promise<{ ctx: Context; dispose: () => Promise<void> }> {
   const ctx = new Context();
-  await ctx.plugin(EmptySettings);
   await ctx.plugin(SessionStore);
   const fiber = await ctx.plugin(SessionPersistenceRdb, { type: "sqlite", path });
   return { ctx, dispose: () => fiber.dispose() };

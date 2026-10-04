@@ -60,7 +60,6 @@ import SessionPersistenceRdb from "../index.ts";
 // makes Vite 5's SSR transform rewrite `import.meta` twice and fail
 // ("Cannot split a chunk that has already been edited").
 import { meta as sessionMeta, oneTurnLog } from "./testing/contract.ts";
-import { EmptySettings } from "./testing/helpers.ts";
 
 /** The fixture this generator owns (package-root `tests/fixtures/`). */
 const FIXTURE_PATH = new URL("../../tests/fixtures/v3-golden.sql", import.meta.url);
@@ -306,7 +305,6 @@ describe.skipIf(process.env.DSH_CAPTURE_FIXTURE !== "1")("capture the golden v3 
       const dir = await mkdtemp(join(tmpdir(), "dsh-rdb-v3-capture-"));
       const dbPath = join(dir, "sessions.db");
       const ctx = new Context();
-      await ctx.plugin(EmptySettings);
       await ctx.plugin(SessionStore);
       const fiber = await ctx.plugin(SessionPersistenceRdb, { type: "sqlite", path: dbPath });
       try {
