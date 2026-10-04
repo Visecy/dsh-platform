@@ -153,4 +153,47 @@ describe('WorkspaceReconciler rebind against the real official registry', () => 
 
     expect(harness.writes.length).toBe(afterFirst)
   })
+
+  it('repairs every session of the live deployment in one pass', async () => {
+    // The acceptance shape, read off the deployed database: seven sessions
+    // whose cwd is `/workspaces/<name>` and six bridge-created records with
+    // `sessionIds: []`. Three sessions share `test-pod`, four share
+    // `test-upgrade`, and the ids and timestamps are the live ones.
+    const root = realpathSync(tempRoot())
+    const names = ['test-pod', 'test-final', 'test-db', 'test-upgrade', 'git', 'f49f56f4-803a-43aa-bd95-a955ef9ecd91']
+    const sessions = [
+      { id: 'session-5fecf1e8-d7a3-4400-86c5-adecad81aa5a', name: 'test-pod', createdAt: 1787855234237 },
+      { id: 'session-d869bf5a-32c8-4415-a386-6055ee49d481', name: 'test-pod', createdAt: 1787503968396 },
+      { id: 'session-1ea4a6a4-bc3a-4e58-87cd-489eb41689e1', name: 'test-pod', createdAt: 1787504113120 },
+      { id: 'session-e01ccdd0-5dd9-4bb7-b1d3-603b1d5366ff', name: 'test-pod', createdAt: 1791126833347 },
+      { id: 'session-1809876e-8c7b-452d-a27b-533a95f47829', name: 'test-upgrade', createdAt: 1791126451295 },
+      { id: 'session-cb74a018-07f0-4abd-a9bb-a3aeca445ada', name: 'test-upgrade', createdAt: 1787594788375 },
+      { id: 'session-b785b590-af1f-4162-ac54-53ac83a0b3ac', name: 'test-upgrade', createdAt: 1787761187934 },
+    ]
+    const harness = await startRegistry({
+      records: names.map((name) => ({ path: join(root, name), title: name, sessionIds: [] })),
+      storedSessions: sessions.map((session) => ({
+        id: session.id,
+        cwd: join(root, session.name),
+        createdAt: session.createdAt,
+      })),
+    })
+    const { reconciler } = reconcilerFor(
+      harness,
+      root,
+      names,
+      names.map((name) => `${name}-data`),
+    )
+
+    await reconciler.reconcile()
+
+    for (const name of names) {
+      const expected = sessions
+        .filter((session) => session.name === name)
+        .sort((left, right) => right.createdAt - left.createdAt)
+        .map((session) => session.id)
+      expect(attached(harness, join(root, name)), name).toEqual(expected)
+      expect(durable(harness, join(root, name)), name).toEqual(expected)
+    }
+  })
 })
