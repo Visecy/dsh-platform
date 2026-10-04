@@ -22,11 +22,22 @@ const liveChannel = (registry: unknown) => ({
 
 /**
  * The official record's session membership as `@deepseek-ai/dsh-workspace`
- * actually behaves (`lib/index.js`): reads are filtered by a canonical-cwd
- * index the registry builds once at init, `attachSession` refreshes that index
- * for the named session BEFORE it short-circuits on an id the record already
- * claims, membership is written through a prune-by-index mutate, and
- * `attachSession` prepends.
+ * 0.1.5-rc.3 actually behaves (`lib/index.js`):
+ *
+ * - reads are filtered by a canonical-cwd index the registry builds once at
+ *   init, so an unindexed id reads as unowned even while the record claims it;
+ * - `attachSession` short-circuits on the DURABLE membership FIRST
+ *   (`if (!this.record.sessionIds.includes(sessionId))`), and only its
+ *   not-already-claimed branch reads the header, validates the cwd and calls
+ *   `rememberSessionPath`;
+ * - every write goes through a mutate tail that re-filters the durable
+ *   membership by that same index.
+ *
+ * The real semantics are pinned by `official-registry-rebind.spec.ts`, which
+ * runs the shipped registry; this fake exists so the bridge's own unit tests do
+ * not have to build a filesystem and a storage backend. It has to model the
+ * short-circuit exactly, because that ordering is why the bridge must never
+ * detach an id the index hides.
  */
 class FakeOfficialEntity {
   /** Durable membership (what the record claims). */
@@ -43,11 +54,11 @@ class FakeOfficialEntity {
   }
   async attachSession(id: string): Promise<void> {
     this.calls.push(`attach:${id}`)
-    // Official order: rememberSessionPath() runs BEFORE the already-included
-    // short-circuit, so an attach always refreshes the index. The detach is
-    // still required — without it the record's *durable* membership is
-    // rewritten by the mutate and the not-included branch never runs.
-    this.indexed.add(id)
+    // Official order: the durable-membership short-circuit comes FIRST, so an id
+    // the record already claims never refreshes the index, and the mutate tail
+    // then prunes it. Only a not-already-claimed id reaches the header read and
+    // `rememberSessionPath`.
+    if (!this.ids.includes(id)) this.indexed.add(id)
     if (!this.ids.includes(id)) this.ids = [id, ...this.ids]
     this.pruneDurably()
   }
@@ -68,20 +79,37 @@ class FakeOfficialEntity {
 }
 
 describe('HostWorkspaceRegistry.rebind (session<->workspace repair)', () => {
-  it('repairs membership the record claims but the cwd index hides', async () => {
-    // Exactly the broken-deployment state: the record still claims the
-    // session, but the registry's index lost it (its cwd did not resolve at
-    // registry-init time), so the filtered getter hides it and the record's
-    // next write would prune the association durably.
+  it('recovers a membership the index hides, at the cost of one pruning pass', async () => {
+    // A record can still durably claim a session the index hides. The official
+    // `attachSession` cannot refresh the index for it (the durable-membership
+    // short-circuit runs first), and its mutate tail prunes the id: the first
+    // pass therefore LOSES the durable claim. That is not the end of the story,
+    // because the association's source of truth (the session header's cwd) is
+    // untouched, so the pass after the prune attaches it for real.
     const entity = new FakeOfficialEntity(['sess-1'], [])
     const reg = new HostWorkspaceRegistry(liveChannel({ resolveByPath: async () => entity }), '/workspaces')
 
     expect(entity.sessionIds).toEqual([])
+    await reg.rebind('/workspaces/ws-a', [{ id: 'sess-1', path: '/workspaces/ws-a', createdAt: 1 }])
+    expect(entity.ids).toEqual([])
+
     const attached = await reg.rebind('/workspaces/ws-a', [{ id: 'sess-1', path: '/workspaces/ws-a', createdAt: 1 }])
 
-    // The attach refreshes the index (official order: rememberSessionPath()
-    // before the already-included short-circuit), so the membership is visible
-    // again and no longer prunable.
+    expect(entity.calls).toEqual(['attach:sess-1', 'attach:sess-1'])
+    expect(entity.sessionIds).toEqual(['sess-1'])
+    expect(attached).toEqual(['sess-1'])
+  })
+
+  it('repairs an empty record the registry never indexed, which is the production shape', async () => {
+    // The live deployment's six records carry `"sessionIds": []`: the bridge
+    // created them after the registry's one-shot index had already given up on
+    // their cwd. The attach then takes its not-already-claimed branch, which
+    // reads the header, validates the now-existing cwd and refreshes the index.
+    const entity = new FakeOfficialEntity([], [])
+    const reg = new HostWorkspaceRegistry(liveChannel({ resolveByPath: async () => entity }), '/workspaces')
+
+    const attached = await reg.rebind('/workspaces/ws-a', [{ id: 'sess-1', path: '/workspaces/ws-a', createdAt: 1 }])
+
     expect(entity.calls).toEqual(['attach:sess-1'])
     expect(entity.ids).toEqual(['sess-1'])
     expect(entity.sessionIds).toEqual(['sess-1'])
