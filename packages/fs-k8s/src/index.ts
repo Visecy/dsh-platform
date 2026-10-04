@@ -36,6 +36,19 @@ export interface Config {
   podRoot?: string
   /** Per-call endpoint resolution by workspace id (ensure + getEndpoint). */
   resolveEndpoint?: (workspaceId: string) => Promise<string> | string
+  /**
+   * Poll interval (ms) for `watch`. Watching is implemented as a cheap
+   * `files/info` poll (type/size/mtime), not as an inotify subscription: the
+   * bytes live in a per-workspace pod, so the control plane has nothing local
+   * to subscribe to. Default 1000.
+   */
+  watchIntervalMs?: number
+  /**
+   * Ceiling (ms) the watch interval backs off to while polls keep failing.
+   * Default 30000. A watcher that is polling a dead daemon must get quieter,
+   * not busier.
+   */
+  watchMaxIntervalMs?: number
 }
 
 const BINARY_SAMPLE = 8192
@@ -54,12 +67,16 @@ export class FsK8s extends FileSystem {
   private client: DaemonFilesClient
   private translate: PathTranslator
   private resolver: ((workspaceId: string) => Promise<string> | string) | undefined
+  private watchIntervalMs: number
+  private watchMaxIntervalMs: number
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
     this.client = new DaemonFilesClient(config.daemonEndpoint)
     this.translate = new PathTranslator(config.hostRoot, config.podRoot ?? '/workspaces')
     this.resolver = config.resolveEndpoint
+    this.watchIntervalMs = Math.max(1, Math.trunc(config.watchIntervalMs ?? 1000))
+    this.watchMaxIntervalMs = Math.max(this.watchIntervalMs, Math.trunc(config.watchMaxIntervalMs ?? 30_000))
   }
 
   /** Attach the per-workspace resolver (from workspace-k8s wiring). */
@@ -90,25 +107,29 @@ export class FsK8s extends FileSystem {
     return resolver(ws)
   }
 
-  private mapError(e: unknown): never {
-    if (e instanceof FsError) throw e
+  private asFsError(e: unknown): FsError {
+    if (e instanceof FsError) return e
     if (e instanceof DaemonError) {
       switch (e.code) {
         case 'NOT_FOUND':
-          throw new FsError(e.message, 'FS_NOT_FOUND')
+          return new FsError(e.message, 'FS_NOT_FOUND')
         case 'VERSION_CONFLICT':
-          throw new FsError(e.message, 'FS_STALE_VERSION')
+          return new FsError(e.message, 'FS_STALE_VERSION')
         case 'OUT_OF_ROOT':
-          throw new FsError(e.message, 'FS_PERMISSION_DENIED')
+          return new FsError(e.message, 'FS_PERMISSION_DENIED')
         case 'NOT_DIRECTORY':
-          throw new FsError(e.message, 'FS_NOT_DIRECTORY')
+          return new FsError(e.message, 'FS_NOT_DIRECTORY')
         case 'NOT_REGULAR_FILE':
-          throw new FsError(e.message, 'FS_NOT_REGULAR_FILE')
+          return new FsError(e.message, 'FS_NOT_REGULAR_FILE')
         default:
-          throw new FsError(e.message, 'FS_IO_ERROR')
+          return new FsError(e.message, 'FS_IO_ERROR')
       }
     }
-    throw new FsError((e as Error).message, 'FS_IO_ERROR')
+    return new FsError((e as Error).message, 'FS_IO_ERROR')
+  }
+
+  private mapError(e: unknown): never {
+    throw this.asFsError(e)
   }
 
   override async resolve(path: string, opts?: { cwd?: string }): Promise<FsTarget> {
@@ -259,6 +280,118 @@ export class FsK8s extends FileSystem {
     } catch (e) {
       this.mapError(e)
     }
+  }
+
+  /**
+   * The observed signature of one target: everything a poll can compare
+   * cheaply. The daemon reports a content hash for regular files, but hashing
+   * a large file on every tick is exactly the cost a poll must avoid, so the
+   * signature is type + size + mtime (a directory has no size, and its mtime
+   * moves when a direct entry is added, removed or renamed).
+   */
+  private async sample(podPath: string, endpoint: string): Promise<string | undefined> {
+    const info = await this.client.info(podPath, endpoint, { follow: true })
+    if (info === undefined) return undefined
+    return `${info.type}:${info.size ?? ''}:${info.modifiedTime ?? ''}`
+  }
+
+  /**
+   * DSH 0.2 member: observe one file, or a directory's direct entries, in the
+   * workspace pod.
+   *
+   * The provider has no local inode to watch — the bytes live in a per-pod PVC
+   * behind the daemon — so observation is a `files/info` poll of the daemon.
+   * The contract is the seam's, not the implementation's:
+   *
+   *   - the promise resolves only once observation is ACTIVE (the first sample
+   *     has been taken), and the returned close is asynchronous;
+   *   - an absent target is a legal thing to observe (creation is a change);
+   *   - `changed()` reports an observed-state move, `changed(error)` reports a
+   *     failed poll — it must never surface as an unhandled rejection;
+   *   - after `close()` resolves, no callback ever runs again and no timer is
+   *     left behind (the timer is unref'd so a watcher never holds the process
+   *     open either);
+   *   - a signal aborted before initialization rejects instead of resolving.
+   *
+   * Poll failures back off exponentially (base `watchIntervalMs`, ceiling
+   * `watchMaxIntervalMs`) and are reported on every failed poll, so the caller
+   * learns the watcher is blind rather than sitting on a dead subscription.
+   * Once a poll succeeds again the interval resets to the base.
+   */
+  override async watch(target: FsTarget, changed: (error?: Error) => void, signal: AbortSignal): Promise<() => Promise<void>> {
+    signal.throwIfAborted()
+    const podPath = this.podPathOf(target)
+    let endpoint: string
+    let last: string | undefined
+    try {
+      endpoint = await this.endpointFor(target)
+      last = await this.sample(podPath, endpoint)
+    } catch (e) {
+      this.mapError(e)
+    }
+    // Initialization ends here: from this point on the watcher owns a timer and
+    // the caller owns the returned close.
+    signal.throwIfAborted()
+
+    const base = this.watchIntervalMs
+    const max = this.watchMaxIntervalMs
+    let interval = base
+    let closed = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    const stop = (): void => {
+      if (closed) return
+      closed = true
+      if (timer !== undefined) {
+        clearTimeout(timer)
+        timer = undefined
+      }
+      signal.removeEventListener('abort', onAbort)
+    }
+    const onAbort = (): void => { stop() }
+    signal.addEventListener('abort', onAbort, { once: true })
+
+    /** A consumer callback must not be able to kill the poll loop. */
+    const notify = (error?: Error): void => {
+      try {
+        changed(error)
+      } catch {
+        // the consumer's failure is its own; observation continues
+      }
+    }
+
+    const schedule = (ms: number): void => {
+      if (closed) return
+      timer = setTimeout(() => { void tick() }, ms)
+      // A watcher must never keep a process (or a vitest worker) alive.
+      ;(timer as unknown as { unref?: () => void }).unref?.()
+    }
+
+    const tick = async (): Promise<void> => {
+      if (closed) return
+      let next: string | undefined
+      try {
+        next = await this.sample(podPath, endpoint)
+      } catch (e) {
+        if (closed) return
+        interval = Math.min(interval * 2, max)
+        notify(this.asFsError(e))
+        schedule(interval)
+        return
+      }
+      if (closed) return
+      if (next !== last) {
+        last = next
+        interval = base
+        notify()
+      } else if (interval !== base) {
+        interval = base
+      }
+      schedule(interval)
+    }
+
+    schedule(base)
+    return async (): Promise<void> => { stop() }
   }
 
   override async writeText(target: FsTarget, content: string, expected?: FsWriteIntent, signal?: AbortSignal, sandboxPolicy?: unknown): Promise<FsWriteOutcome> {
