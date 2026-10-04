@@ -3,17 +3,15 @@
   "version": "0.1.13",
   "type": "module",
   "private": false,
-  "dependencies": {
-    "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/schemastery": "^3.18.2"
-  },
+  "description": "DEPRECATED: authentication moved to the oauth2-proxy sidecar (the platform identity seam is @visecy/dsh-identity-bridge). This package is now only the reusable OIDC client + session codec library; it registers no plugin and no profile loads it.",
+  "deprecated": "Authentication moved to the oauth2-proxy sidecar; use @visecy/dsh-identity-bridge for the identity seam. Kept as a library for a future user/authorization layer.",
   "devDependencies": {
     "@types/node": "^26.2.0",
     "typescript": "^7.0.2",
     "vitest": "^2.1.0"
   },
   "scripts": {
-    "build": "node ../../scripts/build-pkg.mjs auth-oidc src/plugin.ts",
+    "build": "node ../../scripts/build-pkg.mjs auth-oidc src/index.ts",
     "prepublishOnly": "npm run build",
     "test": "vitest run"
   },

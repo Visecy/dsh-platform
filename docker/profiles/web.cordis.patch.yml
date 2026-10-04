@@ -69,17 +69,6 @@
       config:
         host: '0.0.0.0'
         port: !!js ctx.webStartup.port ?? 3080
-    - id: dsh-auth-oidc
-      name: '@visecy/dsh-auth-oidc'
-      config:
-        oidc:
-          issuer: !!js process.env.OIDC_ISSUER
-          clientId: !!js process.env.OIDC_CLIENT_ID
-          clientSecret: !!js process.env.OIDC_CLIENT_SECRET
-          redirectUri: !!js process.env.OIDC_REDIRECT_URI
-          scopes: [openid, profile, email, groups]
-        sessionSecret: !!js process.env.SESSION_SECRET
-        adminGroups: !!js (process.env.ADMIN_GROUPS ?? 'dsh-admins').split(',')
     - id: workspace-runtime
       name: '@visecy/dsh-workspace-k8s'
       config:

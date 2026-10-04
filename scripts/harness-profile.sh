@@ -37,7 +37,6 @@ DSH_RUNTIME_DEPS=(
 
 pnpm --dir "$PROFILE" --store-dir "$STORE" add -w \
   "${DSH_RUNTIME_DEPS[@]}" \
-  "file:$REPO/packages/auth-oidc" \
   "file:$REPO/packages/fs-k8s" \
   "file:$REPO/packages/subprocess-k8s" \
   "file:$REPO/packages/workspace-k8s" \

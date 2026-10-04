@@ -45,7 +45,7 @@ jobs:
 
       - name: Build packages
         run: |
-          node scripts/build-pkg.mjs auth-oidc src/plugin.ts
+          node scripts/build-pkg.mjs auth-oidc src/index.ts
           node scripts/build-pkg.mjs fs-k8s src/index.ts
           node scripts/build-pkg.mjs subprocess-k8s src/index.ts
           node scripts/build-pkg.mjs workspace-k8s src/index.ts

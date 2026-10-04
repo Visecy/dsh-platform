@@ -1,10 +1,23 @@
+/**
+ * `@visecy/dsh-auth-oidc` is DEPRECATED and no longer a DSH plugin.
+ *
+ * Authentication moved out of this process to the oauth2-proxy sidecar, and the
+ * identity seam is `@visecy/dsh-identity-bridge`. Two plugins registering the
+ * same `dshAuth` service name break the cordis loader, so this package keeps
+ * only its reusable library code — the OIDC client and the session codec — and
+ * exposes no plugin entry, no request gate and no webserver.
+ *
+ * The first block is the regression guard for that downgrade: a gate entry that
+ * creeps back in (or a dependency on the deleted `@visecy/dsh-web-auth` fork)
+ * fails here instead of failing at profile load.
+ */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest'
 import { generateKeyPairSync, createSign } from 'node:crypto'
-import { AuthPlugin, type AuthConfig } from '../src/index.ts'
-import { SessionCodec } from '../src/session.ts'
-import { OidcClient } from '../src/oidc-client.ts'
-import { GateWebServer } from '../src/webserver.ts'
+import { readdirSync, readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 import { createServer, type Server } from 'node:http'
+import { OidcClient, SessionCodec, type OidcConfig } from '../src/index.ts'
 
 // ── mock IdP ──────────────────────────────────────────────────────────────
 const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
@@ -90,7 +103,7 @@ function readBody(req: import('node:http').IncomingMessage): Promise<string> {
 }
 
 let mockIdpBase = 'http://127.0.0.1:0'
-const baseConfig = (): AuthConfig => ({
+const baseConfig = (): { oidc: OidcConfig } => ({
   oidc: {
     issuer: 'https://idp.test',
     clientId: 'dsh-client',
@@ -98,7 +111,29 @@ const baseConfig = (): AuthConfig => ({
     redirectUri: 'http://127.0.0.1:0/auth/callback',
     discoveryUrl: mockIdpBase + '/.well-known/openid-configuration',
   },
-  sessionSecret: 'test-secret-123',
+})
+
+// ── the downgrade to a library ────────────────────────────────────────────
+describe('package surface', () => {
+  it('exports the library and nothing that can register a gate', async () => {
+    const mod = await import('../src/index.ts')
+    expect(Object.keys(mod).sort()).toEqual(['OidcClient', 'SessionCodec'])
+  })
+
+  it('has no source file depending on the deleted webserver fork', () => {
+    const src = fileURLToPath(new URL('../src', import.meta.url))
+    const files = readdirSync(src).filter((name) => name.endsWith('.ts'))
+    expect(files.length).toBeGreaterThan(0)
+    // Match module references and calls, not prose: the package must never
+    // import the fork (by any import form) nor call its request-gate seat.
+    const forkImport = /['"]@visecy\/dsh-web-auth['"]/
+    const gateUsage = /registerGate\s*\(/
+    for (const name of files) {
+      const source = readFileSync(join(src, name), 'utf8')
+      expect(forkImport.test(source), `${name} must not reference @visecy/dsh-web-auth as a module`).toBe(false)
+      expect(gateUsage.test(source), `${name} must not call registerGate()`).toBe(false)
+    }
+  })
 })
 
 // ── OIDC client unit tests ────────────────────────────────────────────────
@@ -131,7 +166,7 @@ describe('OidcClient', () => {
     const client = new OidcClient(baseConfig().oidc)
     const { verifier } = await client.buildAuthorizeUrl()
     codes['code-3'] = { verifier, user: { sub: 'u-3' } }
-    const tokens = await client.exchangeCode('code-3', verifier)
+    await client.exchangeCode('code-3', verifier)
     const header = Buffer.from(JSON.stringify({ alg: 'RS256', kid: 'k1' })).toString('base64url')
     const payload = Buffer.from(JSON.stringify({ iss: 'https://idp.test', aud: 'wrong-aud', sub: 'u-3', exp: Math.floor(Date.now() / 1000) + 600 })).toString('base64url')
     const sign = createSign('RSA-SHA256')
@@ -159,99 +194,3 @@ describe('SessionCodec', () => {
     expect(c.decode(token)).toBeUndefined()
   })
 })
-
-// ── gate webserver ────────────────────────────────────────────────────────
-describe('GateWebServer', () => {
-  it('runs the gate before routes and upgrades', async () => {
-    const gated: string[] = []
-    const server = new GateWebServer({
-      gate: async (req) => {
-        gated.push(req.url ?? '')
-        return 'allow'
-      },
-    })
-    server.register({ kind: 'exact', path: '/hello', handler: (_req, res) => { res.end('hi') } })
-    server.registerUpgrade({ path: '/ws', handler: (_req, socket) => { socket.destroy() } })
-    const port = await server.listen(0)
-    const res = await fetch(`http://127.0.0.1:${port}/hello`)
-    expect(await res.text()).toBe('hi')
-    expect(gated).toContain('/hello')
-    await server.close()
-  })
-
-  it('gate can respond and block the route', async () => {
-    const server = new GateWebServer({
-      gate: async (_req, res) => {
-        res.writeHead(401)
-        res.end('no')
-        return 'responded'
-      },
-    })
-    server.register({ kind: 'exact', path: '/hello', handler: (_req, res) => { res.end('hi') } })
-    const port = await server.listen(0)
-    const res = await fetch(`http://127.0.0.1:${port}/hello`)
-    expect(res.status).toBe(401)
-    expect(await res.text()).toBe('no')
-    await server.close()
-  })
-})
-
-// ── end-to-end login flow ─────────────────────────────────────────────────
-describe('AuthPlugin end-to-end', () => {
-  it('login -> callback -> gated access -> logout', async () => {
-    const auth = new AuthPlugin(baseConfig())
-    await auth.start()
-
-    // 1. unauthenticated API call is rejected
-    let res = await fetch(auth.baseUrl + '/api/session')
-    expect(res.status).toBe(401)
-
-    // 2. /auth/login redirects to the IdP with PKCE
-    res = await fetch(auth.baseUrl + '/auth/login', { redirect: 'manual' })
-    expect(res.status).toBe(302)
-    const location = new URL(res.headers.get('location') ?? '')
-    expect(location.searchParams.get('code_challenge')).toBeTruthy()
-    expect(location.searchParams.get('client_id')).toBe('dsh-client')
-    const code = location.searchParams.get('code') ?? 'code-1'
-    const state = location.searchParams.get('state') ?? ''
-    codes[code] = codes[code] ?? { verifier: '', user: { sub: 'u-1', email: 'a@test', groups: ['dsh-admins'] } }
-    // need the verifier stored by the plugin's pending map: simulate via callback with real state
-    // (verifier was set during loginUrl; exchange uses it)
-
-    // 3. callback exchanges and sets the session cookie
-    const cb = await fetch(auth.baseUrl + '/auth/callback?code=' + code + '&state=' + state, { redirect: 'manual' })
-    expect(cb.status).toBe(302)
-    const setCookie = cb.headers.get('set-cookie') ?? ''
-    expect(setCookie).toContain('dsh_session=')
-
-    // 4. gated access now allowed
-    res = await fetch(auth.baseUrl + '/api/session', { headers: { cookie: setCookie.split(';')[0] } })
-    expect(res.status).toBe(404) // route not registered but gate passed -> falls through
-
-    // 5. currentUser resolves from the cookie
-    const req = { headers: { cookie: setCookie.split(';')[0] } } as import('node:http').IncomingMessage
-    const user = auth.currentUser(req)
-    expect(user?.sub).toBe('u-1')
-    expect(user?.roles).toContain('admin') // dsh-admins group
-
-    // 6. logout clears the cookie
-    const out = await fetch(auth.baseUrl + '/auth/logout', { redirect: 'manual' })
-    expect(out.headers.get('set-cookie') ?? '').toContain('Max-Age=0')
-
-    await auth.close()
-  })
-
-  it('admin vs user roles from groups', async () => {
-    const auth = new AuthPlugin(baseConfig())
-    await auth.start()
-    const session = await auth.handleCallback('code-1', await realState(auth))
-    expect(session.roles).toContain('admin')
-    await auth.close()
-  })
-})
-
-async function realState(auth: AuthPlugin): Promise<string> {
-  const res = await fetch(auth.baseUrl + '/auth/login', { redirect: 'manual' })
-  const url = new URL(res.headers.get('location') ?? '')
-  return url.searchParams.get('state') ?? ''
-}
