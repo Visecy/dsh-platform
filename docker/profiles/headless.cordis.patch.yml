@@ -46,7 +46,10 @@
     - id: logging-stdout
       name: '@visecy/dsh-logging-stdout'
       config:
-        level: !!js (['error','warn','info','debug'].includes(process.env.DSH_LOG_LEVEL) ? process.env.DSH_LOG_LEVEL : 'warn')
+        level: !!js >-
+          (['error','warn','info','debug'].includes(process.env.DSH_LOG_LEVEL)
+          ? process.env.DSH_LOG_LEVEL
+          : 'warn')
     - id: workspace-runtime
       name: '@visecy/dsh-workspace-k8s'
       config:
