@@ -27,6 +27,25 @@ describe('currentUser', () => {
       .toBeUndefined()
   })
 
+  // Guard for a security-relevant trap: `X-Auth-Request-*` is the nginx
+  // auth_request RESPONSE family. oauth2-proxy sets it on the browser response
+  // (`--set-xauthrequest`) and — measured against the real v7.15.5 binary — it
+  // does NOT strip client-supplied `X-Auth-Request-*` from the upstream
+  // request. So in this topology that family is CLIENT-CONTROLLABLE and must
+  // never be read as identity; only `x-forwarded-*` (which the proxy strips
+  // before injecting the verified principal) is evidence. The original design
+  // planned to read `X-Auth-Request-*`; that would have been a live
+  // impersonation hole, and this assertion is what keeps it from coming back.
+  it('never treats client-controllable x-auth-request-* headers as identity', () => {
+    expect(currentUser({
+      headers: {
+        'x-auth-request-user': 'dsh-admin',
+        'x-auth-request-groups': 'dsh-admins,devs',
+        'x-auth-request-email': 'admin@example.test',
+      },
+    })).toBeUndefined()
+  })
+
   it('has no principal without a user header', () => {
     expect(currentUser({ headers: {} })).toBeUndefined()
     expect(currentUser({ headers: { 'x-forwarded-groups': 'devs' } })).toBeUndefined()

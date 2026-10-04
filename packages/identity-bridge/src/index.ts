@@ -80,8 +80,12 @@ export interface Config {
 /** The `globalThis` property the official browser client reads at boot. */
 const TRANSPORT_GLOBAL = '__DSH_TRANSPORT__'
 
-/** oauth2-proxy `--set-xauthrequest` identity headers (node:http lower-cases them). */
-/** Upstream-facing identity headers oauth2-proxy actually injects. */
+/**
+ * Upstream-facing identity headers oauth2-proxy actually injects
+ * (node:http lower-cases them). NOT `x-auth-request-*`: that family is set on
+ * the browser RESPONSE (`--set-xauthrequest`) and is not stripped from a
+ * client's request, so a client can assert it.
+ */
 const DEFAULT_HEADERS: HeaderNames = { user: 'x-forwarded-user', groups: 'x-forwarded-groups' }
 
 /** Which request headers carry the proxy-verified principal. */
