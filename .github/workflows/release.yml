@@ -51,6 +51,12 @@ jobs:
           node scripts/build-pkg.mjs workspace-k8s src/index.ts
           node scripts/build-pkg.mjs workspace-picker src/index.ts
           node scripts/build-pkg.mjs identity-bridge src/index.ts
+          # Not published to npm, but the image installs it with `file:` and its
+          # `main` is dist/index.js, so it must be built here. The dist is also
+          # committed (like session-persistence-rdb/storage-db/platform-domain)
+          # so a checkout can be installed without a build step; rebuilding is
+          # what keeps the image's copy fresh.
+          node scripts/build-pkg.mjs logging-stdout src/index.ts
           # build-pkg.mjs bundles the HOST half only; workspace-k8s also ships a
           # browser module (the status panel) that the profile loads through its
           # package.json `dsh.client` declaration. The image copies this checkout,
@@ -82,7 +88,7 @@ jobs:
           tags: ${{ env.IMAGE }}:${{ github.ref_name }},${{ env.IMAGE }}:latest
           build-args: |
             PLUGIN_VERSION=${{ env.PLUGIN_VERSION }}
-            DSH_VERSION=0.1.5-rc.1
+            DSH_VERSION=0.2.0-rc.2
 
       - name: Build sandbox daemon image
         uses: docker/build-push-action@v6
