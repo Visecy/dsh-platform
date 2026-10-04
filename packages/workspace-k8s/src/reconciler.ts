@@ -19,6 +19,13 @@ import type { SessionRebind, WorkspaceRegistry } from './registry.ts'
  * The slice of `ctx.sessionPersistence` the rebind needs: one snapshot per
  * stored session. `list()` returns them in no promised order, so the rebind
  * sorts by header `createdAt` itself.
+ *
+ * The source is re-read on EVERY pass (never cached) and it is the source's job
+ * to say why it is unavailable: `list()` must REJECT when there is no session
+ * store to read, with an error that names the missing service. A pass that
+ * cannot get a source and a pass that found no sessions are otherwise
+ * indistinguishable from the outside, which is how a plugin that could not read
+ * `ctx.sessionPersistence` at all stayed invisible for the life of the feature.
  */
 export interface SessionHeaderSource {
   list(): Promise<readonly { readonly header: { readonly id: string; readonly cwd?: string; readonly createdAt: number } }[]>
@@ -56,7 +63,7 @@ function pvcToWorkspaceId(name: string): string {
  * Run one diagnostic line without letting the diagnostic break the pass: a
  * logger that throws must not turn a reporting path into a new silent failure.
  */
-function report(logger: ReconcilerLogger | undefined, message: string): void {
+function emit(logger: ReconcilerLogger | undefined, message: string): void {
   try {
     logger?.warn(message)
   } catch {
@@ -82,9 +89,71 @@ async function canonicalPath(path: string): Promise<{ path: string } | { error: 
 }
 
 export class WorkspaceReconciler {
+  /**
+   * The messages the PREVIOUS pass reported.
+   *
+   * Every line this pass emits describes a condition (a store that cannot be
+   * listed, a cwd that does not resolve, a bridge write that failed), and a
+   * condition that is still true on the next tick is the SAME condition: the
+   * pass runs every 60 seconds, so repeating it would turn one fault into a
+   * flood and bury the moment it appeared. The set is replaced at the end of
+   * every pass rather than accumulated, so a condition that clears and later
+   * returns is reported again — the line marks the change, not the tick.
+   */
+  private reported: ReadonlySet<string> = new Set()
+  /** The messages reported so far in the pass being run, if one is running. */
+  private reporting: Set<string> | undefined
+  /** Tail of the pass queue; see {@link reconcile}. */
+  private tail: Promise<void> = Promise.resolve()
+
   constructor(private opts: ReconcilerOptions) {}
 
+  /**
+   * Run one pass, queued behind any pass still in flight.
+   *
+   * `reconcile()` has three callers — the load-time pass, the retry that waits
+   * for the official registry, and the interval — and the first two race at
+   * boot: a measured boot started the second 430ms into the first and the two
+   * finished 8ms apart. Overlapping passes re-read the same state, interleave
+   * their registry writes, and (before this queue) each compared against the
+   * other's half-filled condition set, which printed a single boot-time fault
+   * twice. Chaining also keeps the retry honest: a pass queued behind the
+   * in-flight one re-reads the registry that just appeared instead of sharing
+   * the snapshot taken before it existed.
+   */
   async reconcile(): Promise<void> {
+    const pass = this.tail.then(() => this.runPass())
+    // A pass reports failures instead of throwing; this only stops a rejected
+    // promise (a bug in the pass itself) from reaching every later caller.
+    this.tail = pass.then(() => undefined, () => undefined)
+    return await pass
+  }
+
+  /** Report one condition, at most once per uninterrupted occurrence. */
+  private report(message: string): void {
+    // Carrying a suppressed message into this pass's set is what keeps a
+    // PERSISTENT condition suppressed: the previous-pass set is only compared,
+    // never merged, so a condition that does not re-register here would count
+    // as cleared and be emitted again on alternate ticks.
+    if (this.reporting?.has(message) === true) return
+    this.reporting?.add(message)
+    if (this.reported.has(message)) return
+    emit(this.opts.logger, message)
+  }
+
+  /** One pass. The reporting scope is created here, so passes never share it. */
+  private async runPass(): Promise<void> {
+    const reporting = new Set<string>()
+    this.reporting = reporting
+    try {
+      await this.pass()
+    } finally {
+      this.reporting = undefined
+      this.reported = reporting
+    }
+  }
+
+  private async pass(): Promise<void> {
     const { controller, registry, namespace, hostRoot } = this.opts
     if (controller.listPods === undefined || controller.listPvcs === undefined) return
 
@@ -115,7 +184,7 @@ export class WorkspaceReconciler {
       try {
         await mkdir(`${hostRoot}/${id}`, { recursive: true })
       } catch (error) {
-        report(this.opts.logger, `workspace reconcile: could not create the host anchor '${hostRoot}/${id}': ${String(error)}`)
+        this.report(`workspace reconcile: could not create the host anchor '${hostRoot}/${id}': ${String(error)}`)
       }
     }
 
@@ -128,7 +197,7 @@ export class WorkspaceReconciler {
       } catch (error) {
         // A failed bridge-creation must not block the rest of reconciliation;
         // it will be retried on the next pass.
-        report(this.opts.logger, `workspace reconcile: could not register '${id}' at '${hostRoot}/${id}': ${String(error)}`)
+        this.report(`workspace reconcile: could not register '${id}' at '${hostRoot}/${id}': ${String(error)}`)
       }
     }
 
@@ -139,7 +208,7 @@ export class WorkspaceReconciler {
     // `list()` and the bridge that wraps it return a fresh array per call, so
     // the pre-bridge view never grows in place.
     const registered = await registry.list().catch((error: unknown) => {
-      report(this.opts.logger, `workspace reconcile: could not list workspaces for the session rebind: ${String(error)}`)
+      this.report(`workspace reconcile: could not list workspaces for the session rebind: ${String(error)}`)
       return undefined
     })
     if (registered === undefined) return
@@ -159,19 +228,22 @@ export class WorkspaceReconciler {
    * zero writes.
    */
   private async rebindSessions(registered: readonly { workspaceId: string; path: string }[], hostRoot: string): Promise<void> {
-    const { registry, sessions, logger } = this.opts
-    // Without the durable session store there is no join key; never invent one.
-    // (The service is resolved per pass, so its absence is a composition fact,
-    // not a fault: no line here.)
+    const { registry, sessions } = this.opts
+    // Without a session source there is no join key; never invent one. The
+    // source is resolved per pass by the caller, so a composition without
+    // session persistence is a fact about the composition — but one the caller
+    // makes VISIBLE once (see `SessionHeaderSource`), because a store that is
+    // present and unreachable looks exactly like this from the outside.
     if (sessions === undefined || registered.length === 0) return
 
     let headers: readonly { readonly header: { readonly id: string; readonly cwd?: string; readonly createdAt: number } }[]
     try {
       headers = await sessions.list()
     } catch (error) {
-      // A storage fault must not be mistaken for "no sessions": skip the pass
-      // and let the next tick retry.
-      report(logger, `workspace session rebind skipped: session persistence could not be listed: ${String(error)}`)
+      // A store that cannot be listed must not be mistaken for "no sessions":
+      // skip the pass and let the next tick retry. The source names the missing
+      // service in the error, so the line says WHICH read failed.
+      this.report(`workspace session rebind skipped: session persistence could not be listed: ${String(error)}`)
       return
     }
 
@@ -180,7 +252,7 @@ export class WorkspaceReconciler {
     // root whose spelling is not canonical (a symlinked /workspaces would
     // otherwise make every cwd look like it belongs outside the platform).
     const root = await realpath(hostRoot).catch((error: unknown) => {
-      report(logger, `workspace session rebind skipped: host root '${hostRoot}' does not resolve: ${String(error)}`)
+      this.report(`workspace session rebind skipped: host root '${hostRoot}' does not resolve: ${String(error)}`)
       return undefined
     })
     if (root === undefined) return
@@ -194,7 +266,7 @@ export class WorkspaceReconciler {
         // The header's cwd is the ONLY join key this pass has. A header without
         // one is a session that stays Ungrouped until the user re-opens it, and
         // the persistence backend does not require a cwd, so it is a real case.
-        report(logger, `workspace session rebind skipped session '${id}': its stored header carries no cwd`)
+        this.report(`workspace session rebind skipped session '${id}': its stored header carries no cwd`)
         continue
       }
       const canonical = await canonicalPath(cwd)
@@ -202,11 +274,11 @@ export class WorkspaceReconciler {
         // Not repairable here on purpose: the official attach re-validates the
         // cwd with realpath+stat and would reject the session anyway. Report it,
         // because a missing anchor and a healthy pass look identical otherwise.
-        report(logger, `workspace session rebind skipped session '${id}': its cwd '${cwd}' ${canonical.error}`)
+        this.report(`workspace session rebind skipped session '${id}': its cwd '${cwd}' ${canonical.error}`)
         continue
       }
       if (!canonical.path.startsWith(root + '/')) {
-        report(logger, `workspace session rebind skipped session '${id}': its cwd '${cwd}' resolves to '${canonical.path}', outside the platform host root '${root}'`)
+        this.report(`workspace session rebind skipped session '${id}': its cwd '${cwd}' resolves to '${canonical.path}', outside the platform host root '${root}'`)
         continue
       }
       const entry: SessionRebind = { id, path: canonical.path, createdAt }
@@ -236,7 +308,7 @@ export class WorkspaceReconciler {
       } catch (error) {
         // One unrepairable workspace (missing anchor, session persistence
         // miss) must not abort the rest; the next pass retries it.
-        report(logger, `workspace session rebind failed for '${workspace.path}' (${candidates.length} session(s)): ${String(error)}`)
+        this.report(`workspace session rebind failed for '${workspace.path}' (${candidates.length} session(s)): ${String(error)}`)
       }
     }
   }

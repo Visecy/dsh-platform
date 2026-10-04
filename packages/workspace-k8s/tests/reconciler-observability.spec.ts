@@ -107,6 +107,80 @@ describe('rebind observability', () => {
     expect(logger.lines[0]).toContain('pg: connection refused')
   })
 
+  it('reports a condition that persists once, not once per pass', async () => {
+    const root = realRoot()
+    const { reconciler, logger } = setup({
+      rows: [{ workspaceId: 'ws-a', path: join(root, 'ws-a') }],
+      sessions: { list: async () => { throw new Error('persistence service is not available') } },
+      hostRoot: root,
+    })
+
+    // The interval owns the steady state: a store that stays unreachable must
+    // not write one line per tick forever.
+    await reconciler.reconcile()
+    await reconciler.reconcile()
+    await reconciler.reconcile()
+
+    expect(logger.lines).toHaveLength(1)
+    expect(logger.lines[0]).toContain('persistence service is not available')
+  })
+
+  it('reports the condition again when it returns after a healthy pass', async () => {
+    const root = realRoot()
+    let down = true
+    const { reconciler, logger } = setup({
+      rows: [{ workspaceId: 'ws-a', path: join(root, 'ws-a') }],
+      sessions: {
+        list: async () => {
+          if (down) throw new Error('pg: connection refused')
+          return []
+        },
+      },
+      hostRoot: root,
+    })
+
+    await reconciler.reconcile()
+    down = false
+    await reconciler.reconcile()
+    down = true
+    await reconciler.reconcile()
+
+    // Two lines, not one and not three: the line marks a condition CHANGE.
+    expect(logger.lines).toHaveLength(2)
+  })
+
+  it('reports a condition once even when two passes overlap', async () => {
+    const root = realRoot()
+    // The load-time pass and the retry that waits for the official registry are
+    // both in flight at boot — a real boot measured them overlapping (started
+    // 430ms apart, finished 8ms apart) — and each pass used to compare against
+    // the set the OTHER had not finished filling, so one boot printed the same
+    // warn twice. The first store read resolves at once and the second is held
+    // open, so the interleaving that duplicated the line is deterministic here.
+    let calls = 0
+    let release!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    const { reconciler, logger } = setup({
+      rows: [{ workspaceId: 'ws-a', path: join(root, 'ws-a') }],
+      sessions: {
+        list: async () => {
+          calls += 1
+          if (calls > 1) await held
+          throw new Error('persistence service is not available')
+        },
+      },
+      hostRoot: root,
+    })
+
+    const first = reconciler.reconcile()
+    const second = reconciler.reconcile()
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    release()
+    await Promise.all([first, second])
+
+    expect(logger.lines).toHaveLength(1)
+  })
+
   it('reports a host root that does not resolve instead of skipping the pass silently', async () => {
     const root = realRoot()
     const { reconciler, logger } = setup({
