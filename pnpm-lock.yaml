@@ -16,13 +16,6 @@ importers:
         version: 7.0.2
 
   packages/auth-oidc:
-    dependencies:
-      '@deepseek-ai/cordis':
-        specifier: ^4.0.2
-        version: 4.0.2
-      '@deepseek-ai/schemastery':
-        specifier: ^3.18.2
-        version: 3.18.2
     devDependencies:
       '@types/node':
         specifier: ^26.2.0
