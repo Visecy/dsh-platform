@@ -42,7 +42,7 @@ handoff、从 sidecar 的 `X-Forwarded-User`/`X-Forwarded-Groups` 提供 `ctx.ds
 | sandbox-daemon | 工作区执行 pod 内 daemon（files/commands/pty） | Plan 1 |
 | fs-k8s | ctx.fs 提供方（→ daemon） | Plan 1 |
 | subprocess-k8s | ctx.subprocess 提供方（→ daemon） | Plan 1 |
-| workspace-k8s | 工作区生命周期状态机 + lifecycle owner + 原生工作区 UI | Plan 1-2 |
+| workspace-k8s | 工作区生命周期状态机 + lifecycle owner + 官方槽位状态面板 | Plan 1-2 |
 | session-persistence-rdb | ctx.sessionPersistence 的 SQLite/PostgreSQL 后端 | Plan 2 |
 | storage-db | ctx.storage 的 SQLite/PostgreSQL 后端 | Plan 3 |
 | platform-domain | 平台状态（工作区/设置/凭据）的 storage-domain 规格 | Plan 3 |
@@ -54,32 +54,34 @@ handoff、从 sidecar 的 `X-Forwarded-User`/`X-Forwarded-Groups` 提供 `ctx.ds
 
 ## 与官方产物耦合的地方（升级 DSH 时必须复核）
 
-**认证路径**已经零编译产物补丁、零 webserver fork：镜像里的 `@deepseek-ai/*` 与 npm 发布的一致，
-`identity-bridge` 全部走官方扩展点（见 2）。但"零补丁"只对认证路径成立——本仓库**仍有一处**
-对官方产物打补丁的地方：
+**两条路径都已零编译产物补丁、零 webserver fork**：镜像里的 `@deepseek-ai/*` 与 npm 发布的一致。
+认证路径由 `identity-bridge` 走官方扩展点（见 2）；工作区 UI 也已在 **Plan 2（工作区 UI 解耦）**
+中反转回官方槽位：官方 `ui-workspace` 行重新启用并own 侧栏工作区/会话、hero 与
+`sidebar.workspaces` 契约，平台只**新增** `workspace-k8s` 的状态面板
+（`main` keyed 面板 + `sidebar.panellist` 入口 + 可选 `shell.overlay` 药丸，见
+`packages/workspace-k8s/src/client/panel.tsx`）。原先"把官方浏览器 bundle 抠出来打 14 处补丁"
+的 vendoring 链路（`vendor-workspace-browser.mjs` / `vendored-workspace.ts` /
+`enable-workspace-ui.mjs`）已整体删除，因此**升级 DSH 不再需要重新对锚点**。
 
-1. `scripts/vendor-workspace-browser.mjs` —— 把官方 `dsh-client-ui-workspace` 浏览器 bundle 抠出来
-   打 14 处状态补丁，产物是 `packages/workspace-k8s/src/client/vendored-workspace.ts`（生成文件）。
-   部署里官方 `ui-workspace` 行是 disabled 的，这个 vendored browser 是 `sidebar.workspaces` 的唯一占用者。
-   **它现在是本仓库唯一"升级 DSH 时必须重新对锚点"的产物耦合点**，由**工作区 UI 解耦计划**移除
-   （`design/2026-10-04-dsh-platform-2-design.md` §4.3/§4.4 与 §8 第 5 阶段：改用官方槽位面板，
-   然后删 vendored browser 与 vendor 脚本）。在它落地之前，不要对外宣称"平台零补丁"。
-2. `identity-bridge` 依赖的官方契约（升级时跑 `pnpm -r test` + `scripts/smoke-zero-patch.mjs` 即可发现变化）：
-   `webserver/index-inject` 的 `{ kind: 'global', name, value }` 行、
+升级时仍需复核的官方契约（跑 `pnpm -r test` + 两个 smoke 即可发现变化）：
+
+1. `identity-bridge`：`webserver/index-inject` 的 `{ kind: 'global', name, value }` 行、
    `ctx.connection.authenticatedUrl()` / `authorizeIndex()` 与 `ConnectionIndexResponse`、
    `@deepseek-ai/dsh-host-frontend-static` 的 `serveStatic(pathname,res,distRoot,distIndex,authorizeIndex,renderIndex)`、
    以及浏览器端读取的 `globalThis.__DSH_TRANSPORT__.ownsHost`。
+2. 状态面板占用的客户端槽位：`main`（keyed）、`sidebar.panellist`（list，id 与 `main` 的 key 同名）、
+   `shell.overlay`（list）。这三者自 0.1.5-rc.1 起就在 `dsh-client-ui-layout` /
+   `dsh-client-ui-sidebar` 的类型契约里；若上游改签名，面板注册会走 `slots.inject` 的等待路径
+   （槽位未声明就不注册），不会像 vendoring 那样静默改坏官方 bundle。
 
 ## 开发与验证
 
 ```bash
 pnpm install && pnpm build && pnpm test
 
-# 零补丁冒烟（认证路径的核心证明，且仅限认证路径）：只装配
-# 【未打补丁】的官方 webserver + 官方 connection + identity-bridge，断言
-# transport 注入 / 302 handoff / 303 换 cookie / 200 渲染 / /api 401 策略 /
-# x-forwarded-* 身份头。认证路径上任何编译产物补丁都会让它失败
-# （workspace UI 的 vendored browser 不在这个组合里，见上一节）。
+# 零补丁冒烟：只装配【未打补丁】的官方 webserver + 官方 connection +
+# identity-bridge，断言 transport 注入 / 302 handoff / 303 换 cookie / 200 渲染 /
+# /api 401 策略 / x-forwarded-* 身份头。认证路径上任何编译产物补丁都会让它失败。
 node <repo>/scripts/smoke-zero-patch.mjs --target "$PWD/node_modules"
 
 # 官方扩展点证据：这两个补丁为什么可以被官方扩展点替代（同样只加载未打补丁的产物）
