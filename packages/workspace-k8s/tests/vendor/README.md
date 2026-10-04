@@ -69,7 +69,7 @@ rm -rf node_modules/zod/{src,v3,mini,v4-mini}
 find node_modules/zod \( -name '*.d.ts' -o -name '*.d.cts' -o -name '*.cjs' \) -delete
 ```
 
-`tests/official-registry-harness.ts` checks that these resolve before it boots
-the registry, so a missing copy fails with the command to run instead of a
-module-resolution stack trace.
+`node_modules/` is git-ignored, so it is not in the repository: a fresh checkout must
+materialize it first (commands below) or the import of `dsh-storage-domain` fails
+with a module-resolution error.
 
