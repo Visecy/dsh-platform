@@ -22,7 +22,8 @@ const liveChannel = (registry: unknown) => ({
 
 /**
  * The official record's session membership as `@deepseek-ai/dsh-workspace`
- * 0.1.5-rc.3 actually behaves (`lib/index.js`):
+ * (0.2.0-rc.2, `lib/index.js`) actually behaves — the same ordering these
+ * specs pinned against 0.1.5-rc.3, re-checked when the fixture was re-vendored:
  *
  * - reads are filtered by a canonical-cwd index the registry builds once at
  *   init, so an unindexed id reads as unowned even while the record claims it;

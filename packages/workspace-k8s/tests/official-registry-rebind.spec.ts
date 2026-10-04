@@ -2,10 +2,16 @@
  * The rebind repair, driven through the REAL official registry.
  *
  * The defect the previous implementation could not settle is a semantic of
- * `@deepseek-ai/dsh-workspace` 0.1.5-rc.3 (`lib/index.js`), and its own test
- * suite answered it with a fake that had the ordering backwards. These tests
- * run the shipped code instead: a real `WorkspaceRegistry` over a real
- * filesystem, driven through `HostWorkspaceRegistry.rebind`.
+ * `@deepseek-ai/dsh-workspace` (`lib/index.js`), and its own test suite answered
+ * it with a fake that had the ordering backwards. These tests run the shipped
+ * code instead: a real `WorkspaceRegistry` over a real filesystem, driven
+ * through `HostWorkspaceRegistry.rebind`.
+ *
+ * The vendored bytes are 0.2.0-rc.2 (see `tests/vendor/README.md`); the
+ * decision points these tests pin — the `sessionIds` cwd filter, the
+ * durable-membership short-circuit in `attachSession`, and the prune inside
+ * `mutate` — were diffed against 0.1.5-rc.3 and are unchanged, so the
+ * assertions below are the same ones that pinned the original defect.
  *
  * The production situation is the one the live deployment is in:
  *
