@@ -33,7 +33,19 @@ import { WorkspaceDetailView } from './WorkspaceDetailView.tsx'
 import { VENDORED_WORKSPACE_BROWSER } from './vendored-workspace.ts'
 import { WORKSPACE_UI_CSS } from './styles.ts'
 
-export const inject = ['slots', 'sessions', 'workspaces', 'locale', 'connection', 'layout']
+// `remote` and `remote.directoryPicker` are required by the VENDORED browser,
+// which this wrapper applies on its own context: it builds
+// `new UiWorkspaceService(ctx, ctx.remote.directoryPicker, ...)` and reads
+// `ctx.remote.$host` for host info. Reading a service that the running fiber did
+// not declare throws "cannot get property ... without inject", which aborted the
+// whole apply -- so `uiWorkspace` was never provided and every dependent client
+// entry (sidebar, conversation, chat, ...) stayed pending. The previous published
+// bundle happened not to use `ctx.remote`, so this omission stayed latent until
+// the client half was rebuilt from source.
+export const inject = [
+  'slots', 'sessions', 'workspaces', 'locale', 'connection', 'layout',
+  'remote', 'remote.directoryPicker',
+]
 
 /** Structural client root context consumed by apply() (see header note). */
 interface ClientContext {
