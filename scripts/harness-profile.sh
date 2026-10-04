@@ -68,6 +68,12 @@ cp "$REPO/docker/profiles/headless.cordis.patch.yml" "$HEADLESS/cordis.patch.yml
 node "$REPO/scripts/check-plugin-imports.mjs" "$PROFILE"
 node "$REPO/scripts/check-plugin-imports.mjs" "$HEADLESS"
 
+# 4b. the loopback half of the deployment precondition is not our own
+#     configuration: the official CLI must refuse a non-loopback bind. With the
+#     in-process gate gone, that refusal is what keeps the identity headers
+#     trustworthy (README 部署硬前提 #2), so assert it against the real CLI.
+node "$REPO/scripts/check-loopback-bind.mjs" "$DSH_HOME"
+
 # 5. dev-only: the deployment does NOT install the official host packages into
 #    the profile (the CLI ships them as bundle layers and resolves the profile's
 #    `webserver` / `connection` rows from there), but scripts/smoke-zero-patch.mjs
