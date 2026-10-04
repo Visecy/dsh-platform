@@ -66,8 +66,9 @@ RUN ln -s ../lib/node_modules/@deepseek-ai/dsh/lib/bin.js /usr/local/bin/dsh \
 USER root
 
 # Official artifacts are used exactly as published; only the platform's own
-# profile tooling is copied in.
-COPY scripts/enable-workspace-ui.mjs /usr/local/lib/node_modules/enable-workspace-ui.mjs
+# profile tooling is copied in. The workspace status UI needs no injection step:
+# @visecy/dsh-workspace-k8s is installed as a file: dependency below and its own
+# package.json declares the client bundle, so the profile loads it directly.
 COPY scripts/check-plugin-imports.mjs /usr/local/lib/node_modules/check-plugin-imports.mjs
 
 ENV HOME=/home/node DSH_HOME=/opt/dsh-home \
@@ -163,7 +164,6 @@ RUN node -e "\
     fs.writeFileSync(f, JSON.stringify(m, null, 2) + '\\n');\
     console.log('patchReload=startup for', p);\
   }"
-RUN node /usr/local/lib/node_modules/enable-workspace-ui.mjs /opt/dsh-home/profiles/web 2>/dev/null || true
 COPY docker/profiles/web.cordis.patch.yml /opt/dsh-home/profiles/web/cordis.patch.yml
 COPY docker/profiles/headless.cordis.patch.yml /opt/dsh-home/profiles/headless/cordis.patch.yml
 
