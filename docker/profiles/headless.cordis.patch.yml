@@ -1,3 +1,21 @@
+# ── platform disables ───────────────────────────────────────────────────────
+# Re-verified against the 0.2.0-rc.2 composition, not assumed: subprocess,
+# bash-sandbox, permission, session-persistence-jsonl and fs-sandbox are all
+# still official rows (`dsh --profile headless --dump-default-config`). The
+# 0.1.5-rc.1 -> 0.2.0-rc.2 delta removes workflow-worker-thread, code-runtime,
+# ui-schedule and agent-presets and adds 31 rows; none of those ids is
+# referenced by this profile, and `ui-schedule`/`schedule` do not exist in
+# 0.2.0-rc.2 at all (0.2.1-alpha.1 re-adds them).
+#
+# `workspace-changes` — the new 0.2 package that reads workspace bytes with
+# host `node:fs` and has no `ctx.fs` seam — is a dsh-web-app row and is NOT
+# part of the headless composition (the dump above has no such row). A disable
+# row for an unknown id is not a silent no-op: cordis answers
+# `patch: entry "workspace-changes" not found` on stderr while still exiting 0,
+# and this profile must keep `--dump-config` stderr clean. So the headless
+# profile records the decision instead of restating the web disable; if the row
+# ever enters this composition, add the same disable here (and its rationale
+# lives in docker/profiles/web.cordis.patch.yml).
 - id: subprocess
   disabled: true
 - id: bash-sandbox

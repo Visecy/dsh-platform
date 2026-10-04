@@ -1,3 +1,29 @@
+# ── platform disables ───────────────────────────────────────────────────────
+# Re-verified against the 0.2.0-rc.2 composition, not assumed: every id below
+# (subprocess, bash-sandbox, permission, session-persistence-jsonl, fs-sandbox,
+# directory-picker) is still an official row of the base + web-app bundle
+# layers (`dsh --profile web --dump-default-config`), so no disable in this
+# file went stale and none had to be dropped.
+#
+# The 0.1.5-rc.1 -> 0.2.0-rc.2 effective row delta is 4 rows REMOVED
+# (workflow-worker-thread, code-runtime, ui-schedule, agent-presets) and 31
+# ADDED (tool-plugin-manager, plugin-manager, config-editor, authorization,
+# deepseek-account, otel, ptc-runtime, workflow-ptc, image-offload,
+# mcp-resources, llm-deepseek-account, desktop-product-telemetry,
+# product-analytics, job-controller, terminal-controller,
+# ui-settings-account, account-controller, cordis-inspect-providers,
+# shortcuts, ui-shortcuts, office-to-pdf, ui-sidebar-browser,
+# ui-sidebar-terminal, ui-plugin-manager, workspace-changes,
+# ui-settings-session-log, ui-settings-shell, ui-settings-agent-loop,
+# ui-settings-subagent, ui-settings-web-search, agent-preset-registry), plus
+# name changes (hmr, settings, llm-deepseek) and config-key changes
+# (session-telemetry-otel +maxRequestBytes, spill-policy maxInlineBytes ->
+# maxInlineTokens) on rows this file does not restate.
+#
+# `ui-schedule` is NOT a 0.2.0-rc.2 row at all (0.2.1-alpha.1 re-adds it,
+# enabled), so there is nothing to enable or disable for it here. Likewise
+# 0.2.0-rc.2's `web-runtime` has no `publicUrl` key — see the restatement
+# below, which is complete for the version this tree pins.
 - id: subprocess
   disabled: true
 - id: bash-sandbox
@@ -10,6 +36,19 @@
   disabled: true
 - id: directory-picker
   disabled: true
+# NEW IN 0.2, and disabled on purpose: this row records each top-level turn's
+# changed files by reading workspace BYTES with host `node:fs`
+# (`dsh-workspace-changes/lib/types/capture.js` opens the absolute host path;
+# `lib/index.js` resolves it from `realpath(cwd)`). There is no `ctx.fs` seam
+# in it, so there is no way to route those reads into the workspace pod where
+# the bytes actually live: on this control plane the path is the empty
+# /workspaces/<id> anchor (readOnlyRootFilesystem, nothing durable under
+# DSH_HOME), so it would record nothing and could read a stale host copy.
+# Disabled until upstream gives it a `ctx.fs` seam. The visible cost is the
+# changed-files card under a closing assistant message (its producer is gone),
+# not a broken profile; `ui-deliverables` itself stays enabled.
+- id: workspace-changes
+  disabled: true
 # The web app announces this process's launch-token URL on stdout
 # (`dsh web: http://…/?token=<launchToken>`) and tries to hand the URL to a
 # desktop browser. In a container that means (a) a process-wide authentication
@@ -18,6 +57,16 @@
 # point, and for a browser that reaches this process the identity-bridge row
 # below performs the launch-token handoff itself (302 -> 303) without printing
 # anything.
+#
+# A patch replaces the targeted row's WHOLE `config`, so a restatement must
+# carry every key the official row owns or the missing ones silently vanish.
+# Verified against 0.2.0-rc.2's `--dump-default-config`: the official
+# `web-runtime` row is exactly {openBrowser, printUrl, surfaceContext,
+# trustedHosts}, and the four keys below are that set — complete for the
+# version pinned here. 0.2.1-alpha.1 adds a fifth key, `publicUrl` (the
+# advertised application URL, loopback when unset); if this tree ever moves to
+# that line, this row MUST restate `publicUrl: !!js ctx.webStartup.publicUrl`
+# or the advertised URL silently falls back to loopback.
 - id: web-runtime
   name: '@deepseek-ai/dsh-web-app'
   inject:
@@ -34,18 +83,23 @@
 # to collide with. @visecy/dsh-workspace-k8s only ADDS a status panel on the
 # official slots (main keyed panel + sidebar.panellist entry); see
 # packages/workspace-k8s/src/client.
-# DSH 0.1.5 row inventory notes (dsh-web-app):
+# Row inventory notes (carried from the 0.1.5 upgrade, re-checked against
+# 0.2.0-rc.2 where stated):
 #  - `file-upload` (host `fileUploads` + client `fileUpload`), `resources` and
-#    `workspace-files` are LOAD-BEARING: 0.1.5's dsh-api-session-controller
-#    requires the `fileUploads` inject, so disabling `file-upload` leaves
-#    `session-controller` pending and fails the launcher activation assertion.
-#    Do not add disables for them.
+#    `workspace-files` are LOAD-BEARING for the 0.1.5 launcher: its
+#    dsh-api-session-controller requires the `fileUploads` inject, so disabling
+#    `file-upload` leaves `session-controller` pending and fails the activation
+#    assertion. All three rows still exist in 0.2.0-rc.2 and none is disabled
+#    here; whether the inject dependency is still literal in 0.2 was NOT
+#    re-verified, so do not add a disable for them without re-checking.
 #  - `open-in-app` / `ui-open-in-app` are safe to disable in a remote
 #    deployment (nothing injects their service); they are left enabled here so
 #    the official produced-file affordances keep working through
-#    subprocess-k8s.
-#  - `tool-str-replace-editor` no longer exists in 0.1.5's base profile.
-# DSH 0.1.2+ (unchanged in 0.1.5): dsh-client-connection runs one uniform
+#    subprocess-k8s. (`ui-sidebar-browser` is the row 0.2 disables by itself
+#    outside the desktop profile.)
+#  - `tool-str-replace-editor` has not existed since 0.1.5 and is still absent
+#    from 0.2.0-rc.2's base profile.
+# DSH 0.1.2+ (unchanged in 0.2.0-rc.2): dsh-client-connection runs one uniform
 # Host/Origin fence over every /api request / RPC channel / WebSocket upgrade,
 # gated on its official `trustedHosts` config. The CLI already forwards
 # --trusted-host values into this row via ctx.webRuntime; restate the row so

@@ -91,9 +91,11 @@ try {
     !webserverSource.includes('registerGate'),
     `found registerGate in ${webserverEntry}`)
   // String guard too (source text, not behaviour): the official client must
-  // still read the hook this plugin publishes.
+  // still read the hook this plugin publishes. 0.2.0-rc.2 reads it through an
+  // alias (`const globals = globalThis; … globals.__DSH_TRANSPORT__`), so match
+  // the property access itself, not a literal `globalThis.` receiver.
   check('[string guard] official client still reads the transport hook the plugin publishes',
-    connectionClient.includes('globalThis.__DSH_TRANSPORT__') && connectionClient.includes('transport?.ownsHost === true'))
+    /\.__DSH_TRANSPORT__/.test(connectionClient) && connectionClient.includes('transport?.ownsHost === true'))
 
   // ── boot the shipped composition from those artifacts ─────────────────────
   // Everything from here on is BEHAVIOURAL: assertions run against the live
@@ -176,8 +178,14 @@ try {
   check('3a. the launch token is exchanged with a 303', exchange.status === 303, `status=${exchange.status}`)
   check('3b. the exchange mints the official browser cookie',
     cookie !== '' && cookie.includes('='), `set-cookie=${setCookie || '(none)'}`)
-  check('3c. the exchange redirects to clean /', exchange.headers.location === '/',
-    `location=${String(exchange.headers.location)}`)
+  // 0.2.0-rc.2 answers `location: "./"` where 0.1.5 answered `"/"`; both resolve
+  // to the clean root. Assert the resolved target and that the launch token is
+  // NOT replayed, which is what "redirects to clean /" means.
+  const exchangeLocation = String(exchange.headers.location ?? '')
+  const exchangeTarget = new URL(exchangeLocation, `http://${AUTHORITY}/`)
+  check('3c. the exchange redirects to clean /',
+    exchangeTarget.pathname === '/' && !exchangeTarget.searchParams.has('token'),
+    `location=${exchangeLocation}`)
 
   const index = await get('/', { host: AUTHORITY, cookie })
   check('3d. clean GET / with the cookie renders the index (200)', index.status === 200, `status=${index.status}`)

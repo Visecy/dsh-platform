@@ -68,7 +68,10 @@ try {
   check('fixture is unpatched (no cookie bypass)', !connectionIndex.includes('Platform patch: the OIDC gate'))
   check('fixture is unpatched (no isLoopback pin)', !clientJs.includes('isLoopback: true,'))
   check('fixture has no webserver fork extension (no registerGate)', !webserverJs.includes('registerGate'))
-  check('transport hook is read by the official client', clientJs.includes('globalThis.__DSH_TRANSPORT__'))
+  // 0.2.0-rc.2 reads the global through an alias (`const globals = globalThis;
+  // … globals.__DSH_TRANSPORT__`), so match the property access, not a literal
+  // `globalThis.` receiver.
+  check('transport hook is read by the official client', /\.__DSH_TRANSPORT__/.test(clientJs))
   check('transport hook honours ownsHost', clientJs.includes('transport?.ownsHost === true'))
 
   // 2. boot the official webserver + connection + the replacement plugin
