@@ -81,11 +81,30 @@ DSH 绑 loopback + 同 pod sidecar ⇒ 身份头只可能来自 sidecar，**信�
 - **P2（进程内 launch-token cookie 层）** → 官方 token 交换：`ctx.connection.authenticatedUrl(origin)` + `authorizeIndex`。**已验证**：无 cookie → 401；带 token 的 `/` → 303 + Set-Cookie；之后 `/api` 正常；错误 token → 401；围栏仍生效。
 
 ### 4.2 DSH handoff
-`identity-bridge` 注册**精确路由 `/`**（精确优先于 fallback）：
-- 携带有效 DSH cookie → 用官方导出的 `serveStatic()` 渲染 index；
-- cookie 缺失/失效 → 302 到 `authenticatedUrl(公网 origin)`，由官方铸 cookie 后 303 回干净 `/`。
+`identity-bridge` 注册**精确路由 `/`**（精确优先于 fallback），用官方导出的
+`serveStatic(pathname, res, distRoot, distIndex, authorizeIndex, renderIndex)` 渲染 index。
 
-因为 cookie 签名密钥存在 DSH credentials 里，R1 下 DSH_HOME 是临时卷（密钥每次重启变化）⇒ handoff 必须能重复触发；上述"cookie 无效即重定向"天然满足。
+**实现时被官方 API 纠正的两个细节（务必保持，别按直觉改回去）：**
+
+1. `serveStatic` 的后两个参数是 **thunk**，不是值：`authorizeIndex: () => boolean`、
+   `renderIndex: () => Promise<string>`（官方自己的调用点就是
+   `() => ctx.connection.authorizeIndex(req, res)`）。所以渲染是
+   `async () => ctx.webServer.renderIndex(await readFile(distIndex, 'utf8'))`。
+2. `ctx.connection.authorizeIndex(req, res)` **在返回 false 时总是已经写过响应**：
+   - 有效 `?token=` → 写 `303 + Set-Cookie` 回干净 `/`，**然后返回 false**；
+   - 无效/缺失凭据 → 写 `401`，返回 false；
+   - 返回 true 只发生在"调用方可以渲染 index"的情形。
+   因此"返回 false 就自己 302"在真实响应上不可实现（头已发出）。正确做法是传一个实现官方
+   结构化类型 `ConnectionIndexResponse` 的**替身响应**：true → 用官方 `serveStatic` 渲染；
+   替身记录到 303 → 原样重放；其余 → 我们 302 到
+   `authenticatedUrl(publicOrigin ?? requestOrigin(req))`，并用 `requestRejection({headers}) === 403`
+   兜底——绝不把带 launch token 的 URL 交给本部署不服务的 authority。副作用是好的：
+   过期 cookie / 过期 token 会**自愈成一次新的交换**，而不是死在 401 上（§4.2 原本就要求可重复 handoff，
+   因为 R1 下 DSH_HOME 是临时卷、签名密钥每次重启会变）。
+
+`distIndex` 默认解析 `@deepseek-ai/dsh-web-frontend/dist/index.html`：先按本包解析，再按运行中的
+DSH CLI（`realpathSync(process.argv[1])`）解析——后者是官方镜像里唯一可行的锚点（前端在 CLI 自己的
+node_modules 内，profile 看不见）。两者都失败则 `apply()` 直接抛错，不静默降级。
 
 ### 4.3 状态展示（R3）
 - **主**：`main`（keyed 面板）+ `sidebar.panellist`（列表入口）——工作区列表、pod 阶段、最后活动时间、唤醒/休眠/清理

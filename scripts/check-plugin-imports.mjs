@@ -31,7 +31,7 @@ const DEFAULT_PLUGINS = [
   '@visecy/dsh-platform-domain',
 ]
 /** Only the web profile installs these. */
-const WEB_ONLY = ['@visecy/dsh-auth-oidc', '@visecy/dsh-web-auth', '@visecy/dsh-workspace-picker']
+const WEB_ONLY = ['@visecy/dsh-auth-oidc', '@visecy/dsh-web-auth', '@visecy/dsh-workspace-picker', '@visecy/dsh-identity-bridge']
 
 const manifestPath = join(profileDir, 'package.json')
 if (!existsSync(manifestPath)) {
