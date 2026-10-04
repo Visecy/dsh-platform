@@ -29,6 +29,12 @@ beforeAll(async () => {
   await writeFile(distIndex, HTML)
   ctx = new Context()
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
+  // The plugin declares `inject = ['webServer', 'connection']`: it claims the
+  // exact `/` route and performs the launch-token handoff, so a composition
+  // without Connection is not one it can serve. This stand-in is only here to
+  // satisfy the seat -- this suite never configures a pinned origin, so the
+  // fence is not consulted.
+  ctx.provide('connection', { requestRejection: () => undefined })
   await ctx.plugin(identityBridge, { distIndex })
 })
 

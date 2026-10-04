@@ -22,6 +22,7 @@ import * as frontendStatic from '@deepseek-ai/dsh-host-frontend-static'
 import * as connection from '@deepseek-ai/dsh-client-connection'
 import * as identityBridge from '../src/index.ts'
 
+const PUBLIC_ORIGIN_AUTHORITY = 'public.example.test'
 const AUTHORITY = 'harness.example.test'
 const PUBLIC_ORIGIN = 'https://public.example.test'
 const HTML = '<!doctype html><html><head><title>dsh</title></head><body><div id="root"></div></body></html>'
@@ -46,7 +47,9 @@ interface Bench {
  * @param config - this plugin's config (publicOrigin varies per bench).
  * @returns the running bench with an HTTP client and a teardown.
  */
-async function boot(config: { publicOrigin?: string } = {}): Promise<Bench> {
+async function boot(
+  config: { publicOrigin?: string; userHeader?: string; groupsHeader?: string } = {},
+): Promise<Bench> {
   const root = await mkdtemp(join(process.cwd(), '.tmp-identity-bridge-'))
   const distIndex = join(root, 'index.html')
   await writeFile(distIndex, HTML)
@@ -65,7 +68,10 @@ async function boot(config: { publicOrigin?: string } = {}): Promise<Bench> {
   })
 
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
-  await ctx.plugin(connection, { trustedHosts: [AUTHORITY] })
+  // A deployment that PINS a public origin must also serve that authority -- the
+  // handoff redirect carries the launch token to it, so a pin outside trustedHosts
+  // is a contradiction the plugin now refuses to load with.
+  await ctx.plugin(connection, { trustedHosts: [AUTHORITY, PUBLIC_ORIGIN_AUTHORITY] })
   await ctx.plugin(frontendStatic, { distIndex })
   await ctx.plugin(identityBridge, { distIndex, ...config })
 
@@ -190,5 +196,31 @@ describe('identity-bridge handoff origin', () => {
     } finally {
       await plain.close()
     }
+  })
+})
+
+describe('identity-bridge load-time guards', () => {
+  it('refuses a pinned origin that is not an absolute URL', async () => {
+    await expect(boot({ publicOrigin: 'not-a-url' })).rejects.toThrow(/is not an absolute URL/)
+  })
+
+  it('refuses a pinned origin carrying a path', async () => {
+    await expect(boot({ publicOrigin: 'https://public.example.test/dsh' }))
+      .rejects.toThrow(/must be scheme:\/\/host\[:port\] with no path/)
+  })
+
+  it('refuses a pinned origin this deployment does not serve, instead of mailing it a launch token', async () => {
+    await expect(boot({ publicOrigin: 'https://evil.example.test' }))
+      .rejects.toThrow(/not an authority this deployment serves/)
+  })
+
+  it('refuses a configured principal header from the client-controllable family', async () => {
+    await expect(boot({ userHeader: 'x-auth-request-user' })).rejects.toThrow(/client-controllable/)
+    await expect(boot({ groupsHeader: 'X-Auth-Request-Groups' })).rejects.toThrow(/client-controllable/)
+  })
+
+  it('still accepts the upstream pair when configured explicitly', async () => {
+    const explicit = await boot({ userHeader: 'x-forwarded-user', groupsHeader: 'x-forwarded-groups' })
+    await explicit.close()
   })
 })

@@ -23,6 +23,7 @@ import { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import * as connection from '@deepseek-ai/dsh-client-connection'
 import * as identityBridge from '../src/index.ts'
 
+const PUBLIC_ORIGIN_AUTHORITY = 'public.example.test'
 const AUTHORITY = 'harness.example.test'
 const FRONTEND_MANIFEST = '{"name":"@deepseek-ai/dsh-web-frontend","version":"0.0.0"}'
 /** Only this fixture's index carries the marker, so it proves WHICH dist resolved. */
@@ -89,7 +90,10 @@ beforeAll(async () => {
   })
 
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
-  await ctx.plugin(connection, { trustedHosts: [AUTHORITY] })
+  // A deployment that PINS a public origin must also serve that authority -- the
+  // handoff redirect carries the launch token to it, so a pin outside trustedHosts
+  // is a contradiction the plugin now refuses to load with.
+  await ctx.plugin(connection, { trustedHosts: [AUTHORITY, PUBLIC_ORIGIN_AUTHORITY] })
   const previousArgv1 = process.argv[1]
   process.argv[1] = cli
   try {

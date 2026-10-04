@@ -76,7 +76,18 @@ ENV HOME=/home/node DSH_HOME=/opt/dsh-home \
 RUN mkdir -p /opt/dsh-home /home/node && chown -R node:node /opt/dsh-home /home/node \
   && mkdir -p /opt/dsh-home/plugins
 
-# Vendored platform DB/session-storage packages (private monorepo code).
+# Every platform plugin is installed FROM THIS CHECKOUT, never from the npm
+# registry. Two reasons: the image is then a pure function of the commit (no
+# registry round-trip, no publish-before-build ordering), and a brand-new
+# package can ship before it has ever been published -- the first publish of a
+# new package cannot use npm Trusted Publishing, which would otherwise make the
+# image build depend on a bootstrap that does not exist yet. Publishing to npm
+# still happens in release.yml, for third-party installs.
+COPY packages/fs-k8s /opt/dsh-home/plugins/fs-k8s
+COPY packages/subprocess-k8s /opt/dsh-home/plugins/subprocess-k8s
+COPY packages/workspace-k8s /opt/dsh-home/plugins/workspace-k8s
+COPY packages/workspace-picker /opt/dsh-home/plugins/workspace-picker
+COPY packages/identity-bridge /opt/dsh-home/plugins/identity-bridge
 COPY packages/session-persistence-rdb /opt/dsh-home/plugins/session-persistence-rdb
 COPY packages/storage-db /opt/dsh-home/plugins/storage-db
 COPY packages/platform-domain /opt/dsh-home/plugins/platform-domain
@@ -95,11 +106,11 @@ USER node
 RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
   && dsh --profile headless --dump-config > /dev/null 2>&1 || true \
   && pnpm --dir /opt/dsh-home/profiles/web --store-dir /tmp/pnpm-store add -w \
-       @visecy/dsh-fs-k8s@${PLUGIN_VERSION:-latest} \
-       @visecy/dsh-subprocess-k8s@${PLUGIN_VERSION:-latest} \
-       @visecy/dsh-workspace-k8s@${PLUGIN_VERSION:-latest} \
-       @visecy/dsh-workspace-picker@${PLUGIN_VERSION:-latest} \
-       @visecy/dsh-identity-bridge@${PLUGIN_VERSION:-latest} \
+       file:/opt/dsh-home/plugins/fs-k8s \
+       file:/opt/dsh-home/plugins/subprocess-k8s \
+       file:/opt/dsh-home/plugins/workspace-k8s \
+       file:/opt/dsh-home/plugins/workspace-picker \
+       file:/opt/dsh-home/plugins/identity-bridge \
        file:/opt/dsh-home/plugins/session-persistence-rdb \
        file:/opt/dsh-home/plugins/storage-db \
        file:/opt/dsh-home/plugins/platform-domain \
@@ -113,9 +124,9 @@ RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
        @deepseek-ai/dsh-session-format-catalog@${DSH_VERSION} \
        @kubernetes/client-node \
   && pnpm --dir /opt/dsh-home/profiles/headless --store-dir /tmp/pnpm-store add -w \
-       @visecy/dsh-fs-k8s@${PLUGIN_VERSION:-latest} \
-       @visecy/dsh-subprocess-k8s@${PLUGIN_VERSION:-latest} \
-       @visecy/dsh-workspace-k8s@${PLUGIN_VERSION:-latest} \
+       file:/opt/dsh-home/plugins/fs-k8s \
+       file:/opt/dsh-home/plugins/subprocess-k8s \
+       file:/opt/dsh-home/plugins/workspace-k8s \
        file:/opt/dsh-home/plugins/session-persistence-rdb \
        file:/opt/dsh-home/plugins/storage-db \
        file:/opt/dsh-home/plugins/platform-domain \

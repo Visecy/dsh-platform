@@ -54,7 +54,7 @@ import type { IndexInjection } from '@deepseek-ai/dsh-host-webserver'
 export const name = '@visecy/dsh-identity-bridge'
 
 /** The transport hook needs the webserver event seat to exist. */
-export const inject = ['webServer']
+export const inject = ['webServer', 'connection']
 
 /** Plugin config. */
 export interface Config {
@@ -87,6 +87,69 @@ const TRANSPORT_GLOBAL = '__DSH_TRANSPORT__'
  * client's request, so a client can assert it.
  */
 const DEFAULT_HEADERS: HeaderNames = { user: 'x-forwarded-user', groups: 'x-forwarded-groups' }
+
+/**
+ * Reject a configured principal header that belongs to the client-controllable
+ * `X-Auth-Request-*` family. oauth2-proxy never strips that family -- it only
+ * injects it into the BROWSER RESPONSE for the nginx `auth_request` pattern --
+ * so a client can send it to the upstream verbatim. Reading it as identity is a
+ * silent impersonation hole, which is exactly the mistake this plugin was
+ * originally written with; fail the load instead of letting it back in.
+ * @param name - the configured header name.
+ * @param which - config field name, for the error message.
+ * @throws when the name is part of the untrusted family.
+ */
+function assertTrustworthyHeader(name: string, which: string): void {
+  if (/^x-auth-request-/i.test(name)) {
+    throw new Error(
+      `identity-bridge: ${which} "${name}" is client-controllable in this topology ` +
+        `(oauth2-proxy only puts X-Auth-Request-* on the browser response; it never strips a ` +
+        `client-supplied one). Use the upstream pair instead: x-forwarded-user / x-forwarded-groups.`,
+    )
+  }
+}
+
+/**
+ * Split a configured public origin and reject anything that is not exactly
+ * `scheme://authority`.
+ * @param origin - the configured `publicOrigin`.
+ * @returns the authority (host[:port]) the handoff will redirect to.
+ * @throws when the value is not an absolute URL or carries a path/query/fragment.
+ */
+function parsePublicOrigin(origin: string): string {
+  let url: URL
+  try {
+    url = new URL(origin)
+  } catch {
+    throw new Error(`identity-bridge: publicOrigin ${JSON.stringify(origin)} is not an absolute URL`)
+  }
+  if (url.pathname !== '/' || url.search !== '' || url.hash !== '') {
+    throw new Error(
+      `identity-bridge: publicOrigin ${JSON.stringify(origin)} must be scheme://host[:port] with no path, query or fragment`,
+    )
+  }
+  return url.host
+}
+
+/**
+ * Assert that a pinned public origin names an authority this deployment serves.
+ * The per-request fence only checks the REQUEST's authority, so without this a
+ * pinned origin the deployment does not serve would still receive a redirect
+ * carrying the launch token.
+ * @param ctx - plugin context carrying the connection service.
+ * @param origin - the configured `publicOrigin`.
+ * @throws when the value is malformed or the Host fence rejects its authority.
+ */
+function assertServedOrigin(ctx: Context, origin: string): void {
+  const authority = parsePublicOrigin(origin)
+  if (ctx.connection.requestRejection({ headers: { host: authority } }) === 403) {
+    throw new Error(
+      `identity-bridge: publicOrigin ${JSON.stringify(origin)} is not an authority this deployment serves ` +
+        `(the Host fence rejects it), so the handoff would hand the launch token to it. ` +
+        `Add the authority to the connection row's trustedHosts / the CLI's --trusted-host.`,
+    )
+  }
+}
 
 /** Which request headers carry the proxy-verified principal. */
 export interface HeaderNames {
@@ -142,10 +205,16 @@ interface IndexRouteOptions {
  */
 export function apply(ctx: Context, config: Config = {}): void {
   const distIndex = resolveDistIndex(config)
+  const publicOrigin = config.publicOrigin === '' ? undefined : config.publicOrigin
+  // A pinned origin is what the handoff redirect points at, and that URL carries
+  // the process launch token, so it is validated BEFORE anything is provided:
+  // a malformed value or an authority this deployment does not serve must fail
+  // the load, not be discovered per request.
+  if (publicOrigin !== undefined) assertServedOrigin(ctx, publicOrigin)
   const options: IndexRouteOptions = {
     distIndex,
     distRoot: dirname(distIndex),
-    publicOrigin: config.publicOrigin === '' ? undefined : config.publicOrigin,
+    publicOrigin,
   }
 
   ctx.on('webserver/index-inject', (table: IndexInjection[]) => {
@@ -156,18 +225,18 @@ export function apply(ctx: Context, config: Config = {}): void {
     user: config.userHeader ?? DEFAULT_HEADERS.user,
     groups: config.groupsHeader ?? DEFAULT_HEADERS.groups,
   }
+  assertTrustworthyHeader(headers.user, 'userHeader')
+  assertTrustworthyHeader(headers.groups, 'groupsHeader')
   ctx.provide('dshAuth', { currentUser: (req) => currentUser(req, headers) })
 
-  ctx.inject(['connection'], (connectionCtx) => {
-    connectionCtx.effect(
-      () => connectionCtx.webServer.register({
-        kind: 'exact',
-        path: '/',
-        handler: (req, res) => handleIndex(connectionCtx, req, res, options),
-      }),
-      'dsh-identity-bridge: root index route',
-    )
-  })
+  ctx.effect(
+    () => ctx.webServer.register({
+      kind: 'exact',
+      path: '/',
+      handler: (req, res) => handleIndex(ctx, req, res, options),
+    }),
+    'dsh-identity-bridge: root index route',
+  )
 }
 
 /**
