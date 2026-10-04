@@ -32,6 +32,14 @@
  *      `x-forwarded-user` / `x-forwarded-groups` headers, on a live request too.
  * Plus the defence-in-depth check the patches preserved: a foreign Host is 403.
  *
+ * Assertion kinds, so nothing is mistaken for stronger evidence than it is:
+ *   - [string guard] greps the installed official source text for a marker the
+ *     deleted patch emitted, or for an official hook the plugin relies on.
+ *     Belt-and-braces only: it catches a regression back to those patches, but
+ *     text absence cannot prove behaviour.
+ *   - [behavioural] boots the composition and asserts real HTTP responses.
+ *     These are the load-bearing assertions.
+ *
  * Usage (from a profile that has the packages above installed):
  *   node <repo>/scripts/smoke-zero-patch.mjs --target <profile>/node_modules
  *
@@ -71,19 +79,25 @@ try {
   const connectionClient = readFileSync(join(connectionLib, 'client.js'), 'utf8')
   const webserverSource = readFileSync(webserverEntry, 'utf8')
 
-  check('official connection has no cookie-layer bypass (deleted patch P2)',
+  // String guards, NOT behavioural proof: each greps the installed source text
+  // for the exact marker the deleted patch/fork emitted.
+  check('[string guard] official connection has no cookie-layer bypass (deleted patch P2)',
     !connectionIndex.includes('Platform patch: the OIDC gate'),
     'found the deleted cookie-bypass marker in lib/index.js')
-  check('official connection has no isLoopback pin (deleted patch P1)',
+  check('[string guard] official connection has no isLoopback pin (deleted patch P1)',
     !connectionClient.includes('isLoopback: true,'),
     'found the deleted isLoopback pin in lib/client.js')
-  check('official webserver carries no registerGate fork extension',
+  check('[string guard] official webserver carries no registerGate fork extension',
     !webserverSource.includes('registerGate'),
     `found registerGate in ${webserverEntry}`)
-  check('official client still reads the transport hook the plugin publishes',
+  // String guard too (source text, not behaviour): the official client must
+  // still read the hook this plugin publishes.
+  check('[string guard] official client still reads the transport hook the plugin publishes',
     connectionClient.includes('globalThis.__DSH_TRANSPORT__') && connectionClient.includes('transport?.ownsHost === true'))
 
   // ── boot the shipped composition from those artifacts ─────────────────────
+  // Everything from here on is BEHAVIOURAL: assertions run against the live
+  // booted composition (real HTTP requests, plus the plugin's live service).
   const { Context } = await import(profileRequire.resolve('@deepseek-ai/cordis'))
   const { WebServer } = await import(webserverEntry)
   const connection = await import(connectionEntry)
@@ -176,9 +190,16 @@ try {
 
   // ── 4. the official cookie layer stays ACTIVE and is satisfied ────────────
   const apiAnonymous = await get('/api/anything', { host: AUTHORITY })
+  // Behavioural: anonymous is refused by the official fence.
   check('4a. /api without the cookie is refused 401', apiAnonymous.status === 401, `status=${apiAnonymous.status}`)
   const apiAuthed = await get('/api/anything', { host: AUTHORITY, cookie })
-  check('4b. the same /api request with the cookie is not 401', apiAuthed.status !== 401, `status=${apiAuthed.status}`)
+  // Behavioural, exact status: 404 is the router's answer AFTER the fence let
+  // the cookie holder through (no `/api/anything` endpoint is mounted in this
+  // composition). 401 would mean the cookie was refused, 5xx that the layer
+  // broke — both must fail this assertion, so no "not 401" slack here.
+  check('4b. the same /api request with the cookie passes the official fence (404, not 401)',
+    apiAuthed.status === 404,
+    `status=${apiAuthed.status} (want 404: fence passed, router has no /api/anything)`)
 
   // ── 5. the identity seam over the sidecar's headers ───────────────────────
   const user = ctx.dshAuth.currentUser({ headers: { 'x-forwarded-user': 'alice', 'x-forwarded-groups': 'dsh-admins, devs' } })
