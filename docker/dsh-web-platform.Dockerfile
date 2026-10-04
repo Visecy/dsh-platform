@@ -84,6 +84,7 @@ RUN mkdir -p /opt/dsh-home /home/node && chown -R node:node /opt/dsh-home /home/
 # new package cannot use npm Trusted Publishing, which would otherwise make the
 # image build depend on a bootstrap that does not exist yet. Publishing to npm
 # still happens in release.yml, for third-party installs.
+COPY packages/logging-stdout /opt/dsh-home/plugins/logging-stdout
 COPY packages/fs-k8s /opt/dsh-home/plugins/fs-k8s
 COPY packages/subprocess-k8s /opt/dsh-home/plugins/subprocess-k8s
 COPY packages/workspace-k8s /opt/dsh-home/plugins/workspace-k8s
@@ -107,11 +108,14 @@ USER node
 # transitive runtime closure of the platform plugins: dsh-session/dsh-llm/
 # dsh-scope/dsh-http-proxy are peers of the official dsh-fs, dsh-subprocess and
 # dsh-session-persistence packages, and dsh-session-format-catalog is the
-# 0.1.5 legacy-log migration catalog used by session-persistence-rdb.
+# legacy-log (v3 -> v4) migration catalog used by session-persistence-rdb.
+# dsh-logging-stdout imports only cordis, schemastery and node builtins — the
+# first two are already at the profile root — so it adds nothing to the list.
 # `scripts/harness-profile.sh` re-runs this closure check after installing.
 RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
   && dsh --profile headless --dump-config > /dev/null 2>&1 || true \
   && pnpm --dir /opt/dsh-home/profiles/web --store-dir /tmp/pnpm-store add -w \
+       file:/opt/dsh-home/plugins/logging-stdout \
        file:/opt/dsh-home/plugins/fs-k8s \
        file:/opt/dsh-home/plugins/subprocess-k8s \
        file:/opt/dsh-home/plugins/workspace-k8s \
@@ -130,6 +134,7 @@ RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
        @deepseek-ai/dsh-session-format-catalog@${DSH_VERSION} \
        @kubernetes/client-node \
   && pnpm --dir /opt/dsh-home/profiles/headless --store-dir /tmp/pnpm-store add -w \
+       file:/opt/dsh-home/plugins/logging-stdout \
        file:/opt/dsh-home/plugins/fs-k8s \
        file:/opt/dsh-home/plugins/subprocess-k8s \
        file:/opt/dsh-home/plugins/workspace-k8s \

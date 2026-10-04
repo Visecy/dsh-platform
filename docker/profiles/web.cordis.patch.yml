@@ -46,8 +46,26 @@
 # DSH_HOME), so it would record nothing and could read a stale host copy.
 # Disabled until upstream gives it a `ctx.fs` seam. The visible cost is the
 # changed-files card under a closing assistant message (its producer is gone),
-# not a broken profile; `ui-deliverables` itself stays enabled.
+# not a broken profile.
 - id: workspace-changes
+  disabled: true
+# Disabled as the direct consequence of the row above: the official
+# `ui-deliverables` host half injects `workspaceChanges` (its full inject list
+# is systemPrompt, connection, sessionQuery, sessionController, workspaceFiles,
+# fs, sandboxPolicy, workspaceChanges), so with its only data source gone the
+# row can never activate and every boot reports it as a pending entry.
+#
+# Cost of the disable, read off 0.2.0-rc.2's `dsh-client-ui-deliverables`: the
+# `ui:deliverable-file-references` system-prompt section disappears, and so
+# does the authenticated "native open" RPC for presented files
+# (`registerPresentOpen` reads `ctx.workspaceChanges.summary/diff`). The
+# `present` TOOL is NOT lost — it is `@deepseek-ai/dsh-tool-present`, which
+# injects only tools/fs/sessionProjections — and the changed-files/diff card
+# was already dead with `workspace-changes` (see above).
+#
+# Both rows come back together once upstream routes those byte reads through
+# `ctx.fs`; at that point this disable and the one above are deleted.
+- id: ui-deliverables
   disabled: true
 # The web app announces this process's launch-token URL on stdout
 # (`dsh web: http://…/?token=<launchToken>`) and tries to hand the URL to a
@@ -118,6 +136,23 @@
       [...(process.env.DSH_TRUSTED_HOSTS ?? '').split(',').map(entry => entry.trim()).filter(Boolean),
       ...ctx.webRuntime.trustedHosts]
 - insert:
+    # FIRST platform row on purpose: rows mount in list order, so every row
+    # mounted after this one has its warn/error output reach the pod log.
+    # Cordis's own exporter only ring-buffers in memory (nothing reads that
+    # buffer) and dsh-app-boot's keeps warn/error for its StartupError path, so
+    # before this row the composition had NO logger sink at all — a platform
+    # failure was invisible, and a "fix" that silently did nothing looked
+    # exactly like one that worked.
+    #
+    # `level` is the LEAST severe type written (error is always written);
+    # `warn` keeps a normal boot quiet while surfacing every warn/error, which
+    # is how every platform plugin reports failures. DSH_LOG_LEVEL overrides it
+    # per deployment; an unknown value falls back to `warn` instead of failing
+    # the row (a boot-time config error here would be invisible).
+    - id: logging-stdout
+      name: '@visecy/dsh-logging-stdout'
+      config:
+        level: !!js (['error','warn','info','debug'].includes(process.env.DSH_LOG_LEVEL) ? process.env.DSH_LOG_LEVEL : 'warn')
     # identity-bridge owns the exact `/` route (official token handoff via
     # authenticatedUrl/authorizeIndex), publishes __DSH_TRANSPORT__ so a remote
     # browser behaves as a host, and provides ctx.dshAuth over the oauth2-proxy

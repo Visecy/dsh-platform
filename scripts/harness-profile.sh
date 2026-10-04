@@ -37,6 +37,7 @@ DSH_RUNTIME_DEPS=(
 
 pnpm --dir "$PROFILE" --store-dir "$STORE" add -w \
   "${DSH_RUNTIME_DEPS[@]}" \
+  "file:$REPO/packages/logging-stdout" \
   "file:$REPO/packages/fs-k8s" \
   "file:$REPO/packages/subprocess-k8s" \
   "file:$REPO/packages/workspace-k8s" \
@@ -49,6 +50,7 @@ pnpm --dir "$PROFILE" --store-dir "$STORE" add -w \
 
 pnpm --dir "$HEADLESS" --store-dir "$STORE" add -w \
   "${DSH_RUNTIME_DEPS[@]}" \
+  "file:$REPO/packages/logging-stdout" \
   "file:$REPO/packages/fs-k8s" \
   "file:$REPO/packages/subprocess-k8s" \
   "file:$REPO/packages/workspace-k8s" \

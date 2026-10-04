@@ -15,7 +15,10 @@
 # and this profile must keep `--dump-config` stderr clean. So the headless
 # profile records the decision instead of restating the web disable; if the row
 # ever enters this composition, add the same disable here (and its rationale
-# lives in docker/profiles/web.cordis.patch.yml).
+# lives in docker/profiles/web.cordis.patch.yml). The same holds for
+# `ui-deliverables`, which the web profile disables only because it injects
+# `workspaceChanges`: it is a dsh-web-app row and appears nowhere in the
+# headless composition either.
 - id: subprocess
   disabled: true
 - id: bash-sandbox
@@ -27,6 +30,23 @@
 - id: fs-sandbox
   disabled: true
 - insert:
+    # FIRST platform row on purpose: rows mount in list order, so every row
+    # mounted after this one has its warn/error output reach the pod log.
+    # Cordis's own exporter only ring-buffers in memory (nothing reads that
+    # buffer) and dsh-app-boot's keeps warn/error for its StartupError path, so
+    # before this row the composition had NO logger sink at all — a platform
+    # failure was invisible, and a "fix" that silently did nothing looked
+    # exactly like one that worked.
+    #
+    # `level` is the LEAST severe type written (error is always written);
+    # `warn` keeps a normal boot quiet while surfacing every warn/error, which
+    # is how every platform plugin reports failures. DSH_LOG_LEVEL overrides it
+    # per deployment; an unknown value falls back to `warn` instead of failing
+    # the row (a boot-time config error here would be invisible).
+    - id: logging-stdout
+      name: '@visecy/dsh-logging-stdout'
+      config:
+        level: !!js (['error','warn','info','debug'].includes(process.env.DSH_LOG_LEVEL) ? process.env.DSH_LOG_LEVEL : 'warn')
     - id: workspace-runtime
       name: '@visecy/dsh-workspace-k8s'
       config:

@@ -23,6 +23,7 @@ const explicit = process.argv.slice(3)
 
 /** Platform plugins installed into every web/headless profile. */
 const DEFAULT_PLUGINS = [
+  '@visecy/dsh-logging-stdout',
   '@visecy/dsh-fs-k8s',
   '@visecy/dsh-subprocess-k8s',
   '@visecy/dsh-workspace-k8s',
