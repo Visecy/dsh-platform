@@ -12,6 +12,7 @@ import {
   materializeCreateHeader
 } from "@deepseek-ai/dsh-session-persistence";
 import {
+  SESSION_FORMAT_VERSION as SESSION_FORMAT_VERSION3,
   SessionLogOffset as SessionLogOffset2
 } from "@deepseek-ai/dsh-session";
 
@@ -71,12 +72,65 @@ var WriteGuard = class {
   }
 };
 
+// src/catalog.ts
+import { SESSION_FORMAT_VERSION } from "@deepseek-ai/dsh-session";
+import {
+  createSessionFormatCatalogWithChildren,
+  historicalSessionFormatCatalog,
+  sessionFormatCatalog
+} from "@deepseek-ai/dsh-session-format-catalog";
+function catalogForSource(storedVersion, children) {
+  return storedVersion >= SESSION_FORMAT_VERSION ? sessionFormatCatalog : createSessionFormatCatalogWithChildren(children);
+}
+function prerequisiteCatalogFor(storedVersion) {
+  return storedVersion >= SESSION_FORMAT_VERSION ? sessionFormatCatalog : historicalSessionFormatCatalog;
+}
+function unavailableFact(childId, childCreatedAt) {
+  return { childId, childCreatedAt, descriptorCount: 0, descriptor: null };
+}
+function historicalChildFact(artifact) {
+  const header = artifact.header;
+  if (header.origin !== "subagent" || header.parentSession === void 0) {
+    throw new Error("catalog migration requires a subagent child with a direct parent");
+  }
+  const descriptors = artifact.events.filter(
+    (event) => event.type === "subagent/descriptor" && event.seq >= artifact.inheritedEventCount
+  );
+  const source = {
+    childId: header.id,
+    childCreatedAt: header.createdAt,
+    descriptorCount: descriptors.length,
+    descriptor: descriptors[0]?.data ?? null
+  };
+  childCatalogFact(source);
+  return source;
+}
+function factFromArtifact(artifact) {
+  try {
+    return historicalChildFact(artifact);
+  } catch {
+    return void 0;
+  }
+}
+function childCatalogFact(source) {
+  const descriptor = source.descriptor;
+  const known = descriptor !== null && typeof descriptor === "object" && !Array.isArray(descriptor) && [1, 2, 3].includes(descriptor.version);
+  if (source.descriptorCount !== 1 || !known) return;
+  const record = descriptor;
+  if (typeof record.provider !== "string") {
+    throw new Error(`session ${source.childId} has an invalid subagent descriptor provider`);
+  }
+  if (record.version !== 1 && record.mode !== "continuable" && record.mode !== "one-shot") {
+    throw new Error(`session ${source.childId} has an invalid subagent descriptor mode`);
+  }
+}
+
 // src/migrate.ts
 import {
-  sessionFormatCatalog,
+  sessionFormatCatalog as sessionFormatCatalog2,
   SessionFormatUnsupportedMigrationError
 } from "@deepseek-ai/dsh-session-format-catalog";
-import { SESSION_FORMAT_VERSION, SessionLogOffset } from "@deepseek-ai/dsh-session";
+import { SESSION_FORMAT_VERSION as SESSION_FORMAT_VERSION2, SessionLogOffset } from "@deepseek-ai/dsh-session";
 import {
   SessionFormatUnsupportedError,
   SessionPersistenceCorruptionError,
@@ -325,7 +379,12 @@ var sessions = {
     { name: "f_delegation_depth", type: "integer" },
     { name: "f_incarnation", type: "text", notNull: true },
     { name: "f_revision", type: "integer", notNull: true }
-  ]
+  ],
+  indexes: [{ name: "ix_sessions_subagent_parent", columns: ["f_parent_session", "f_origin"] }]
+  // The v3→v4 migration discovers a parent's historical children on READ (one
+  // indexed lookup per stored parent); every other access is served by
+  // `f_session_id`. The index is created idempotently on every open, so an
+  // existing v1 database gains it without a SCHEMA_VERSION bump.
 };
 
 // src/entities/events.ts
@@ -594,9 +653,9 @@ function scanRows(rows, base = 0) {
 }
 
 // src/migrate.ts
-if (sessionFormatCatalog.currentVersion !== SESSION_FORMAT_VERSION) {
+if (sessionFormatCatalog2.currentVersion !== SESSION_FORMAT_VERSION2) {
   throw new Error(
-    `session-persistence-rdb: format catalog v${sessionFormatCatalog.currentVersion} does not match Session v${SESSION_FORMAT_VERSION}`
+    `session-persistence-rdb: format catalog v${sessionFormatCatalog2.currentVersion} does not match Session v${SESSION_FORMAT_VERSION2}`
   );
 }
 function physicalHeader(row, inheritedEventCount) {
@@ -631,7 +690,7 @@ function storedHeader(row, location) {
   const headerValue = physicalHeader(row, row.fSeedLength ?? 0);
   let header;
   try {
-    const classification = sessionFormatCatalog.readHeader(headerValue);
+    const classification = sessionFormatCatalog2.readHeader(headerValue);
     if (classification.status === "unsupported") {
       throw new SessionFormatUnsupportedError(
         `${classification.reason} (session "${row.fSessionId}")${location === void 0 ? "" : `; raw store: ${location.path}`}`,
@@ -657,7 +716,39 @@ function storedHeader(row, location) {
   assertStoredId(row.fSessionId, meta);
   return meta;
 }
-function decodeStoredLog(row, rows, location) {
+function decodeStoredLog(row, rows, location, options) {
+  const id = row.fSessionId;
+  const catalog = catalogForSource(row.fVersion, options?.childFacts ?? []);
+  const { artifact, tornFrom, legacy } = decodeArtifact(catalog, row, rows, location, {
+    recovery: "strict",
+    validation: "transformed"
+  });
+  const meta = artifact.header;
+  assertVersion(meta, location);
+  assertStoredId(row.fSessionId, meta);
+  const events2 = validateStoredEvents(
+    meta,
+    artifact.events.map((event) => event),
+    location
+  );
+  return {
+    meta,
+    inheritedEventCount: SessionLogOffset(artifact.inheritedEventCount),
+    events: events2,
+    eventState: "detached",
+    ...tornFrom !== void 0 ? { tornFrom } : {},
+    legacy,
+    current: !legacy && row.fVersion === SESSION_FORMAT_VERSION2
+  };
+}
+function decodePrerequisiteLog(row, rows, location) {
+  const catalog = prerequisiteCatalogFor(row.fVersion);
+  return decodeArtifact(catalog, row, rows, location, {
+    recovery: "recoverable",
+    validation: "current"
+  }).artifact;
+}
+function decodeArtifact(catalog, row, rows, location, policy) {
   const id = row.fSessionId;
   let preserved;
   let tornFrom;
@@ -674,17 +765,14 @@ function decodeStoredLog(row, rows, location) {
   const headerValue = physicalHeader(row, inheritedEventCount);
   let restore;
   try {
-    restore = sessionFormatCatalog.createRestore(headerValue, {
-      recovery: "strict",
-      validation: "transformed"
-    });
+    restore = catalog.createRestore(headerValue, policy);
   } catch (error) {
     throw migrationFailure(error, id, location);
   }
   const remap = legacy ? buildSeqMap(rows) : void 0;
   const remapSeq = (seq) => remap?.get(seq) ?? seq;
   const dropPrunedChunkProvenance = legacy && !preserved.some((candidate) => candidate.fKind === "assistant/chunk");
-  const projectSurface = row.fVersion === SESSION_FORMAT_VERSION ? currentSurfaceOp : void 0;
+  const projectSurface = row.fVersion >= 3 ? currentSurfaceOp : void 0;
   for (const candidate of preserved) {
     let releasedRow;
     try {
@@ -707,23 +795,7 @@ function decodeStoredLog(row, rows, location) {
   } catch (error) {
     throw migrationFailure(error, id, location);
   }
-  const meta = artifact.header;
-  assertVersion(meta, location);
-  assertStoredId(row.fSessionId, meta);
-  const events2 = validateStoredEvents(
-    meta,
-    artifact.events.map((event) => event),
-    location
-  );
-  return {
-    meta,
-    inheritedEventCount: SessionLogOffset(artifact.inheritedEventCount),
-    events: events2,
-    eventState: "detached",
-    ...tornFrom !== void 0 ? { tornFrom } : {},
-    legacy,
-    current: !legacy && row.fVersion === SESSION_FORMAT_VERSION
-  };
+  return { artifact, ...tornFrom !== void 0 ? { tornFrom } : {}, legacy };
 }
 
 // src/handle.ts
@@ -1264,6 +1336,9 @@ var SqliteBackend = class {
   async getSession(id) {
     return this.db.select().from(tSessions).where(eq(tSessions.fSessionId, id)).get();
   }
+  async listChildSessions(parentId) {
+    return this.db.select().from(tSessions).where(and(eq(tSessions.fParentSession, parentId), eq(tSessions.fOrigin, "subagent"))).orderBy(tSessions.fCreatedAt, tSessions.fSessionId).all();
+  }
   async getEventRows(id) {
     return this.eventRows().where(eq(tSessionEvents.fSessionId, id)).orderBy(tSessionEvents.fSequence).all();
   }
@@ -1421,6 +1496,9 @@ var PostgresBackend = class {
   }
   async getSession(id) {
     return (await this.db.select().from(pgSessions).where(eq2(pgSessions.fSessionId, id)).execute())[0];
+  }
+  async listChildSessions(parentId) {
+    return this.db.select().from(pgSessions).where(and2(eq2(pgSessions.fParentSession, parentId), eq2(pgSessions.fOrigin, "subagent"))).orderBy(pgSessions.fCreatedAt, pgSessions.fSessionId).execute();
   }
   async getEventRows(id) {
     return this.eventRows(this.db).where(eq2(pgSessionEvents.fSessionId, id)).orderBy(pgSessionEvents.fSequence).execute();
@@ -1671,8 +1749,17 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
     }
     this.tracker.claimWrite(id);
     try {
-      const loaded = await this.loadStored(id, options?.signal);
+      const evidence = {};
+      let loaded = await this.loadStored(id, options?.signal, evidence);
       if (loaded === void 0) throw new SessionPersistenceNotFoundError2(id);
+      if (!loaded.current && evidence.token !== void 0) {
+        const current = childEvidenceToken(await this.backend.listChildSessions(id));
+        if (current !== evidence.token) {
+          options?.signal?.throwIfAborted();
+          const retry = await this.loadStored(id, options?.signal);
+          if (retry !== void 0) loaded = retry;
+        }
+      }
       const stored = loaded.current ? loaded : await this.rewriteStored(loaded);
       options?.signal?.throwIfAborted();
       return this.tracker.adopt(
@@ -1746,11 +1833,18 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
    * Read one stored session's row + ordered events and decode them into the
    * current format. Records the confirmed head (or confirmed absence) so a
    * later append can detect another PROCESS that advanced the log.
+   *
+   * A stored version below the current one additionally collects the session's
+   * historical child evidence (see {@link collectChildFacts}): the v3→v4 edge
+   * cannot run without it, and `[]` is the mandatory declaration for a session
+   * without children. An already-current log skips discovery entirely.
    * @param id - the stored session.
-   * @param signal - optional cancellation for the two reads and the decode.
+   * @param signal - optional cancellation for the reads and the decode.
+   * @param evidence - optional out-parameter receiving the identity/revision
+   *   token of the child rows the decode used, when evidence was collected.
    * @returns the migrated log, or `undefined` when no row exists.
    */
-  async loadStored(id, signal) {
+  async loadStored(id, signal, evidence) {
     signal?.throwIfAborted();
     await this.ready;
     signal?.throwIfAborted();
@@ -1761,10 +1855,60 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
     }
     const rows = await this.backend.getEventRows(id);
     signal?.throwIfAborted();
-    const log = decodeStoredLog(row, rows, this.locate());
+    const childFacts = await this.collectChildFacts(row, evidence, signal);
+    signal?.throwIfAborted();
+    const log = decodeStoredLog(row, rows, this.locate(), { childFacts });
     signal?.throwIfAborted();
     this.writeGuard.confirmHead(id, log.events.length - 1);
     return log;
+  }
+  /**
+   * Collect one stored parent's complete direct-child evidence for the v3→v4
+   * edge — the READ-side discovery this backend needs because the edge cannot
+   * run off the build-static catalog.
+   *
+   * Children self-register through their own `t_sessions` row
+   * (`f_parent_session` + `f_origin='subagent'`), so the query is one indexed
+   * lookup. Each child's own log is then decoded with the prerequisite-only
+   * catalog and its identity + descriptor evidence extracted. A child that
+   * cannot supply evidence degrades to an identity-only fact (the format's own
+   * sanctioned `mode: 'unknown'`) and is warned about ONCE; the parent still
+   * migrates. A child row that is gone (there is no delete API — operator
+   * action only) simply contributes nothing, so a pre-existing catalog entry
+   * survives and nothing is fabricated.
+   * @param row - the parent's stored row.
+   * @param evidence - optional out-parameter receiving the token of the child
+   *   rows read (used by a write open's re-check just before the rewrite).
+   * @param signal - optional cancellation between child reads.
+   * @returns the child facts, `[]` for a current-format row or a childless parent.
+   */
+  async collectChildFacts(row, evidence, signal) {
+    if (row.fVersion >= SESSION_FORMAT_VERSION3) return [];
+    const parentId = row.fSessionId;
+    const children = await this.backend.listChildSessions(parentId);
+    if (evidence !== void 0) evidence.token = childEvidenceToken(children);
+    const facts = [];
+    for (const child of children) {
+      signal?.throwIfAborted();
+      const rows = await this.backend.getEventRows(child.fSessionId);
+      signal?.throwIfAborted();
+      let fact;
+      let failure;
+      try {
+        fact = factFromArtifact(decodePrerequisiteLog(child, rows, this.locate()));
+      } catch (error) {
+        failure = error;
+      }
+      if (fact === void 0) {
+        this.ctx.logger.warn(
+          `session-persistence-rdb: child "${child.fSessionId}" of "${parentId}" cannot supply catalog evidence; migrating it as mode "unknown"` + (failure === void 0 ? "" : `: ${failure instanceof Error ? failure.message : String(failure)}`)
+        );
+        facts.push(unavailableFact(child.fSessionId, child.fCreatedAt));
+        continue;
+      }
+      facts.push(fact);
+    }
+    return facts;
   }
   /**
    * Rewrite a released-format session log into the current format in ONE
@@ -1886,6 +2030,9 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
     );
   }
 };
+function childEvidenceToken(children) {
+  return children.map((child) => `${child.fSessionId}:${child.fIncarnation}:${child.fRevision}`).join("|");
+}
 function createBackend(config) {
   if (config.type === "sqlite") {
     return new SqliteBackend({

@@ -471,8 +471,11 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
         const synthetic = resumed.snapshotEvents().find((e) => e.type === "tool/result");
         expect(synthetic?.type === "tool/result" && synthetic.data).toMatchObject({
           message: {
+            role: "tool",
+            toolCallId: ToolCallId("call-x"),
+            isError: true,
             source: { kind: "tool", callId: ToolCallId("call-x") },
-            content: [{ type: "tool-result", toolCallId: ToolCallId("call-x"), isError: true }],
+            content: [{ type: "text", text: expect.stringContaining("interrupted before") }],
           },
           error: { code: TOOL_NOT_STARTED },
         });
@@ -536,11 +539,11 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
         });
         if (
           synthetic?.type !== "tool/result" ||
-          synthetic.data.message.content[0].content[0]?.type !== "text"
+          synthetic.data.message.content[0]?.type !== "text"
         ) {
           throw new Error("expected a text tool result");
         }
-        expect(synthetic.data.message.content[0].content[0].text).toContain(
+        expect(synthetic.data.message.content[0].text).toContain(
           "retry only if the operation is read-only or idempotent",
         );
 
@@ -551,13 +554,25 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
           SessionLogOffset(0),
           "detached",
         );
+        // The model surface carries the synthetic outcome as a flat tool
+        // message (V4 message sources are producer-owned): the derived surface
+        // reports it as the error result for the recorded call.
         const derived = resumed
           .deriveMessages()
-          .find((message) => message.content.some((block) => block.type === "tool-result"));
-        expect(derived?.content[0]).toMatchObject({
-          type: "tool-result",
-          toolCallId: ToolCallId("call-risk"),
+          .find(
+            (message) =>
+              (message as unknown as { toolCallId?: string }).toolCallId ===
+              ToolCallId("call-risk"),
+          );
+        expect(derived).toMatchObject({
+          role: "tool",
           isError: true,
+          content: [
+            {
+              type: "text",
+              text: expect.stringContaining("retry only if the operation is read-only or idempotent"),
+            },
+          ],
         });
         await handle.close();
       } finally {
@@ -836,6 +851,8 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
         const handle = await persistence.create(m);
         const log = oneTurnLog();
         // A replacement op exercises the current spelling (`startSeq`/`endSeq`).
+        // V4 requires a producer-owned source kind (`plugin` was retired), so the
+        // checkpoint names the compaction that owns the replacement.
         const replacement: SessionEvent = {
           type: "user/message",
           seq: SessionSeq(6),
@@ -844,7 +861,11 @@ export function runPersistenceContract(name: string, make: () => Promise<Contrac
             id: MessageId("surface-replacement"),
             role: "user",
             content: [{ type: "text", text: "replaced" }],
-            source: { kind: "plugin", plugin: "compact" },
+            source: {
+              kind: "compact-checkpoint",
+              compactionId: "compact-1",
+              sourceCommandId: "command-1",
+            },
           }),
           surfaceOp: { op: "replace", startSeq: SessionSeq(2), endSeq: SessionSeq(2) },
           sourceEventSeqs: [SessionSeq(2)],

@@ -150,6 +150,14 @@ export interface Backend {
   open(): Promise<void>;
   /** Fetch a session's row, or undefined if absent. */
   getSession(id: SessionId): Promise<SessionRow | undefined>;
+  /**
+   * One parent's DIRECT subagent children, in deterministic discovery order
+   * (`f_created_at`, then `f_session_id`). Served by
+   * `ix_sessions_subagent_parent`; a fork child (same `f_parent_session`, a
+   * different origin) is excluded, exactly like the first-party JSONL
+   * backend's child scan.
+   */
+  listChildSessions(parentId: SessionId): Promise<SessionRow[]>;
   /** Joined event rows for one session, presented seq ascending. */
   getEventRows(id: SessionId): Promise<EventRow[]>;
   /** All materialized sessions' rows. */

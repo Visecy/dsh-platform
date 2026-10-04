@@ -52,6 +52,12 @@ export interface FabricatedLogSpec {
   createdAt?: number;
   cwd?: string;
   seedLength?: number | null;
+  /** Stored `f_parent_session` — a subagent child names its direct parent. */
+  parentSession?: string;
+  /** Stored `f_origin` — `'subagent'` for a real subagent child. */
+  origin?: string;
+  /** Stored `f_delegation_depth`. */
+  delegationDepth?: number;
   rows: readonly StoredRowSpec[];
 }
 

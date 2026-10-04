@@ -268,6 +268,15 @@ export class SqliteBackend implements Backend {
       | undefined;
   }
 
+  async listChildSessions(parentId: SessionId): Promise<SessionRow[]> {
+    return this.db
+      .select()
+      .from(tSessions)
+      .where(and(eq(tSessions.fParentSession, parentId), eq(tSessions.fOrigin, "subagent")))
+      .orderBy(tSessions.fCreatedAt, tSessions.fSessionId)
+      .all() as SessionRow[];
+  }
+
   async getEventRows(id: SessionId): Promise<EventRow[]> {
     return this.eventRows()
       .where(eq(tSessionEvents.fSessionId, id))

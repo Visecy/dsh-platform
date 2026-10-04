@@ -26,4 +26,9 @@ export const sessions: TableDef = {
     { name: "f_incarnation", type: "text", notNull: true },
     { name: "f_revision", type: "integer", notNull: true },
   ],
+  indexes: [{ name: "ix_sessions_subagent_parent", columns: ["f_parent_session", "f_origin"] }],
+  // The v3→v4 migration discovers a parent's historical children on READ (one
+  // indexed lookup per stored parent); every other access is served by
+  // `f_session_id`. The index is created idempotently on every open, so an
+  // existing v1 database gains it without a SCHEMA_VERSION bump.
 };

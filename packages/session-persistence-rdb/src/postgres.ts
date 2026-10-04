@@ -143,6 +143,15 @@ export class PostgresBackend<THKT extends PgQueryResultHKT = PgQueryResultHKT> i
     )[0] as SessionRow | undefined;
   }
 
+  async listChildSessions(parentId: SessionId): Promise<SessionRow[]> {
+    return this.db
+      .select()
+      .from(pgSessions)
+      .where(and(eq(pgSessions.fParentSession, parentId), eq(pgSessions.fOrigin, "subagent")))
+      .orderBy(pgSessions.fCreatedAt, pgSessions.fSessionId)
+      .execute() as unknown as Promise<SessionRow[]>;
+  }
+
   async getEventRows(id: SessionId): Promise<EventRow[]> {
     return this.eventRows(this.db)
       .where(eq(pgSessionEvents.fSessionId, id))

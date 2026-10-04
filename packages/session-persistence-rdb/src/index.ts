@@ -18,13 +18,28 @@
  * routed through the legacy upstream→presented remap pre-pass (see `log.ts`),
  * then through the same format migration as every other log.
  *
- * Format migration: every read serves the CURRENT session format (v3). Rows
- * are synthesized into released physical records and streamed through
- * `sessionFormatCatalog` (v0→v1→v2→v3); see `migrate.ts` for exactly which
- * shapes take which path. A released-format log is additionally REWRITTEN in
- * place by `open(id, 'write')` before write ownership is granted, because a
+ * Format migration: every read serves the CURRENT session format (v4). Rows
+ * are synthesized into released physical records and streamed through the
+ * catalog selected for the row's stored version (v0→v1→v2→v3→v4); see
+ * `migrate.ts` for exactly which shapes take which path.
+ *
+ * The v3→v4 edge is special: it cannot run off the build-static catalog,
+ * because it synthesizes the parent's `subagent/catalog` events from HISTORICAL
+ * CHILD EVIDENCE. The backend therefore discovers children on the READ side —
+ * `t_sessions` rows with `f_parent_session` = the parent and
+ * `f_origin = 'subagent'`, served by `ix_sessions_subagent_parent` — and decodes
+ * each child's own log with the prerequisite-only catalog (`catalog.ts`), so a
+ * child's own migration never runs as part of its parent's. A child whose log
+ * or descriptor cannot supply evidence degrades to the format's sanctioned
+ * `mode: 'unknown'` entry; a stored entry that CONTRADICTS live child evidence
+ * refuses the read loudly rather than being downgraded.
+ *
+ * A released-format log is additionally REWRITTEN in place by
+ * `open(id, 'write')` before write ownership is granted, because a
  * current-format append must not land next to released-format rows the current
- * decoder cannot read.
+ * decoder cannot read. The rewrite reuses the already-collected evidence (it
+ * never re-discovers children), after re-checking the child rows' identity and
+ * revision once so a concurrent child change cannot publish a stale entry.
  *
  * This class owns the handle seam's orchestration: the in-process single-writer
  * registry, per-session operation serialization (in the handles), the live
@@ -37,11 +52,13 @@
  * The database is chosen by configuration (discriminated union on `type`):
  * `{ type: "sqlite", path }` or `{ type: "postgres", connectionString }`.
  * All access goes through drizzle; the schema is declared once per dialect
- * (`schema.ts` / `postgres.ts`) and the hand-written DDL there is the only
+ * (`schema.ts` / `postgres.ts`) and the entity-driven DDL there is the only
  * migration story for the PHYSICAL table layout (no migration toolchain —
  * incompatible stores are rejected, never migrated). The layout is unchanged
- * from the rc.2 era, so existing databases open as-is; only the logical session
- * format inside the JSON columns needed migrating.
+ * from the rc.2 era; the v3→v4 work adds exactly ONE idempotent index
+ * (`ix_sessions_subagent_parent`, see `entities/sessions.ts`) and keeps
+ * `SCHEMA_VERSION` at 1, so old and new builds keep opening one database.
+ * Only the logical session format inside the JSON columns needed migrating.
  *
  * It has no independent per-session artifact, so its locator is a
  * refusal-diagnostics pointer at the one database this instance serves.
@@ -71,14 +88,21 @@ import {
   type SessionPersistenceStatOptions,
 } from "@deepseek-ai/dsh-session-persistence";
 import {
+  SESSION_FORMAT_VERSION,
   SessionLogOffset,
   type SessionEvent,
   type SessionHeader,
   type SessionId,
 } from "@deepseek-ai/dsh-session";
-import type { Backend, BackendTx, EventInsert } from "./backend.ts";
+import type { Backend, BackendTx, EventInsert, SessionRow } from "./backend.ts";
 import { WriteGuard } from "./write-guard.ts";
-import { decodeStoredLog, storedHeader, type StoredLog } from "./migrate.ts";
+import { unavailableFact, factFromArtifact, type ChildFact } from "./catalog.ts";
+import {
+  decodePrerequisiteLog,
+  decodeStoredLog,
+  storedHeader,
+  type StoredLog,
+} from "./migrate.ts";
 import { RdbSessionHandle, type RdbHandleStorage } from "./handle.ts";
 import { RdbTracker } from "./tracker.ts";
 import {
@@ -343,8 +367,22 @@ export class SessionPersistenceRdb extends SessionPersistence implements RdbHand
     }
     this.tracker.claimWrite(id);
     try {
-      const loaded = await this.loadStored(id, options?.signal);
+      // The v3→v4 rewrite publishes child evidence collected moments earlier.
+      // Re-read that evidence's identity/revision token just before the
+      // rewrite; a child row that changed while we were loading makes the
+      // collected facts stale, so re-read the log ONCE against the fresh set
+      // (the first-party `validateRelatedSources` analogue).
+      const evidence: { token?: string } = {};
+      let loaded = await this.loadStored(id, options?.signal, evidence);
       if (loaded === undefined) throw new SessionPersistenceNotFoundError(id);
+      if (!loaded.current && evidence.token !== undefined) {
+        const current = childEvidenceToken(await this.backend.listChildSessions(id));
+        if (current !== evidence.token) {
+          options?.signal?.throwIfAborted();
+          const retry = await this.loadStored(id, options?.signal);
+          if (retry !== undefined) loaded = retry;
+        }
+      }
       const stored = loaded.current ? loaded : await this.rewriteStored(loaded);
       options?.signal?.throwIfAborted();
       return this.tracker.adopt(
@@ -428,11 +466,22 @@ export class SessionPersistenceRdb extends SessionPersistence implements RdbHand
    * Read one stored session's row + ordered events and decode them into the
    * current format. Records the confirmed head (or confirmed absence) so a
    * later append can detect another PROCESS that advanced the log.
+   *
+   * A stored version below the current one additionally collects the session's
+   * historical child evidence (see {@link collectChildFacts}): the v3→v4 edge
+   * cannot run without it, and `[]` is the mandatory declaration for a session
+   * without children. An already-current log skips discovery entirely.
    * @param id - the stored session.
-   * @param signal - optional cancellation for the two reads and the decode.
+   * @param signal - optional cancellation for the reads and the decode.
+   * @param evidence - optional out-parameter receiving the identity/revision
+   *   token of the child rows the decode used, when evidence was collected.
    * @returns the migrated log, or `undefined` when no row exists.
    */
-  async loadStored(id: SessionId, signal?: AbortSignal): Promise<StoredLog | undefined> {
+  async loadStored(
+    id: SessionId,
+    signal?: AbortSignal,
+    evidence?: { token?: string },
+  ): Promise<StoredLog | undefined> {
     signal?.throwIfAborted();
     await this.ready;
     signal?.throwIfAborted();
@@ -445,12 +494,71 @@ export class SessionPersistenceRdb extends SessionPersistence implements RdbHand
     }
     const rows = await this.backend.getEventRows(id);
     signal?.throwIfAborted();
-    const log = decodeStoredLog(row, rows, this.locate());
+    const childFacts = await this.collectChildFacts(row, evidence, signal);
+    signal?.throwIfAborted();
+    const log = decodeStoredLog(row, rows, this.locate(), { childFacts });
     signal?.throwIfAborted();
     // The confirmed head is the last PRESERVED seq: a torn tail is removed by
     // the write path's repair, which re-confirms the head afterwards.
     this.writeGuard.confirmHead(id, log.events.length - 1);
     return log;
+  }
+
+  /**
+   * Collect one stored parent's complete direct-child evidence for the v3→v4
+   * edge — the READ-side discovery this backend needs because the edge cannot
+   * run off the build-static catalog.
+   *
+   * Children self-register through their own `t_sessions` row
+   * (`f_parent_session` + `f_origin='subagent'`), so the query is one indexed
+   * lookup. Each child's own log is then decoded with the prerequisite-only
+   * catalog and its identity + descriptor evidence extracted. A child that
+   * cannot supply evidence degrades to an identity-only fact (the format's own
+   * sanctioned `mode: 'unknown'`) and is warned about ONCE; the parent still
+   * migrates. A child row that is gone (there is no delete API — operator
+   * action only) simply contributes nothing, so a pre-existing catalog entry
+   * survives and nothing is fabricated.
+   * @param row - the parent's stored row.
+   * @param evidence - optional out-parameter receiving the token of the child
+   *   rows read (used by a write open's re-check just before the rewrite).
+   * @param signal - optional cancellation between child reads.
+   * @returns the child facts, `[]` for a current-format row or a childless parent.
+   */
+  private async collectChildFacts(
+    row: SessionRow,
+    evidence?: { token?: string },
+    signal?: AbortSignal,
+  ): Promise<readonly ChildFact[]> {
+    if (row.fVersion >= SESSION_FORMAT_VERSION) return [];
+    const parentId = row.fSessionId as SessionId;
+    const children = await this.backend.listChildSessions(parentId);
+    if (evidence !== undefined) evidence.token = childEvidenceToken(children);
+    const facts: ChildFact[] = [];
+    for (const child of children) {
+      signal?.throwIfAborted();
+      const rows = await this.backend.getEventRows(child.fSessionId as SessionId);
+      signal?.throwIfAborted();
+      let fact: ChildFact | undefined;
+      let failure: unknown;
+      try {
+        fact = factFromArtifact(decodePrerequisiteLog(child, rows, this.locate()));
+      } catch (error) {
+        failure = error;
+      }
+      if (fact === undefined) {
+        this.ctx.logger.warn(
+          `session-persistence-rdb: child "${child.fSessionId}" of "${parentId}" cannot supply ` +
+            `catalog evidence; migrating it as mode "unknown"` +
+            (failure === undefined
+              ? ""
+              : `: ${failure instanceof Error ? failure.message : String(failure)}`),
+        );
+        facts.push(unavailableFact(child.fSessionId, child.fCreatedAt));
+        continue;
+      }
+      facts.push(fact);
+    }
+    return facts;
   }
 
   /**
@@ -591,6 +699,21 @@ export class SessionPersistenceRdb extends SessionPersistence implements RdbHand
       `${this.storeIdentity}:incarnation:${row.fIncarnation}:revision:${row.fRevision}`,
     );
   }
+}
+
+/**
+ * Identity + revision token of one parent's direct subagent children, in the
+ * backend's deterministic discovery order. A write open compares two samples to
+ * detect a child row that changed while the parent's log was being decoded
+ * (the first-party `validateRelatedSources` analogue): a changed token means the
+ * collected catalog evidence is stale, so the log is re-read once.
+ * @param children - the parent's child rows.
+ * @returns the joined token.
+ */
+function childEvidenceToken(children: readonly SessionRow[]): string {
+  return children
+    .map((child) => `${child.fSessionId}:${child.fIncarnation}:${child.fRevision}`)
+    .join("|");
 }
 
 /**

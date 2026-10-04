@@ -10,7 +10,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Context } from "@deepseek-ai/cordis";
-import { SessionStore, SessionId, SessionSeq } from "@deepseek-ai/dsh-session";
+import {
+  SESSION_FORMAT_VERSION,
+  SessionStore,
+  SessionId,
+  SessionSeq,
+} from "@deepseek-ai/dsh-session";
 import type { SessionEvent } from "@deepseek-ai/dsh-session";
 import {
   SessionOwnershipLostError,
@@ -88,14 +93,14 @@ describe("multi-instance write authority", () => {
     // tracker can see the other, and no durable artifact exists yet.
     const h1 = await b1.ctx.sessionPersistence.create({
       id,
-      version: 3,
+      version: SESSION_FORMAT_VERSION,
       createdAt: 1,
       isSeeded: false,
       cwd: "/a",
     });
     const h2 = await b2.ctx.sessionPersistence.create({
       id,
-      version: 3,
+      version: SESSION_FORMAT_VERSION,
       createdAt: 1,
       isSeeded: false,
       cwd: "/b",
@@ -123,8 +128,8 @@ describe("multi-instance write authority", () => {
     const b1 = await mount(path);
     const b2 = await mount(path);
     const [h1, h2] = await Promise.all([
-      b1.ctx.sessionPersistence.create({ id: SessionId("i1"), version: 3, createdAt: 1, isSeeded: false }),
-      b2.ctx.sessionPersistence.create({ id: SessionId("i2"), version: 3, createdAt: 1, isSeeded: false }),
+      b1.ctx.sessionPersistence.create({ id: SessionId("i1"), version: SESSION_FORMAT_VERSION, createdAt: 1, isSeeded: false }),
+      b2.ctx.sessionPersistence.create({ id: SessionId("i2"), version: SESSION_FORMAT_VERSION, createdAt: 1, isSeeded: false }),
     ]);
     await Promise.all([h1.append(oneTurn(0)), h2.append(oneTurn(0))]);
     await Promise.all([h1.close(), h2.close()]);
@@ -147,13 +152,13 @@ describe("multi-instance write authority", () => {
     const id = SessionId("interleaved");
     const h1 = await b1.ctx.sessionPersistence.create({
       id,
-      version: 3,
+      version: SESSION_FORMAT_VERSION,
       createdAt: 1,
       isSeeded: false,
     });
     const h2 = await b2.ctx.sessionPersistence.create({
       id,
-      version: 3,
+      version: SESSION_FORMAT_VERSION,
       createdAt: 1,
       isSeeded: false,
     });
@@ -178,7 +183,7 @@ describe("multi-instance write authority", () => {
     const id = SessionId("auth");
     const h1 = await b1.ctx.sessionPersistence.create({
       id,
-      version: 3,
+      version: SESSION_FORMAT_VERSION,
       createdAt: 1,
       isSeeded: false,
     });
