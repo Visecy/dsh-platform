@@ -102,6 +102,8 @@ export class FsK8s extends FileSystem {
           throw new FsError(e.message, 'FS_PERMISSION_DENIED')
         case 'NOT_DIRECTORY':
           throw new FsError(e.message, 'FS_NOT_DIRECTORY')
+        case 'NOT_REGULAR_FILE':
+          throw new FsError(e.message, 'FS_NOT_REGULAR_FILE')
         default:
           throw new FsError(e.message, 'FS_IO_ERROR')
       }
@@ -150,9 +152,12 @@ export class FsK8s extends FileSystem {
     return c === p || c.startsWith(p.endsWith('/') ? p : p + '/')
   }
 
+  /**
+   * Target-shaped metadata: follows symbolic links (the seam's `stat`).
+   */
   override async stat(target: FsTarget, signal?: AbortSignal): Promise<FsInfo | undefined> {
     try {
-      const info = await this.client.info(this.podPathOf(target), await this.endpointFor(target))
+      const info = await this.client.info(this.podPathOf(target), await this.endpointFor(target), { follow: true })
       if (info === undefined) return undefined
       return {
         version: FsVersion(info.version ?? `v-${info.modifiedTime ?? 0}-${info.size ?? 0}`),
@@ -164,10 +169,25 @@ export class FsK8s extends FileSystem {
     }
   }
 
+  /**
+   * Path-shaped metadata: does NOT follow symbolic links, so a consumer can
+   * reject the path itself before any follow happens (the seam's `lstat`).
+   * Previously this delegated to `stat`, which made the two members
+   * indistinguishable and reported a symlink as `other`.
+   */
   override async lstat(path: string, opts?: { cwd?: string }, signal?: AbortSignal): Promise<FsPathInfo | undefined> {
     const target = await this.resolve(path, opts)
-    const info = await this.stat(target, signal)
-    return info
+    try {
+      const info = await this.client.info(this.podPathOf(target), await this.endpointFor(target))
+      if (info === undefined) return undefined
+      return {
+        version: FsVersion(info.version ?? `v-${info.modifiedTime ?? 0}-${info.size ?? 0}`),
+        type: info.type === 'directory' ? 'directory' : info.type === 'file' ? 'file' : info.type === 'symlink' ? 'symlink' : 'other',
+        size: info.size,
+      }
+    } catch (e) {
+      this.mapError(e)
+    }
   }
 
   override async readText(target: FsTarget, signal?: AbortSignal): Promise<string> {
@@ -189,14 +209,32 @@ export class FsK8s extends FileSystem {
     }
   }
 
+  /**
+   * DSH 0.1.2 member: whole-file raw read with an inclusive `maxBytes` cap.
+   * Implemented as a bounded window read of `maxBytes + 1` bytes so the cap is
+   * enforced on the BYTES ACTUALLY READ rather than on a prior `info()` size —
+   * a file that grows between the stat and the read now fails with
+   * `FS_TOO_LARGE` instead of being silently truncated.
+   */
   override async readBytes(target: FsTarget, signal: AbortSignal | undefined, maxBytes: number): Promise<Uint8Array> {
+    const bytes = await this.readByteRange(target, { offset: 0, length: maxBytes + 1 }, signal)
+    if (bytes.byteLength > maxBytes) {
+      throw new FsError(`file exceeds ${maxBytes} bytes`, 'FS_TOO_LARGE')
+    }
+    return bytes
+  }
+
+  /**
+   * DSH 0.1.5 member: one byte window of the regular file. The window is the
+   * bound, not the file — the daemon performs a positional read so a large file
+   * is never buffered whole, and an offset at or past EOF legitimately returns
+   * an empty result (no `info()` pre-check: it would both race and reject that
+   * legal empty window).
+   */
+  override async readByteRange(target: FsTarget, range: { offset: number; length: number }, signal?: AbortSignal): Promise<Uint8Array> {
     try {
       const endpoint = await this.endpointFor(target)
-      const info = await this.client.info(this.podPathOf(target), endpoint)
-      if (info !== undefined && info.size !== undefined && info.size > maxBytes) {
-        throw new FsError(`file exceeds ${maxBytes} bytes`, 'FS_TOO_LARGE')
-      }
-      return await this.client.read(this.podPathOf(target), { maxBytes }, endpoint)
+      return await this.client.read(this.podPathOf(target), { offset: range.offset, maxBytes: range.length }, endpoint)
     } catch (e) {
       this.mapError(e)
     }

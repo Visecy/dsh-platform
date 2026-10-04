@@ -54,7 +54,12 @@ export class DaemonSubprocessClient {
   async run(spec: {
     argv: readonly string[]
     cwd: string
-    env?: Record<string, string>
+    /**
+     * Explicit environment entries. `null` is the JSON-safe spelling of the
+     * seam's `undefined` tombstone: JSON.stringify drops `undefined` values, so
+     * a deletion request would never reach the daemon.
+     */
+    env?: Record<string, string | null>
     stdin?: Uint8Array
     timeoutMs?: number
   }): Promise<DaemonCommandHandle> {
@@ -81,6 +86,15 @@ export class DaemonSubprocessClient {
   async status(cmdId: string): Promise<DaemonCommandStatus> {
     const data = await this.get(`/commands/${cmdId}/status`)
     return data.status as DaemonCommandStatus
+  }
+
+  /**
+   * Managed-range quiescence probe: whether any live process still belongs to
+   * the command's process group (backgrounded grandchildren included).
+   */
+  async rangeStatus(cmdId: string): Promise<{ alive: boolean; pgid?: number }> {
+    const data = await this.get(`/commands/${cmdId}/range-status`)
+    return data.range as { alive: boolean; pgid?: number }
   }
 
   async readOutput(cmdId: string, stream: 'stdout' | 'stderr', from: number): Promise<{ frames: string; nextOffset: number }> {

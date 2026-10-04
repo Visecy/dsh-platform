@@ -6,9 +6,11 @@
 # the headless web runtime — no Chromium/desktop.
 #
 # Layers:
-#   1. privileged-method unlock patch (settings/credentials RPCs are pinned to
-#      loopback by the official client-connection; our OIDC gate authenticates
-#      every /api request, so reusing trustedHosts is safe — research §6.3c)
+#   1. browser trust pins relaxed by scripts/patch-dsh.mjs — the official
+#      client-connection fences every /api request behind a Host/Origin check
+#      plus a per-process launch-token cookie; our OIDC gate authenticates
+#      every request first, so the cookie layer is bypassed while the
+#      Host/Origin fence stays active as defense in depth
 #   2. @visecy platform plugins pre-installed into the web + headless profiles
 #   3. dsh-web-auth (registerGate webserver fork) pre-installed
 #
@@ -22,7 +24,7 @@
 ARG NODE_IMAGE=node:24-bookworm-slim
 FROM ${NODE_IMAGE} AS installer
 
-ARG DSH_VERSION=0.1.2-rc.1
+ARG DSH_VERSION=0.1.5-rc.1
 ARG PNPM_VERSION=10.15.1
 
 RUN apt-get update \
@@ -41,7 +43,7 @@ RUN apt-get update \
 
 FROM ${NODE_IMAGE}
 
-ARG DSH_VERSION=0.1.2-rc.1
+ARG DSH_VERSION=0.1.5-rc.1
 ARG PNPM_VERSION=10.15.1
 ARG PLUGIN_VERSION
 
@@ -66,6 +68,8 @@ USER root
 # mismatch — no fragile sed). See scripts/patch-dsh.mjs.
 COPY scripts/patch-dsh.mjs /usr/local/lib/node_modules/patch-dsh.mjs
 COPY scripts/enable-workspace-ui.mjs /usr/local/lib/node_modules/enable-workspace-ui.mjs
+COPY scripts/check-plugin-imports.mjs /usr/local/lib/node_modules/check-plugin-imports.mjs
+COPY scripts/check-webserver-fork.mjs /usr/local/lib/node_modules/check-webserver-fork.mjs
 RUN node /usr/local/lib/node_modules/patch-dsh.mjs \
       /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai
 
@@ -81,7 +85,23 @@ COPY packages/storage-db /opt/dsh-home/plugins/storage-db
 COPY packages/platform-domain /opt/dsh-home/plugins/platform-domain
 COPY vendor/dsh-web-auth /opt/dsh-home/plugins/dsh-web-auth
 
+# The webserver fork is a COPY of the official plugin plus the request-gate
+# extension (upstream has no middleware hook). Fail the build when a DSH bump
+# changes the official file under it, instead of silently shipping stale code.
+RUN node /usr/local/lib/node_modules/check-webserver-fork.mjs \
+      /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai
+
 USER node
+# The profile installs with `autoInstallPeers: false` (dsh's own profile
+# template), so every DSH package that a platform plugin imports AT RUNTIME
+# must be listed here — declaring it as a peerDependency is not enough, and
+# `--dump-config` does NOT catch a missing one (it composes config without
+# importing plugin bodies). The list below is the empirically verified
+# transitive runtime closure of the platform plugins: dsh-session/dsh-llm/
+# dsh-scope/dsh-http-proxy are peers of the official dsh-fs, dsh-subprocess and
+# dsh-session-persistence packages, and dsh-session-format-catalog is the
+# 0.1.5 legacy-log migration catalog used by session-persistence-rdb.
+# `scripts/harness-profile.sh` re-runs this closure check after installing.
 RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
   && dsh --profile headless --dump-config > /dev/null 2>&1 || true \
   && pnpm --dir /opt/dsh-home/profiles/web --store-dir /tmp/pnpm-store add -w \
@@ -97,6 +117,11 @@ RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
        @deepseek-ai/dsh-storage@${DSH_VERSION} \
        @deepseek-ai/dsh-storage-domain@${DSH_VERSION} \
        @deepseek-ai/dsh-session-persistence@${DSH_VERSION} \
+       @deepseek-ai/dsh-session@${DSH_VERSION} \
+       @deepseek-ai/dsh-llm@${DSH_VERSION} \
+       @deepseek-ai/dsh-scope@${DSH_VERSION} \
+       @deepseek-ai/dsh-http-proxy@${DSH_VERSION} \
+       @deepseek-ai/dsh-session-format-catalog@${DSH_VERSION} \
        @kubernetes/client-node \
   && pnpm --dir /opt/dsh-home/profiles/headless --store-dir /tmp/pnpm-store add -w \
        @visecy/dsh-fs-k8s@${PLUGIN_VERSION:-latest} \
@@ -108,7 +133,14 @@ RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
        @deepseek-ai/dsh-storage@${DSH_VERSION} \
        @deepseek-ai/dsh-storage-domain@${DSH_VERSION} \
        @deepseek-ai/dsh-session-persistence@${DSH_VERSION} \
-       @kubernetes/client-node
+       @deepseek-ai/dsh-session@${DSH_VERSION} \
+       @deepseek-ai/dsh-llm@${DSH_VERSION} \
+       @deepseek-ai/dsh-scope@${DSH_VERSION} \
+       @deepseek-ai/dsh-http-proxy@${DSH_VERSION} \
+       @deepseek-ai/dsh-session-format-catalog@${DSH_VERSION} \
+       @kubernetes/client-node \
+  && node /usr/local/lib/node_modules/check-plugin-imports.mjs /opt/dsh-home/profiles/web \
+  && node /usr/local/lib/node_modules/check-plugin-imports.mjs /opt/dsh-home/profiles/headless
 
 RUN node /usr/local/lib/node_modules/enable-workspace-ui.mjs /opt/dsh-home/profiles/web 2>/dev/null || true
 COPY docker/profiles/web.cordis.patch.yml /opt/dsh-home/profiles/web/cordis.patch.yml

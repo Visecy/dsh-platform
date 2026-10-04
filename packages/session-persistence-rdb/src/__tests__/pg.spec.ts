@@ -9,8 +9,10 @@
  *
  * The PostgreSQL backend commits each append in ONE transaction (no SQLite
  * `BEGIN IMMEDIATE` / busy-timeout torn-tail window), so it structurally cannot
- * produce a torn tail — the coordinator contract's torn-tail case therefore
- * asserts `corruptTail` is absent rather than injecting one.
+ * produce a torn tail, and the raw-store fabrication hooks the SQLite spec uses
+ * for released-format logs are SQLite-specific: PG coverage is the
+ * backend-agnostic handle contract, which is where the shared seam semantics
+ * live.
  * @module @visecy/dsh-session-persistence-rdb/tests/pg
  */
 
@@ -22,7 +24,6 @@ import { SessionStore } from "@deepseek-ai/dsh-session";
 import { EmptySettings } from "./testing/helpers.ts";
 import SessionPersistenceRdb from "../index.ts";
 import { runPersistenceContract } from "./testing/contract.ts";
-import { runCoordinatorContract, type CoordinatorFixture } from "./testing/coordinator-contract.ts";
 
 /** Admin connection string — the `postgres` database, used to create/drop test databases. */
 const ADMIN_URL =
@@ -65,23 +66,6 @@ describe.skipIf(!process.env.TEST_PG_URL)("PostgreSQL backend", () => {
       persistence: ctx.sessionPersistence,
       dispose: async () => {
         await fiber.dispose();
-        await drop();
-      },
-    };
-  });
-
-  runCoordinatorContract("postgres", async (): Promise<CoordinatorFixture> => {
-    const { connectionString, drop } = await createTestDatabase();
-    return {
-      mount: async (ctx: Context) => {
-        if (ctx.reflect.get("settings") === undefined) {
-          await ctx.plugin(EmptySettings);
-        }
-        return await ctx.plugin(SessionPersistenceRdb, { type: "postgres", connectionString });
-      },
-      // No corruptTail: PG appends are single-transaction (atomic commit), so a
-      // never-committed tail cannot exist — the torn-tail case asserts this.
-      cleanup: async () => {
         await drop();
       },
     };

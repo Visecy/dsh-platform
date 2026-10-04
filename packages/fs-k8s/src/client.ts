@@ -41,8 +41,8 @@ export class DaemonFilesClient {
     return data.entries as Array<{ name: string; type: string; path: string; size?: number }>
   }
 
-  async info(path: string, endpoint?: string): Promise<{ path: string; name: string; type: string; size?: number; mode?: number; modifiedTime?: number; version?: string } | undefined> {
-    const data = await this.post('/files/info', { path }, endpoint)
+  async info(path: string, endpoint?: string, opts?: { follow?: boolean }): Promise<{ path: string; name: string; type: string; size?: number; mode?: number; modifiedTime?: number; version?: string } | undefined> {
+    const data = await this.post('/files/info', { path, follow: opts?.follow === true }, endpoint)
     return data.info as { path: string; name: string; type: string; size?: number; mode?: number; modifiedTime?: number; version?: string } | undefined
   }
 

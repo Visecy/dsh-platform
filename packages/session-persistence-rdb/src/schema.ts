@@ -13,14 +13,14 @@
  * them (STRICT + version/identity pragmas live with the SQLite backend in
  * `sqlite.ts`). There is no migration toolchain and no hand-written DDL.
  *
- * Since 0.1.2 the backend persists EVERY event the coordinator delivers —
- * including `assistant/chunk` deltas and events the writer marked
+ * Since 0.1.2 the backend persists EVERY event the writer produces — including
+ * `assistant/attempt`/`assistant/message` stream settlements and events marked
  * `ignorable` — with its exact seq (`f_sequence` == `f_original_seq`), so no
  * write-time filtering or renumbering exists anymore. Rows written by the
  * rc.2-era delta-filtering backend remain readable (see `log.ts` for the
- * legacy remap path). An event whose envelope marked `ignorable: true` keeps
- * that marker in the physical row via `f_encoding`, so reads reproduce it for
- * the coordinator's unknown-type tolerance.
+ * legacy remap pre-pass and `migrate.ts` for the format migration). An event
+ * whose envelope marked `ignorable: true` keeps that marker in the physical row
+ * via `f_encoding`, so reads reproduce it.
  *
  * @module @visecy/dsh-session-persistence-rdb/schema
  */
@@ -49,9 +49,10 @@ export const EVENT_ENCODING = "json";
  * `t_events.f_encoding` for a row whose event envelope marked
  * `ignorable: true`. The marker is part of the event envelope (the JSONL
  * backend writes it on the record line), so the RDB schema keeps it in the
- * encoding column — `f_data` stays the bare payload. `rowToEvent` restores
- * the marker on read; without it, a persisted unknown-type event would read
- * back as REQUIRED and the coordinator would refuse the whole log.
+ * encoding column — `f_data` stays the bare payload. The read path restores the
+ * marker on the released row it synthesizes; without it, a persisted
+ * unknown-type event would read back as REQUIRED and the format codecs would
+ * refuse the whole log.
  */
 export const IGNORABLE_EVENT_ENCODING = "json-ignorable";
 
@@ -117,8 +118,8 @@ export const DEFAULT_BUSY_TIMEOUT_MS = 5000;
  * upstream type; `f_role`/`f_name`/`f_action_id` are the playpen classification
  * columns. Unknown (plugin-merged) event types keep the playpen defaults so a
  * future extension can classify them without a schema change.
- * @param event - the event to classify (any type; since 0.1.2 nothing is
- *   filtered at write time, so `assistant/chunk` deltas are classified too).
+ * @param event - the event to classify (any type; nothing is filtered at write
+ *   time, so attempt settlements are classified too).
  * @returns the role, name, and action-id column values.
  */
 export function eventDimensions(event: SessionEvent): {
@@ -126,6 +127,10 @@ export function eventDimensions(event: SessionEvent): {
   name: string;
   actionId: string;
 } {
+  // `todo/write` is a plugin-merged event type in 0.1.5 (it is no longer part of
+  // the core `SessionEventMap`), so it cannot appear as a typed switch case;
+  // the playpen dimension is still assigned by name.
+  if ((event.type as string) === "todo/write") return { role: "state", name: "todos", actionId: "" };
   switch (event.type) {
     case "turn/start":
     case "turn/end":
@@ -137,19 +142,20 @@ export function eventDimensions(event: SessionEvent): {
     case "request/header":
     case "request/context":
       return { role: "user", name: "", actionId: "" };
+    case "system/message":
+      return { role: "system", name: "", actionId: "" };
     case "assistant/message":
-    case "assistant/chunk":
+    case "assistant/attempt":
       return { role: "model", name: "", actionId: "" };
     case "tool/call":
       return { role: "function", name: event.data.name, actionId: event.data.callId };
     case "tool/result": {
-      // Optional chain: the coordinator migrates pre-identity legacy events
-      // only on READ; an append may still carry the old shape without `message`.
+      // Current-format events always carry the wrapped message; the defensive
+      // read keeps classification from throwing on a malformed batch (which the
+      // storage contract refuses on read regardless).
       const block = event.data.message?.content[0];
       return { role: "function", name: "", actionId: block?.toolCallId ?? "" };
     }
-    case "todo/write":
-      return { role: "state", name: "todos", actionId: "" };
     default:
       return { role: "", name: "", actionId: "" };
   }

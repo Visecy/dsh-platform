@@ -120,8 +120,12 @@ export async function readGroupExit(dir: string): Promise<GroupExit | undefined>
 /**
  * Terminate a group: SIGTERM to -pgid, wait graceMs, SIGKILL if still alive.
  * Returns true when the group is quiescent afterwards.
+ *
+ * A non-positive `pgid` is a record whose launch has not published its group
+ * yet; signalling it would resolve to `kill(-pgid)` → PID 1, so it is a no-op.
  */
 export async function terminateGroup(pgid: number, graceMs: number): Promise<boolean> {
+  if (!Number.isInteger(pgid) || pgid <= 0) return true
   try {
     process.kill(-pgid, 'SIGTERM')
   } catch {
@@ -148,27 +152,23 @@ function whenDrained(stream: NodeJS.WritableStream): Promise<void> {
   return new Promise((res) => w.once?.('finish', res))
 }
 
-/** Probe whether any live process belongs to the group (zombies count as gone). */
+/**
+ * Probe whether any live process still belongs to the group.
+ *
+ * Uses the `kill(-pgid, 0)` syscall rather than parsing `ps`: the process-group
+ * column is not dependable across container/namespace configurations (this
+ * environment reported pgid 0 for every process, which made the previous
+ * `ps`-based probe answer "gone" for live groups and silently skip the SIGKILL
+ * escalation in {@link terminateGroup}). The syscall asks the kernel directly
+ * and needs no external binary.
+ */
 export function groupAlive(pgid: number): boolean {
+  if (!Number.isInteger(pgid) || pgid <= 0) return false
   try {
-    const out = spawnSyncProbe(pgid)
-    return out
-  } catch {
-    return false
-  }
-}
-
-function spawnSyncProbe(pgid: number): boolean {
-  // ps -eo pgid=,stat= | awk: any non-zombie row for the group
-  const { execFileSync } = require('node:child_process') as typeof import('node:child_process')
-  try {
-    const out = execFileSync('ps', ['-eo', 'pgid=,stat='], { encoding: 'utf8' })
-    for (const line of out.split('\n')) {
-      const [g, stat] = line.trim().split(/\s+/)
-      if (g === String(pgid) && stat !== undefined && !stat.startsWith('Z')) return true
-    }
-    return false
-  } catch {
-    return false
+    process.kill(-pgid, 0)
+    return true
+  } catch (error) {
+    // EPERM means the group EXISTS but is not ours to signal.
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
   }
 }

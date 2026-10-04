@@ -1,6 +1,7 @@
 /**
- * 多 session 并发复现测试（临时）：验证多个 session 同时写入时是否损坏。
- * 全部走冷路径（dispose 后重新 mount load），真正验证 DB 中的稠密 log。
+ * Concurrency across many sessions and many instances: every case writes
+ * through the handle seam, disposes, and re-reads from a cold mount so the
+ * assertions cover the stored database, not in-memory state.
  */
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,7 +9,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Context } from "@deepseek-ai/cordis";
 import { SessionStore, SessionId } from "@deepseek-ai/dsh-session";
-import type { Session } from "@deepseek-ai/dsh-session";
+import type { Session, SessionEvent } from "@deepseek-ai/dsh-session";
+import type { SessionHandle, SessionPersistence } from "@deepseek-ai/dsh-session-persistence";
 import { createMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 import { EmptySettings } from "./testing/helpers.ts";
 import SessionPersistenceRdb from "../index.ts";
@@ -32,29 +34,58 @@ async function mount(path: string): Promise<{ ctx: Context; dispose: () => Promi
   return { ctx, dispose: () => fiber.dispose() };
 }
 
-/** 一个完整 turn（含 delta 流），返回后该 session 的 turn 是关闭的。 */
-function appendTurn(s: Session, round: number): void {
-  void round;
-  s.append("turn/start", { turn: 1 });
+/** Create the session's write handle and store its constructor seed, if any. */
+async function storeSession(
+  persistence: SessionPersistence,
+  session: Session,
+): Promise<SessionHandle> {
+  const handle = await persistence.create(session.header, {
+    inheritedEventCount: session.inheritedEventCount,
+  });
+  const seed = session.snapshotEvents();
+  if (seed.length > 0) await handle.append(seed);
+  return handle;
+}
+
+/** Read one stored log through a fresh read handle. */
+async function readLog(
+  persistence: SessionPersistence,
+  id: SessionId,
+): Promise<readonly SessionEvent[]> {
+  const handle = await persistence.open(id, "read");
+  try {
+    return (await handle.read(0)).events;
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * One complete current-format turn: stream settlement events are persisted
+ * verbatim, so the log carries the attempt AND the settled message.
+ */
+function appendTurn(s: Session, turn: number): void {
+  s.append("turn/start", { turn });
+  s.append("step/start", { turn, step: 1 });
   s.append(
     "user/message",
     createUserMessage({
-      content: [{ type: "text", text: "hi" }],
+      content: [{ type: "text", text: `hi ${turn}` }],
       source: { kind: "user" },
     }),
     { surfaceOp: "append" },
   );
-  s.append("step/start", { turn: 1, step: 1 });
-  s.append("assistant/chunk", {
-    turn: 1,
+  s.append("assistant/attempt", {
+    turn,
     step: 1,
-    chunk: { type: "text-delta", index: 0, text: "x" },
+    stream: [{ type: "text-chunks", time0: 1, index: 0, dt: [], texts: ["x"] }],
   });
   s.append(
     "assistant/message",
     {
-      turn: 1,
+      turn,
       step: 1,
+      stream: [],
       message: createMessage({
         role: "assistant",
         content: [],
@@ -63,31 +94,38 @@ function appendTurn(s: Session, round: number): void {
     },
     { surfaceOp: "append" },
   );
-  s.append("step/end", { turn: 1, step: 1 });
-  s.append("turn/end", { turn: 1, reason: { kind: "completed" } });
+  s.append("step/end", { turn, step: 1 });
+  s.append("turn/end", { turn, reason: { kind: "completed" } });
 }
 
-describe("multi-session repro (cold-path verification)", () => {
-  it("many live sessions append concurrently, then each reloads dense-intact", async () => {
+const TURN_EVENTS = 7;
+
+describe("multi-session concurrency (cold-path verification)", () => {
+  it("many live sessions append concurrently, then each reloads intact", async () => {
     const path = await freshDbPath();
     const b = await mount(path);
     const N = 12;
     const sessions: Session[] = [];
-    for (let i = 0; i < N; i++) sessions.push(b.ctx.sessions.create(SessionId(`live-${i}`)));
-    // 两轮并发写（每个 session 两轮 turn），flush 交错进行。
+    for (let i = 0; i < N; i++) {
+      const session = b.ctx.sessions.create(SessionId(`live-${i}`));
+      await storeSession(b.ctx.sessionPersistence, session);
+      sessions.push(session);
+    }
+    // Two rounds, flushed across all sessions at once.
     for (let round = 0; round < 2; round++) {
-      for (const s of sessions) appendTurn(s, round);
+      for (const s of sessions) appendTurn(s, round + 1);
       await Promise.all(sessions.map((s) => b.ctx.sessions.flush(s)));
     }
     await b.dispose();
 
     const b2 = await mount(path);
     for (let i = 0; i < N; i++) {
-      const loaded = await b2.ctx.sessionPersistence.load(SessionId(`live-${i}`));
-      const seqs = loaded.events.map((e) => e.seq);
+      const events = await readLog(b2.ctx.sessionPersistence, SessionId(`live-${i}`));
+      const seqs = events.map((e) => e.seq);
       expect(seqs).toEqual(Array.from({ length: seqs.length }, (_, k) => k));
-      expect(seqs.length).toBe(14); // 每轮 7 个事件 × 2（0.1.2：chunk 也落库）
-      expect(loaded.events.filter((e) => e.type === "assistant/chunk")).toHaveLength(2);
+      expect(seqs.length).toBe(TURN_EVENTS * 2);
+      // The attempt settlements are persisted verbatim — nothing was filtered.
+      expect(events.filter((e) => e.type === "assistant/attempt")).toHaveLength(2);
     }
     await b2.dispose();
   });
@@ -98,87 +136,98 @@ describe("multi-session repro (cold-path verification)", () => {
     const b2 = await mount(path);
     const s1 = b1.ctx.sessions.create(SessionId("inst-1"));
     const s2 = b2.ctx.sessions.create(SessionId("inst-2"));
-    appendTurn(s1, 0);
-    appendTurn(s2, 0);
-    // 两个连接并发写两个不同 session。
+    await Promise.all([
+      storeSession(b1.ctx.sessionPersistence, s1),
+      storeSession(b2.ctx.sessionPersistence, s2),
+    ]);
+    appendTurn(s1, 1);
+    appendTurn(s2, 1);
     await Promise.all([b1.ctx.sessions.flush(s1), b2.ctx.sessions.flush(s2)]);
     await Promise.all([b1.dispose(), b2.dispose()]);
 
     const b3 = await mount(path);
-    const l1 = await b3.ctx.sessionPersistence.load(SessionId("inst-1"));
-    const l2 = await b3.ctx.sessionPersistence.load(SessionId("inst-2"));
-    expect(l1.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6]);
-    expect(l2.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    for (const id of ["inst-1", "inst-2"]) {
+      const events = await readLog(b3.ctx.sessionPersistence, SessionId(id));
+      expect(events.map((e) => e.seq)).toEqual(
+        Array.from({ length: TURN_EVENTS }, (_, k) => k),
+      );
+    }
     await b3.dispose();
   });
 
-  it("concurrent appends to MANY sessions on ONE live store never interleave parent chains", async () => {
+  it("concurrent appends to MANY sessions never interleave parent chains", async () => {
     const path = await freshDbPath();
     const b = await mount(path);
     const N = 20;
     const sessions: Session[] = [];
-    for (let i = 0; i < N; i++) sessions.push(b.ctx.sessions.create(SessionId(`p-${i}`)));
-    // 完全并发：不按轮次，直接一次性 append 全部再 flush。
-    for (const s of sessions) appendTurn(s, 0);
+    for (let i = 0; i < N; i++) {
+      const session = b.ctx.sessions.create(SessionId(`p-${i}`));
+      await storeSession(b.ctx.sessionPersistence, session);
+      sessions.push(session);
+    }
+    for (const s of sessions) appendTurn(s, 1);
     await Promise.all(sessions.map((s) => b.ctx.sessions.flush(s)));
     await b.dispose();
 
     const b2 = await mount(path);
     for (let i = 0; i < N; i++) {
-      const loaded = await b2.ctx.sessionPersistence.load(SessionId(`p-${i}`));
-      expect(loaded.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+      const events = await readLog(b2.ctx.sessionPersistence, SessionId(`p-${i}`));
+      expect(events.map((e) => e.seq)).toEqual(
+        Array.from({ length: TURN_EVENTS }, (_, k) => k),
+      );
     }
     await b2.dispose();
   });
 
-  it("append + load racing on one id stays consistent (cold path)", async () => {
+  it("append + read racing on one id stays consistent", async () => {
     const path = await freshDbPath();
     const b = await mount(path);
     const s = b.ctx.sessions.create(SessionId("race"));
-    // 连续追加 turn 片段并频繁 load（live 路径不报错即可）。
-    for (let k = 0; k < 4; k++) {
-      appendTurn(s, k);
+    const handle = await storeSession(b.ctx.sessionPersistence, s);
+    for (let round = 1; round <= 4; round++) {
+      appendTurn(s, round);
       await b.ctx.sessions.flush(s);
-      await b.ctx.sessionPersistence.load(SessionId("race"));
+      // The writer's own reads are monotonic while the log keeps growing.
+      expect((await handle.read(0)).events.length).toBe(TURN_EVENTS * round);
     }
     await b.dispose();
 
     const b2 = await mount(path);
-    const final = await b2.ctx.sessionPersistence.load(SessionId("race"));
-    expect(final.events.map((e) => e.seq)).toEqual(
-      Array.from({ length: final.events.length }, (_, k) => k),
+    const events = await readLog(b2.ctx.sessionPersistence, SessionId("race"));
+    expect(events.map((e) => e.seq)).toEqual(
+      Array.from({ length: TURN_EVENTS * 4 }, (_, k) => k),
     );
     await b2.dispose();
   });
 
-  it("subagent-style: MANY parallel fork children (seeded, delta-heavy) persist dense-intact", async () => {
+  it("subagent-style: parallel fork children persist their inherited prefix and own turn", async () => {
     const path = await freshDbPath();
     const b = await mount(path);
-    // parent 先跑一个完整 turn（含 delta），作为 fork 的 seed 来源。
     const parent = b.ctx.sessions.create(SessionId("parent"));
-    appendTurn(parent, 0);
+    await storeSession(b.ctx.sessionPersistence, parent);
+    appendTurn(parent, 1);
     await b.ctx.sessions.flush(parent);
 
-    // 并行 fork 8 个 child：每个 child 继承 parent 的完整前缀（上游 seq 含 delta）。
     const N = 8;
     const children = Array.from({ length: N }, (_, i) =>
       b.ctx.sessions.fork(parent, undefined, SessionId(`child-${i}`)),
     );
-    // 并行 append：每个 child 再跑一轮含 delta 的 turn，不逐个 flush——模拟
-    // subagent 并行唤起时多个 session 同时经事件驱动写路径持久化。
-    for (const c of children) appendTurn(c, 0);
+    for (const child of children) await storeSession(b.ctx.sessionPersistence, child);
+    for (const child of children) appendTurn(child, 1);
     await Promise.all(children.map((c) => b.ctx.sessions.flush(c)));
     await b.dispose();
 
     const b2 = await mount(path);
     for (let i = 0; i < N; i++) {
-      const loaded = await b2.ctx.sessionPersistence.load(SessionId(`child-${i}`));
-      const seqs = loaded.events.map((e) => e.seq);
-      // child log = parent 前缀（7，chunk 全量继承）+ session/end-seed（1）+
-      // 自身 turn（7）= 15：seq 连续、无 chunk 丢失、无跨 session 拼接。
+      const handle = await b2.ctx.sessionPersistence.open(SessionId(`child-${i}`), "read");
+      const events = (await handle.read(0)).events;
+      await handle.close();
+      const seqs = events.map((e) => e.seq);
+      // parent prefix (7) + the inherited end-seed marker (1) + own turn (7).
       expect(seqs).toEqual(Array.from({ length: seqs.length }, (_, k) => k));
-      expect(seqs.length).toBe(15);
-      expect(loaded.events.filter((e) => e.type === "assistant/chunk")).toHaveLength(2);
+      expect(seqs.length).toBe(TURN_EVENTS + 1 + TURN_EVENTS);
+      expect(events.filter((e) => e.type === "assistant/attempt")).toHaveLength(2);
+      expect(handle.header.isSeeded).toBe(true);
     }
     await b2.dispose();
   });
@@ -191,28 +240,26 @@ describe("multi-session repro (cold-path verification)", () => {
     const children = Array.from({ length: N }, (_, i) =>
       b.ctx.sessions.create(SessionId(`sib-${i}`)),
     );
-    // parent 与所有 child 同时并发写（交错事件循环）。
-    appendTurn(parent, 0);
-    for (const c of children) appendTurn(c, 0);
-    await Promise.all([
-      b.ctx.sessions.flush(parent),
-      ...children.map((c) => b.ctx.sessions.flush(c)),
-    ]);
+    await storeSession(b.ctx.sessionPersistence, parent);
+    for (const c of children) await storeSession(b.ctx.sessionPersistence, c);
+    // parent and children write interleaved.
     appendTurn(parent, 1);
     for (const c of children) appendTurn(c, 1);
-    await Promise.all([
-      b.ctx.sessions.flush(parent),
-      ...children.map((c) => b.ctx.sessions.flush(c)),
-    ]);
+    await Promise.all([b.ctx.sessions.flush(parent), ...children.map((c) => b.ctx.sessions.flush(c))]);
+    appendTurn(parent, 2);
+    for (const c of children) appendTurn(c, 2);
+    await Promise.all([b.ctx.sessions.flush(parent), ...children.map((c) => b.ctx.sessions.flush(c))]);
     await b.dispose();
 
     const b2 = await mount(path);
-    const expected = Array.from({ length: 14 }, (_, k) => k); // 每轮 7 个事件 × 2 轮
-    const parentLoaded = await b2.ctx.sessionPersistence.load(SessionId("parent-2"));
-    expect(parentLoaded.events.map((e) => e.seq)).toEqual(expected);
+    const expected = Array.from({ length: TURN_EVENTS * 2 }, (_, k) => k);
+    expect((await readLog(b2.ctx.sessionPersistence, SessionId("parent-2"))).map((e) => e.seq)).toEqual(
+      expected,
+    );
     for (let i = 0; i < N; i++) {
-      const loaded = await b2.ctx.sessionPersistence.load(SessionId(`sib-${i}`));
-      expect(loaded.events.map((e) => e.seq)).toEqual(expected);
+      expect(
+        (await readLog(b2.ctx.sessionPersistence, SessionId(`sib-${i}`))).map((e) => e.seq),
+      ).toEqual(expected);
     }
     await b2.dispose();
   });

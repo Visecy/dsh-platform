@@ -5,7 +5,7 @@
  *
  * Consumes the official bundle installed under
  * packages/workspace-k8s/node_modules/@deepseek-ai/dsh-client-ui-workspace
- * (currently 0.1.2-rc.1) and applies the same 14 surgical patches that were
+ * (currently 0.1.5-rc.1) and applies the same 14 surgical patches that were
  * validated on the live DSH against the 0.1.1-rc.2 bundle:
  *   1. module id           2. WorkspaceBrowser signature (+useStatus/runStatusAction)
  *   3. status wiring       4. SessionTree signature
@@ -15,32 +15,33 @@
  *  11. ProjectRowItem call props  12. browserInjected hooks.status
  *  13. sidebar registration (children hole kept)  14. locale register guard
  *
- * 0.1.2-rc.1 anchor re-anchoring notes (semantics unchanged; anchors follow
- * upstream text drift):
- *  - WorkspaceBrowser/SessionTree gained `useSessionPendingInteraction`
- *    (session-level pending-approval/plan/question statuses — orthogonal to
- *    the platform's k8s workspace phase; no patch needed for it) and the
- *    browser gained `useHostInfo` in place of the old `useHostDescription`
- *    hook (host facts now come from ctx.remote.$host via a hostInfo
- *    observable, bound the same way through the register `hooks`
- *    compartment). The old component-level `home` derivation and the
- *    hooks-compartment injection pattern (hooks.* -> use* selector props,
- *    object root keys -> plain props) are unchanged, so the platform's
- *    `status: statusSource` hook + `runStatusAction` root prop patch the
- *    same way as before.
- *  - The apply() body now reads `ctx.get("sessions")/ctx.get("workspaces")`
- *    and ctx.remote.* instead of ctx.workspaces/ctx.sessions/ctx.get
- *    ("connection"), so the inject-hooks anchor uses `workspaces.create`
- *    now. A new UiWorkspaceService (connectWorkspace/startSession/archive +
- *    watchNavigation auto-open policy) and `slots.provideRoot({ hooks:
- *    { workspaces } })` run in the vendored apply exactly as they do in an
- *    official 0.1.2 deployment — no platform patch.
- *  - locale: the 0.1.2 dsh-client-locale register() still throws
- *    synchronously when the (ns, locale) pair is already registered, so
- *    patch 14's duplicate-NS try/catch guard is kept verbatim.
- *  - Nothing in the official 0.1.2 code supersedes any of the 14 intents:
- *    official status work is session-pending-interaction state, not the k8s
- *    workspace lifecycle the platform renders.
+ * 0.1.5-rc.1 anchor re-anchoring notes (semantics unchanged; anchors follow
+ * upstream text drift). Three of the fourteen anchors moved:
+ *  - WorkspaceBrowser gained `usePanelInfo` (the framework-standard global
+ *    panel hook, injected for every slot occupant by ui-layout's
+ *    `provideRoot({ hooks: { panelInfo } })`) directly after `wide`;
+ *    SessionTree gained `workspaceReady` + `usePanelInfo` after
+ *    `archivedSessionIds` and `revealSessionId` + `onSessionRevealed` at the
+ *    tail (official search-result reveal). The platform's `statusById` /
+ *    `runStatusAction` additions are inserted at their usual places, so the
+ *    SessionTree *call* site was re-anchored too.
+ *  - A new `UiWorkspaceService.openSession/openWorkspace/forkSession` API
+ *    routes navigation through `ctx.layout.selectPanel(null)` +
+ *    `ctx.layout.beginNavigation()`; the service is created inside the
+ *    vendored apply exactly as upstream does, so no platform patch. The
+ *    platform's client module declares `layout` in its cordis inject list so
+ *    its apply cannot run before ui-layout provided the service.
+ *  - `ProjectRowItem`, the menu items, the status wiring site, the
+ *    `browserInjected` hooks compartment and the sidebar/locale registration
+ *    are byte-identical to 0.1.2 — those eleven anchors are unchanged.
+ *  - locale: dsh-client-locale 0.1.5 is byte-identical to 0.1.2 and its
+ *    register() still throws synchronously when the (ns, locale) pair is
+ *    already registered, so patch 14's duplicate-NS try/catch guard is kept
+ *    verbatim.
+ *  - Nothing in the official 0.1.5 code supersedes any of the 14 intents:
+ *    official "status" work is workspace-stream readiness plus
+ *    session-pending-interaction state, not the k8s workspace lifecycle the
+ *    platform renders, and no upstream sleep/wake/lifecycle surface exists.
  *
  * The official ui-workspace row is DISABLED in the deployment, so this
  * vendored browser is the sole occupant of sidebar.workspaces (and the
@@ -74,11 +75,11 @@ const patch = (anchorLines, replLines, label) => {
 const L = (text, rel) => [text, rel]
 
 patch([L('id: "@deepseek-ai/dsh-client-ui-workspace"', 0)], [L('id: "@visecy/dsh-workspace-k8s/vendored-browser"', 0)], 'id')
-// 0.1.2 signature: + useSessionPendingInteraction (after useSessions) and
-// useHostInfo (replacing useHostDescription); insert the platform params
-// before renderSlot exactly as before.
-patch([L('function WorkspaceBrowser({ wide, expandSidebar, useSessions, useSessionPendingInteraction, useWorkspaces, useStore, actions, startSession, open, renameSession, forkSession, renameWorkspace, deleteWorkspace, insertWorkspaceBefore, archiveSession, insertSessionBefore, createWorkspace, searchSessions, searchResultLimit, useDirectoryFlow, useHostInfo, renderSlot, t }) {', 0)],
-  [L('function WorkspaceBrowser({ wide, expandSidebar, useSessions, useSessionPendingInteraction, useWorkspaces, useStore, actions, startSession, open, renameSession, forkSession, renameWorkspace, deleteWorkspace, insertWorkspaceBefore, archiveSession, insertSessionBefore, createWorkspace, searchSessions, searchResultLimit, useDirectoryFlow, useHostInfo, useStatus, runStatusAction, renderSlot, t }) {', 0)], 'signature')
+// 0.1.5 signature: `usePanelInfo` (ui-layout's framework-standard global
+// panel hook) sits directly after `wide`; insert the platform params before
+// renderSlot exactly as before.
+patch([L('function WorkspaceBrowser({ wide, usePanelInfo, expandSidebar, useSessions, useSessionPendingInteraction, useWorkspaces, useStore, actions, startSession, open, renameSession, forkSession, renameWorkspace, deleteWorkspace, insertWorkspaceBefore, archiveSession, insertSessionBefore, createWorkspace, searchSessions, searchResultLimit, useDirectoryFlow, useHostInfo, renderSlot, t }) {', 0)],
+  [L('function WorkspaceBrowser({ wide, usePanelInfo, expandSidebar, useSessions, useSessionPendingInteraction, useWorkspaces, useStore, actions, startSession, open, renameSession, forkSession, renameWorkspace, deleteWorkspace, insertWorkspaceBefore, archiveSession, insertSessionBefore, createWorkspace, searchSessions, searchResultLimit, useDirectoryFlow, useHostInfo, useStatus, runStatusAction, renderSlot, t }) {', 0)], 'signature')
 patch([L('const directoryFlowAvailable = useDirectoryFlow((occupied) => occupied);', 0)], [
   L('const directoryFlowAvailable = useDirectoryFlow((occupied) => occupied);', 0),
   L('(0, react.useEffect)(() => {', 0),
@@ -90,8 +91,11 @@ patch([L('const directoryFlowAvailable = useDirectoryFlow((occupied) => occupied
   L('for (const statusRow of statusSnapshot.rows) statusById[statusRow.nativeWorkspaceId ?? statusRow.workspaceId] = statusRow;', 1),
   L('}', 0),
 ], 'status-wiring')
-patch([L('function SessionTree({ useSessions, useSessionPendingInteraction, startSession, open, forkSession, workspaces, archivedSessionIds, onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive, insertWorkspaceBefore, insertSessionBefore, orderBy, groupExpansion, setGroupExpanded, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, home, t }) {', 0)],
-  [L('function SessionTree({ useSessions, useSessionPendingInteraction, startSession, open, forkSession, workspaces, archivedSessionIds, onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive, insertWorkspaceBefore, insertSessionBefore, orderBy, groupExpansion, setGroupExpanded, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, home, statusById, runStatusAction, t }) {', 0)], 'sessiontree-sig')
+// 0.1.5 SessionTree: gained `workspaceReady` + `usePanelInfo` after
+// `archivedSessionIds` and `revealSessionId` + `onSessionRevealed` at the
+// tail; the platform pair is still inserted between `home` and `t`.
+patch([L('function SessionTree({ useSessions, useSessionPendingInteraction, startSession, open, forkSession, workspaces, archivedSessionIds, workspaceReady, usePanelInfo, onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive, insertWorkspaceBefore, insertSessionBefore, orderBy, groupExpansion, setGroupExpanded, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, home, t, revealSessionId, onSessionRevealed }) {', 0)],
+  [L('function SessionTree({ useSessions, useSessionPendingInteraction, startSession, open, forkSession, workspaces, archivedSessionIds, workspaceReady, usePanelInfo, onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive, insertWorkspaceBefore, insertSessionBefore, orderBy, groupExpansion, setGroupExpanded, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, home, statusById, runStatusAction, t, revealSessionId, onSessionRevealed }) {', 0)], 'sessiontree-sig')
 patch([L('function ProjectRowItem({ group, onToggle, onCreate, actions, drag, home, t }) {', 0)],
   [L('function ProjectRowItem({ group, onToggle, onCreate, actions, drag, home, t, status, runStatusAction }) {', 0)], 'projectrow-sig')
 patch([L('const workspaceMenuItems = [{', 0)], [
@@ -133,16 +137,21 @@ patch([L('(0, react_jsx_runtime.jsx)("span", {', 0), L('className: Rows_module_c
   L(']', 1),
   L('}),', 0),
 ], 'projecttext')
-// SessionTree call in WorkspaceBrowser: 0.1.2 threads useSessionPendingInteraction
-// between useSessions and onSessionRename; keep inserting after workspaces.
-patch([L('}) : (0, react_jsx_runtime.jsx)(SessionTree, {', 0), L('useSessions,', 0), L('useSessionPendingInteraction,', 0), L('onSessionRename,', 0), L('onSessionArchive,', 0), L('forkSession,', 0), L('workspaces,', 0)], [
+// SessionTree call in WorkspaceBrowser: 0.1.5 threads `usePanelInfo` first and
+// `workspaceReady` right after `workspaces`, so the anchor extends through the
+// workspaceReady line (which also keeps the match inside the SessionTree call
+// rather than the FlatList/SearchResults calls above it); the platform pair is
+// still inserted after `workspaces`.
+patch([L('}) : (0, react_jsx_runtime.jsx)(SessionTree, {', 0), L('usePanelInfo,', 0), L('useSessions,', 0), L('useSessionPendingInteraction,', 0), L('onSessionRename,', 0), L('onSessionArchive,', 0), L('forkSession,', 0), L('workspaces,', 0), L('workspaceReady: workspacePhase === "ready" && workspaceStreamState !== "loading",', 0)], [
   L('}) : (0, react_jsx_runtime.jsx)(SessionTree, {', 0),
+  L('usePanelInfo,', 1),
   L('useSessions,', 1),
   L('useSessionPendingInteraction,', 1),
   L('onSessionRename,', 1),
   L('onSessionArchive,', 1),
   L('forkSession,', 1),
   L('workspaces,', 1),
+  L('workspaceReady: workspacePhase === "ready" && workspaceStreamState !== "loading",', 1),
   L('statusById,', 1),
   L('runStatusAction,', 1),
 ], 'sessiontree-call')
@@ -194,9 +203,11 @@ const checks = [
   ['hooks.status', source.includes('status: statusSource')],
   ['locale try/catch', source.includes('catch (localeDuplicate)')],
   ['children kept', source.includes('children: { "sidebar.workspaces.directoryFlow": {')],
-  ['sessiontree sig', source.includes('home, statusById, runStatusAction, t })')],
+  ['sessiontree sig', source.includes('home, statusById, runStatusAction, t, revealSessionId')],
   ['sessiontree call', source.includes('statusById,') && source.includes('runStatusAction,')],
   ['no add button patch', !source.includes('onAddWorkspace();')],
+  ['0.1.5 panel hook kept', source.includes('usePanelInfo, expandSidebar, useSessions') && source.includes('workspaceReady: workspacePhase === "ready"')],
+  ['0.1.5 layout navigation kept', source.includes('this.ctx.layout.selectPanel(null)') && source.includes('this.ctx.layout.beginNavigation()')],
 ]
 for (const [name, ok] of checks) {
   if (!ok) throw new Error(`vendored result check failed: ${name}`)
@@ -206,7 +217,7 @@ const out = join(pkgRoot, 'src', 'client', 'vendored-workspace.ts')
 const ts = `/**
  * GENERATED FILE — do not edit by hand.
  * Regenerate with: node scripts/vendor-workspace-browser.mjs
- * Vendored official dsh-client-ui-workspace browser bundle (0.1.2-rc.1) with
+ * Vendored official dsh-client-ui-workspace browser bundle (0.1.5-rc.1) with
  * the platform status patches applied (see the script header for the patch list).
  */
 export const VENDORED_WORKSPACE_BROWSER: string = ${JSON.stringify(source)}

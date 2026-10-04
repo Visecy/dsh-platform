@@ -1,16 +1,20 @@
 /**
- * `WriteGuard` 状态机直接单测：并发写者检测的时序契约（never-read /
- * confirmed-absence / confirmed head），不再需要端到端双实例堆栈即可覆盖。
+ * `WriteGuard` 状态机直接单测：跨进程并发写者检测的时序契约（never-read /
+ * confirmed-absence / confirmed head），不需要端到端双实例堆栈即可覆盖。
+ * 拒绝一律是官方 seam 的 `SessionOwnershipLostError`（写所有权已丢失），
+ * 诊断细节附在其后。
  */
 import { describe, expect, it } from "vitest";
 import { SessionId } from "@deepseek-ai/dsh-session";
+import { SessionOwnershipLostError } from "@deepseek-ai/dsh-session-persistence";
 import { WriteGuard } from "../write-guard.ts";
 
 function expectRejected(fn: () => void, pattern: RegExp): void {
   try {
     fn();
   } catch (error) {
-    expect(error).toBeInstanceOf(Error);
+    // The refusal uses the seam's ownership-loss vocabulary, not an ad-hoc Error.
+    expect(error).toBeInstanceOf(SessionOwnershipLostError);
     expect((error as Error).message).toMatch(pattern);
     return;
   }
@@ -27,7 +31,7 @@ describe("WriteGuard: concurrent-writer detection", () => {
     const guard = new WriteGuard();
     expectRejected(
       () => guard.assertNoConcurrentWriter(SessionId("s1"), 0),
-      /has a persisted log this instance has not read/,
+      /has not read/,
     );
   });
 
@@ -51,7 +55,7 @@ describe("WriteGuard: concurrent-writer detection", () => {
     guard.confirmHead(SessionId("s1"), 2);
     expectRejected(
       () => guard.assertNoConcurrentWriter(SessionId("s1"), 5),
-      /modified by another writer \(stored head 5, this instance last confirmed head 2\)/,
+      /modified by another writer: stored head 5, this instance last confirmed head 2/,
     );
   });
 

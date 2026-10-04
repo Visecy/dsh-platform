@@ -1,4 +1,4 @@
-// packages/storage-db/src/index.ts
+// src/index.ts
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createRequire } from "node:module";
@@ -99,8 +99,18 @@ var DbStorageBackend = class {
   driver;
   kv;
   closed = false;
+  /**
+   * Schema initialization is idempotent but not free (DDL + PRAGMA/transaction
+   * per call). Cache the in-flight/finished promise so every unit open on one
+   * backend instance reuses the first run instead of re-issuing DDL.
+   */
+  schemaReady;
+  ensureSchemaOnce() {
+    this.schemaReady ??= Promise.resolve(this.driver.ensureSchema?.()).then(() => void 0);
+    return this.schemaReady;
+  }
   async ensureUnit(descriptor) {
-    await this.driver.ensureSchema?.();
+    await this.ensureSchemaOnce();
     const existing = await this.driver.get(
       "SELECT version FROM dsh_storage_units WHERE name = ?",
       descriptor.name

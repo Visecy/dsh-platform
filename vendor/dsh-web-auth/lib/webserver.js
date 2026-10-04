@@ -247,8 +247,21 @@ var WebServer = class extends Service {
 		const handle = async (req, res) => {
 			// Platform gate extension: the gate runs before route matching; a denial
 			// owns the response, so dispatch stops here.
+			//
+			// FAIL CLOSED: this fork exists to carry an authentication gate, and an
+			// un-gated fork would serve the whole Harness (the official webserver
+			// leaves `/plugins` and `/plugins/events` unchecked, and the browser
+			// cookie layer is bypassed by the platform patch). Until a gate is
+			// registered — and again if its owner is disposed — every request is
+			// refused rather than dispatched. A deployment that wants an open
+			// server uses the official @deepseek-ai/dsh-host-webserver instead.
 			const gate = this.gate;
-			if (gate !== void 0 && !(await gate(req, res, "request"))) return;
+			if (gate === void 0) {
+				res.writeHead(503, { "content-type": "text/plain" });
+				res.end("webserver: refusing to serve before an authentication gate is registered");
+				return;
+			}
+			if (!(await gate(req, res, "request"))) return;
 			/* v8 ignore next -- `?? '/'` arm: node:http always sets url on server
 			requests; the field is only optional on the client-side IncomingMessage type */
 			const rawPath = new URL(req.url ?? "/", "http://x").pathname;
@@ -291,7 +304,9 @@ var WebServer = class extends Service {
 				this.upgradedSockets.delete(socket);
 			});
 			const gate = this.gate;
-			if (gate === void 0) { this.dispatchUpgrade(req, socket, head); return; }
+			// FAIL CLOSED, same rule as the request path: an upgrade is never
+			// dispatched before an authentication gate exists.
+			if (gate === void 0) { socket.destroy(); return; }
 			// Platform gate extension: the gate decides before protocol negotiation; on
 			// denial it owns the socket through the raw-response adapter. A throwing
 			// gate destroys the socket — never a process exit.

@@ -5,7 +5,7 @@
   "private": false,
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-fs": "^0.1.2-rc.1"
+    "@deepseek-ai/dsh-fs": "0.1.5-rc.1"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",

@@ -1,6 +1,6 @@
 /**
  * @visecy/dsh-web-auth — the DeepSeek Harness Web webserver fork: official
- * `dsh-host-webserver` 0.1.2 surface (route/upgrade/fallback registries,
+ * `dsh-host-webserver` 0.1.5 surface (byte-identical to 0.1.2) (route/upgrade/fallback registries,
  * structured index injections incl. script-preload and the boot-readiness
  * tail, optional gzip) plus the platform request-gate extension used by
  * dsh-auth-oidc (registerGate; the gate runs before route matching and before
@@ -55,7 +55,7 @@ export interface WebGateResponse {
 export type WebRequestGate = (req: IncomingMessage, res: WebGateResponse, kind: WebRequestKind) => boolean | Promise<boolean>;
 /** Document region a rendered row lands in: after the opening head or body tag. */
 export type IndexInjectionPlacement = 'head' | 'body';
-/** One structured index injection row (official dsh-host-webserver 0.1.2 shape). */
+/** One structured index injection row (official dsh-host-webserver 0.1.5 shape). */
 export type IndexInjection =
     /** Assign a JSON-serializable value to a `globalThis` property, ahead of later script rows. */
     { kind: 'global'; name: string; value: unknown }

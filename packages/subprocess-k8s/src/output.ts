@@ -65,7 +65,10 @@ export class CollectReader implements SubprocessOutputReader {
   private buffer = Buffer.alloc(0)
   private spillPath?: string
   private spillStream?: ReturnType<typeof createWriteStream>
-  private offset = 0
+  /** Total bytes ever appended — the whole-stream coordinate of the window end. */
+  private total = 0
+  /** Whole-stream coordinate of `buffer[0]`; advances as the tail window slides. */
+  private windowStart = 0
   private lossy = false
 
   constructor(private collect: SubprocessCollect, spillDir: string) {
@@ -81,7 +84,7 @@ export class CollectReader implements SubprocessOutputReader {
 
   append(bytes: Uint8Array): void {
     if (this.spillStream !== undefined) {
-      if (this.offset + this.buffer.length + bytes.length <= this.collect.spill!.maxBytes) {
+      if (this.total + bytes.length <= this.collect.spill!.maxBytes) {
         this.spillStream.write(Buffer.from(bytes))
       } else if (existsSync(this.spillPath!)) {
         // stream exceeded spill cap: discard the incomplete spill
@@ -90,6 +93,7 @@ export class CollectReader implements SubprocessOutputReader {
         rmSync(this.spillPath!, { force: true })
       }
     }
+    this.total += bytes.length
     const combined = Buffer.concat([this.buffer, Buffer.from(bytes)])
     if (combined.length > this.collect.maxBytes) {
       this.lossy = true
@@ -97,19 +101,27 @@ export class CollectReader implements SubprocessOutputReader {
     } else {
       this.buffer = combined
     }
+    this.windowStart = this.total - this.buffer.length
   }
 
   close(): void {
     this.spillStream?.end()
   }
 
+  /**
+   * Read from a whole-stream byte offset. `nextOffset` is the whole-stream end
+   * (NOT the retained-tail length), and `lossy` is true only when the caller's
+   * offset slid out of the retained window — an incremental read that is still
+   * inside the window is lossless and returns just its slice.
+   */
   readFrom(fromByte: number): SubprocessOutputRead {
-    const start = Math.max(fromByte - this.offset, 0)
-    const text = this.buffer.subarray(start).toString('utf8')
+    const lossy = this.lossy || fromByte < this.windowStart
+    const start = Math.max(fromByte - this.windowStart, 0)
+    const text = lossy ? this.buffer.toString('utf8') : this.buffer.subarray(start).toString('utf8')
     return {
       text,
-      nextOffset: this.offset + this.buffer.length,
-      lossy: this.lossy || start > 0,
+      nextOffset: this.total,
+      lossy,
       spillPath: this.spillPath !== undefined && existsSync(this.spillPath) ? this.spillPath : undefined,
     }
   }

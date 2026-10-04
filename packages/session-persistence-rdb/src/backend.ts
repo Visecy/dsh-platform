@@ -9,6 +9,7 @@
  */
 
 import type { SessionHeader, SessionId } from "@deepseek-ai/dsh-session";
+import type { SessionLocation } from "@deepseek-ai/dsh-session-persistence";
 
 /**
  * 与方言无关的 `t_sessions` 行投影。SQLite / PostgreSQL 的 drizzle
@@ -95,6 +96,13 @@ export interface BackendTx {
    * (legacy rows keep their upstream-space cut — see `sessionConflictRow`).
    */
   upsertSession(meta: SessionHeader, inheritedEventCount: number, incarnation: string): Promise<void>;
+  /**
+   * Overwrite an existing row's header columns INCLUDING the stored inherited
+   * cut. Reserved for the in-place format migration, which renumbers the log
+   * into presented coordinates and must move the cut with it (the ordinary
+   * {@link upsertSession} conflict update deliberately preserves the cut).
+   */
+  rewriteSessionHeader(meta: SessionHeader, inheritedEventCount: number): Promise<void>;
   /** Fetch the head cursor; the caller materialized the row first. */
   getHead(id: SessionId): Promise<Pick<SessionRow, "fHeadEventId" | "fHeadSequence">>;
   /**
@@ -132,18 +140,22 @@ export interface Backend {
   readonly kind: "sqlite" | "postgres";
   /** Source-qualified store identity (revision 前缀)，open 后可用。 */
   readonly storeIdentity: string;
+  /**
+   * Refusal-diagnostics pointer at the one database this backend serves
+   * (`{kind, path}`): this provider keeps no per-session artifact, so a format
+   * refusal can only name the database itself.
+   */
+  readonly location: SessionLocation;
   /** 连接 + 建表 + 版本/身份校验 + 读取 store id；失败时抛错（不迁移）。 */
   open(): Promise<void>;
   /** Fetch a session's row, or undefined if absent. */
   getSession(id: SessionId): Promise<SessionRow | undefined>;
-  /** Lightweight two-column upstream→persisted seq map source. */
-  getSeqMapRows(id: SessionId): Promise<Array<{ fSequence: number; fOriginalSeq: number }>>;
-  /** Joined event rows for one session, dense seq ascending (optionally from a seq). */
-  getEventRows(id: SessionId, fromSequence?: number): Promise<EventRow[]>;
+  /** Joined event rows for one session, presented seq ascending. */
+  getEventRows(id: SessionId): Promise<EventRow[]>;
   /** All materialized sessions' rows. */
   listSessions(): Promise<SessionRow[]>;
   /** Run `fn` inside one durable transaction. */
   transaction<T>(fn: (tx: BackendTx) => Promise<T>): Promise<T>;
-  /** Close the connection (awaited by the coordinator's dispose, post-drain). */
+  /** Close the connection (awaited by the backend's teardown, after every handle closed). */
   close(): Promise<void>;
 }

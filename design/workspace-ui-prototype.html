@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dsh-platform 工作区 UI 原型 v4</title>
+<style>
+  :root {
+    --bg: #fff; --border: #d0d7de; --text: #1f2328; --muted: #57606a;
+    --primary: #0969da; --primary-bg: #ddf4ff;
+    --green: #116329; --green-bg: #dafbe1;
+    --gray-bg: #eaeef2; --red: #cf222e; --red-bg: #ffebe9;
+    --sidebar-w: 300px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif; background: var(--bg); color: var(--text); }
+  .app { display: flex; height: 100vh; }
+  .sidebar { width: var(--sidebar-w); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow-y: auto; }
+  .brand { padding: 14px 16px 8px; display: flex; align-items: center; gap: 8px; font-weight: 700; }
+  .brand .mark { width: 22px; height: 22px; background: linear-gradient(135deg, #0969da, #218bff); border-radius: 6px; }
+  .new-session { margin: 6px 12px 12px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: #fff; cursor: pointer; font-size: 14px; display: inline-flex; align-items: center; gap: 6px; }
+  .section { padding: 10px 14px 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .workspace-group { padding: 6px 8px; }
+  .workspace-header { display: flex; align-items: center; gap: 8px; padding: 6px 6px; border-radius: 8px; cursor: pointer; }
+  .workspace-header:hover { background: #f6f8fa; }
+  .workspace-name { font-size: 13px; font-weight: 600; flex: 1; }
+  .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; }
+  .badge.running { background: var(--green-bg); color: var(--green); }
+  .badge.sleep { background: var(--gray-bg); color: var(--muted); }
+  .badge.provision { background: #fff8c5; color: #7d4e00; }
+  .badge.orphan { background: var(--red-bg); color: var(--red); }
+  .info-dot { color: var(--muted); font-size: 12px; }
+  .sessions { margin-left: 14px; padding-left: 10px; border-left: 2px solid var(--border); display: flex; flex-direction: column; gap: 2px; }
+  .session-row { padding: 6px 8px; border-radius: 8px; font-size: 13px; cursor: pointer; }
+  .session-row:hover { background: #f6f8fa; }
+  .session-row.active { background: var(--primary-bg); color: var(--primary); }
+  .main { flex: 1; display: flex; flex-direction: column; }
+  .header { height: 46px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 18px; gap: 12px; }
+  .header .tab { font-size: 13px; padding: 6px 10px; border-radius: 6px; }
+  .header .tab.active { background: #f0f3f6; font-weight: 600; }
+  .header .spacer { flex: 1; }
+  .header .model { font-size: 13px; color: var(--muted); }
+  .hero { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; }
+  .hero-title { font-size: 26px; font-weight: 700; }
+  .workspace-trigger { padding: 9px 14px; border: 1px solid var(--border); border-radius: 8px; background: #fff; cursor: pointer; font-size: 14px; }
+  .workspace-trigger:hover { background: #f6f8fa; }
+  .composer { width: min(620px, 90%); border: 1px solid var(--border); border-radius: 12px; padding: 12px; min-height: 110px; background: #fff; box-shadow: 0 4px 18px rgba(0,0,0,.06); }
+  .composer .placeholder { color: var(--muted); font-size: 14px; }
+  .composer .footer { display: flex; justify-content: space-between; align-items: center; margin-top: 24px; color: var(--muted); }
+  .status-bar { display: flex; align-items: center; gap: 8px; padding: 7px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); background: #fcfcfd; }
+  .popover { position: absolute; top: 250px; left: calc(50% - 170px); width: 340px; background: #fff; border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 12px 32px rgba(0,0,0,.10); padding: 10px; z-index: 20; }
+  .popover .ws-item { padding: 7px 8px; border-radius: 8px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+  .popover .ws-item:hover { background: #f6f8fa; }
+  .popover .add { padding: 7px 8px; margin-top: 6px; border-top: 1px solid var(--border); color: var(--primary); cursor: pointer; font-size: 13px; }
+  .popover .add:hover { background: #f6f8fa; }
+  .modal-overlay { position: fixed; inset: 0; background: rgba(31,35,40,.35); display: flex; align-items: center; justify-content: center; z-index: 50; }
+  .modal { width: 380px; background: #fff; border-radius: 12px; box-shadow: 0 16px 48px rgba(0,0,0,.2); padding: 20px; }
+  .modal h3 { margin: 0 0 8px; font-size: 16px; }
+  .modal .desc { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+  .modal label { display: block; margin-bottom: 5px; font-size: 13px; font-weight: 600; }
+  .modal input { width: 100%; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; }
+  .modal .error { color: var(--red); font-size: 12px; margin: 8px 0 0; }
+  .modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+  .btn { padding: 6px 12px; font-size: 13px; border: 1px solid var(--border); border-radius: 8px; background: #fff; cursor: pointer; }
+  .btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+  .btn.primary:hover { background: #218bff; }
+  .btn:hover { background: #f6f8fa; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><span class="mark"></span>DeepSeek Harness</div>
+    <button class="new-session">+ 新会话</button>
+
+    <div class="section">工作区</div>
+
+    <div class="workspace-group">
+      <div class="workspace-header">
+        <span class="workspace-name">test-upgrade</span>
+        <span class="badge provision">创建中</span>
+        <span class="info-dot">＋</span>
+      </div>
+      <div class="sessions">
+        <div class="session-row active">创建 dsh-platform 工作区</div>
+        <div class="session-row">确认工作区迭代方案</div>
+      </div>
+    </div>
+
+    <div class="workspace-group">
+      <div class="workspace-header">
+        <span class="workspace-name">test-pod</span>
+        <span class="badge sleep">休眠中</span>
+        <span class="info-dot">＋</span>
+      </div>
+      <div class="sessions">
+        <div class="session-row">测试 Agent 路径统一</div>
+      </div>
+    </div>
+
+    <div class="workspace-group">
+      <div class="workspace-header">
+        <span class="workspace-name">git</span>
+        <span class="badge running">运行中</span>
+        <span class="info-dot">＋</span>
+      </div>
+      <div class="sessions">
+        <div class="session-row">git 工作区调试</div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="header">
+      <span class="tab active">对话</span>
+      <span class="tab">Code</span>
+      <span class="spacer"></span>
+      <span class="model">DeepSeek-V4-Flash ▾</span>
+    </header>
+
+    <div class="hero">
+      <div class="hero-title">探索未至之境</div>
+      <button class="workspace-trigger">选择工作区 ▾</button>
+      <div class="composer">
+        <div class="placeholder">描述你想要构建的内容…</div>
+        <div class="footer">
+          <span>＋</span>
+          <span>DeepSeek-V4-Flash High</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="status-bar">
+      <span>工作区：test-upgrade [创建中]</span>
+      <span>· 会话 2 · turn 0 · 命令 0</span>
+      <span style="margin-left:auto;color:#888">工作区信息</span>
+    </div>
+  </main>
+</div>
+
+<!-- 工作区选择 popover：“新建工作区”是里面的一项，打开的是官方风格 Modal -->
+<div class="popover">
+  <div class="ws-item">
+    <span>test-upgrade</span>
+    <span class="badge provision">创建中</span>
+  </div>
+  <div class="ws-item">
+    <span>test-pod</span>
+    <span class="badge sleep">休眠中</span>
+  </div>
+  <div class="ws-item">
+    <span>git</span>
+    <span class="badge running">运行中</span>
+  </div>
+  <div class="add">+ 新建工作区</div>
+</div>
+
+<!-- 新建工作区 Modal -->
+<div class="modal-overlay">
+  <div class="modal">
+    <h3>新建工作区</h3>
+    <p class="desc">输入工作区名称。创建后会出现在侧边栏工作区组中。</p>
+    <label for="ws-name">工作区名称</label>
+    <input id="ws-name" placeholder="例如：my-project" autofocus>
+    <div class="error"></div>
+    <div class="modal-footer">
+      <button class="btn">取消</button>
+      <button class="btn primary">创建</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>

@@ -96,6 +96,12 @@ export class HostWorkspaceRegistry implements WorkspaceRegistry {
   async create(path: string): Promise<RegistryWorkspace> {
     const registry = this.official()
     if (registry === undefined) throw new Error('workspace registry unavailable')
+    // DSH 0.1.5's realpathNormalize rejects non-fully-qualified paths with a
+    // TypeError BEFORE any I/O; fail with the platform's own actionable
+    // message first so a caller passing a bare id is not left guessing.
+    if (!path.startsWith('/')) {
+      throw new Error(`workspace path must be absolute: ${JSON.stringify(path)}`)
+    }
     // create validates via fs.realpath and rejects nonexistent paths; the
     // caller (reconciler/management) creates the anchor directory first.
     const ws = await registry.create(path)

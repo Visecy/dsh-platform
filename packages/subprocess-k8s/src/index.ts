@@ -4,6 +4,7 @@
  */
 import { Context } from '@deepseek-ai/cordis'
 import { SubprocessRuntime, type SubprocessCollectedOutputs, type SubprocessHandle, type SubprocessOutcome, type SubprocessSpawnSpec, type SubprocessTerminalForeground, type SubprocessTerminalHandle, type SubprocessTerminalSignal, type SubprocessTerminalSpawnSpec } from '@deepseek-ai/dsh-subprocess'
+import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { Writable, Readable } from 'node:stream'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -12,6 +13,19 @@ import { DaemonSubprocessClient } from './client.ts'
 import { CollectPoller, CollectReader, makePipe } from './output.ts'
 
 export const name = '@visecy/dsh-subprocess-k8s'
+
+/**
+ * Translate the seam's `NodeJS.ProcessEnv` into its wire shape. The seam
+ * spells an environment deletion as `undefined`, but `JSON.stringify` drops
+ * undefined values, so the tombstone is transported as `null` (the daemon's
+ * `mergeEnv` deletes on either).
+ */
+function wireEnv(env: NodeJS.ProcessEnv | undefined): Record<string, string | null> | undefined {
+  if (env === undefined) return undefined
+  const out: Record<string, string | null> = {}
+  for (const [key, value] of Object.entries(env)) out[key] = value ?? null
+  return out
+}
 
 /** Optional reporter for live workspace command counts (provided by dsh-workspace-k8s). */
 export interface CommandActivityTracker {
@@ -36,6 +50,8 @@ export class SubprocessK8s extends SubprocessRuntime {
   private spillDir: string
   private resolver: ((workspaceId: string) => Promise<string> | string) | undefined
   private commandTracker: CommandActivityTracker | undefined
+  /** Live handles; service disposal terminates their managed ranges. */
+  private live = new Set<RemoteHandle>()
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
@@ -45,6 +61,10 @@ export class SubprocessK8s extends SubprocessRuntime {
     this.commandTracker = config.commandTracker
     this.hostRoot = config.hostRoot ?? '/workspaces'
     this.podRoot = config.podRoot ?? '/workspaces'
+    // Seam contract: disposal of the service terminates all still-running
+    // managed processes and awaits their exit (same shape as
+    // dsh-subprocess-local's `disposeManagedProcesses` effect).
+    ctx.effect(() => () => this.shutdown(), 'subprocess-k8s teardown')
   }
 
   /** The workspace id from a host path like /workspaces/<id>/... */
@@ -86,10 +106,36 @@ export class SubprocessK8s extends SubprocessRuntime {
   }
 
   override async resolveExecutable(command: string, env?: Readonly<Record<string, string>>, signal?: AbortSignal): Promise<string> {
-    return this.client.resolveExecutable(command)
+    // Resolve through `endpointFor` so a command spelled as a WORKSPACE path
+    // (/workspaces/<id>/...) is looked up in that workspace's pod rather than
+    // in the service-level (default/placeholder) daemon. The seam carries no
+    // cwd, so a bare name or an unrelated path still falls back to the default
+    // endpoint — and the daemon's PATH lookup does not yet honour the `env`
+    // overrides the seam documents.
+    const endpoint = await this.endpointFor(command)
+    return this.client.withEndpoint(endpoint).resolveExecutable(command)
   }
 
   override spawn(spec: SubprocessSpawnSpec): SubprocessHandle {
+    // DSH 0.1.5 requires spawn() to reject INVALID specs synchronously, before
+    // a handle exists: callers (dsh-bash-local) derive their aborted flag only
+    // after awaiting `done`, so a pre-aborted call that we accepted here would
+    // still launch a process in the pod.
+    if (spec.signal?.aborted === true) {
+      throw spec.signal.reason instanceof Error
+        ? spec.signal.reason
+        : new Error('subprocess-k8s: spawn aborted before start')
+    }
+    if (spec.argv.length === 0 || spec.argv[0] === '') {
+      throw new Error('subprocess-k8s: argv[0] must be a non-empty program')
+    }
+    if (!Number.isFinite(spec.graceMs) || spec.graceMs <= 0 || spec.graceMs > MAX_TIMER_DELAY_MS) {
+      throw new Error(`subprocess-k8s: graceMs must be a positive finite value <= ${MAX_TIMER_DELAY_MS} (got ${String(spec.graceMs)})`)
+    }
+    if (spec.cwd === '') {
+      throw new Error('subprocess-k8s: cwd must not be empty')
+    }
+
     // endpoint resolution is async; the handle resolves it before starting.
     // The daemon cwd is the pod-side path; translate the host workspace path.
     const podCwd = this.toPod(spec.cwd)
@@ -102,8 +148,29 @@ export class SubprocessK8s extends SubprocessRuntime {
       workspaceId,
       this.commandTracker,
     )
+    // Service disposal must terminate and await every still-running managed
+    // range (seam contract); the handle unregisters itself when it settles.
+    this.live.add(handle)
+    void handle.done.then(
+      () => this.live.delete(handle),
+      () => this.live.delete(handle),
+    )
     void handle.start()
     return handle
+  }
+
+  /** Terminate every live managed range and await its quiescence. */
+  private async shutdown(): Promise<void> {
+    const handles = [...this.live]
+    for (const handle of handles) {
+      try {
+        handle.terminate()
+      } catch {
+        // best-effort: a handle whose daemon is gone has nothing to terminate
+      }
+    }
+    await Promise.allSettled(handles.map((handle) => handle.waitForExit()))
+    this.live.clear()
   }
 
   override async spawnTerminal(spec: SubprocessTerminalSpawnSpec): Promise<SubprocessTerminalHandle> {
@@ -117,7 +184,6 @@ export class SubprocessK8s extends SubprocessRuntime {
 }
 
 class RemoteHandle implements SubprocessHandle {
-  readonly pid: number
   readonly stdin: Writable | undefined
   readonly stdout: Readable | undefined
   readonly stderr: Readable | undefined
@@ -127,6 +193,7 @@ class RemoteHandle implements SubprocessHandle {
   private resolveDone!: (o: SubprocessOutcome) => void
   private rejectDone!: (e: Error) => void
   private pollers: Array<{ stop(): void }> = []
+  private readers: CollectReader[] = []
   private terminated = false
   private counted = false
 
@@ -140,7 +207,6 @@ class RemoteHandle implements SubprocessHandle {
     private tracker?: CommandActivityTracker,
   ) {
     this.client = new DaemonSubprocessClient('http://placeholder.invalid:1')
-    this.pid = -1
     this.cmdId = ''
     this.done = new Promise((res, rej) => {
       this.resolveDone = res
@@ -162,6 +228,7 @@ class RemoteHandle implements SubprocessHandle {
       const mode = stream === 'stdout' ? spec.stdio.stdout : spec.stdio.stderr
       if (typeof mode !== 'object') return undefined
       const reader = new CollectReader(mode, spillDir)
+      this.readers.push(reader)
       const poller = new CollectPoller(
         { read: (from) => this.client.readOutput(this.cmdId, stream, from) },
         reader,
@@ -196,11 +263,10 @@ class RemoteHandle implements SubprocessHandle {
       const info = await this.client.run({
         argv,
         cwd: this.spec.cwd,
-        env: this.spec.env as Record<string, string> | undefined,
+        env: wireEnv(this.spec.env),
         stdin: stdinData,
       })
-      ;(this as unknown as { pid: number }).pid = info.pid
-      ;(this as unknown as { cmdId: string }).cmdId = info.cmdId
+      this.cmdId = info.cmdId
       if (this.workspaceId !== undefined && this.tracker !== undefined) {
         this.counted = true
         this.tracker.commandStarted(this.workspaceId)
@@ -232,10 +298,15 @@ class RemoteHandle implements SubprocessHandle {
       })
       for (const p of this.pollers) await p.flush()
       for (const p of this.pollers) p.stop()
+      // Settlement seals the collected readers: the reference provider closes
+      // its collectors here so an advertised spill file is durably complete
+      // instead of being handed out with its descriptor still open.
+      for (const reader of this.readers) reader.close()
       this.finish()
       this.resolveDone(outcome)
     } catch (e) {
       for (const p of this.pollers) p.stop()
+      for (const reader of this.readers) reader.close()
       this.finish()
       // Spawn-level failures belong on the done promise (the seam contract);
       // resolving exit code -1 loses the actionable daemon message (bad cwd,
@@ -256,13 +327,47 @@ class RemoteHandle implements SubprocessHandle {
     if (this.terminated) return
     this.terminated = true
     if (this.cmdId !== '') {
+      // The daemon performs SIGTERM → grace → SIGKILL on the whole process
+      // group, i.e. the "documented termination procedure on the managed
+      // range" the seam asks for. `waitForExit` observes that same range.
       void this.client.kill(this.cmdId, this.spec.graceMs)
     }
   }
 
   async waitForExit(signal?: AbortSignal): Promise<boolean> {
-    await this.done
+    if (signal !== undefined) {
+      if (signal.aborted) return false
+      const aborted = await Promise.race([
+        this.done.then(() => false, () => false),
+        new Promise<boolean>((resolve) => {
+          signal.addEventListener('abort', () => resolve(true), { once: true })
+        }),
+      ])
+      if (aborted) return false
+    } else {
+      await this.done.catch(() => undefined)
+    }
+    // `done` reports the DIRECT child; the seam's wait is on the managed
+    // RANGE, so a backgrounded grandchild keeps this wait open until the
+    // group is empty. A daemon that cannot answer means the range is no
+    // longer observable — that is a provider failure, not a silent `true`.
+    await this.awaitRangeQuiescence()
     return true
+  }
+
+  /** Poll the daemon's managed-range probe until the group is empty. */
+  private async awaitRangeQuiescence(): Promise<void> {
+    if (this.cmdId === '') return
+    for (;;) {
+      let alive: boolean
+      try {
+        alive = (await this.client.rangeStatus(this.cmdId)).alive
+      } catch (e) {
+        throw e instanceof Error ? e : new Error(String(e))
+      }
+      if (!alive) return
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
   }
 }
 

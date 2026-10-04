@@ -43,7 +43,7 @@ export interface FilesApi {
   write(path: string, content: Uint8Array, intent?: WriteIntent): Promise<WriteOutcome>
   list(path: string, opts?: { depth?: number }): Promise<DirEntry[]>
   mkdir(path: string, opts?: { recursive?: boolean }): Promise<boolean>
-  info(path: string): Promise<EntryInfo | undefined>
+  info(path: string, opts?: { follow?: boolean }): Promise<EntryInfo | undefined>
   remove(path: string): Promise<void>
   rename(src: string, dst: string): Promise<void>
 }
@@ -53,7 +53,13 @@ export interface FilesApi {
 export interface CommandSpec {
   argv: string[]
   cwd: string
-  env?: Record<string, string>
+  /**
+   * Explicit environment entries merged over the scrubbed ambient base. A
+   * `null` value is the wire-safe tombstone that DELETES an ambient entry:
+   * JSON has no `undefined`, so the dsh seam's `undefined` tombstone is
+   * transported as `null`.
+   */
+  env?: Record<string, string | null>
   stdin?: Uint8Array
   /** Deadline for the command; applies only to workspace-wide background grace (see lifecycle spec). */
   timeoutMs?: number

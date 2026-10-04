@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import { and, desc, eq, gte, sql } from "drizzle-orm";
 import type { PgAsyncDatabase, PgAsyncTransaction, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import type { SessionHeader, SessionId } from "@deepseek-ai/dsh-session";
+import type { SessionLocation } from "@deepseek-ai/dsh-session-persistence";
 import {
   type Backend,
   type BackendTx,
@@ -26,7 +27,7 @@ import {
 import { SCHEMA_VERSION, SESSION_PERSISTENCE_SQLITE_APPLICATION_ID } from "./schema.ts";
 import { createTablesSql, toPostgresSchema } from "./adapters/index.ts";
 import { postgresTableDefs } from "./entities/index.ts";
-import { sessionConflictRow, sessionInsertRow } from "./log.ts";
+import { sessionConflictRow, sessionInsertRow, sessionRewriteRow } from "./log.ts";
 
 /**
  * PostgreSQL drizzle tables derived from the single entity definitions in
@@ -66,6 +67,7 @@ export interface PostgresBackendOptions {
 export class PostgresBackend<THKT extends PgQueryResultHKT = PgQueryResultHKT> implements Backend {
   readonly kind = "postgres" as const;
   storeIdentity!: string;
+  location!: SessionLocation;
 
   constructor(
     private readonly db: PgAsyncDatabase<THKT>,
@@ -127,6 +129,8 @@ export class PostgresBackend<THKT extends PgQueryResultHKT = PgQueryResultHKT> i
       return storeId;
     });
     this.storeIdentity = `${this.options.identityBase}:store:${storeId}`;
+    // Refusal diagnostics name the one database this backend serves.
+    this.location = { kind: "postgres", path: this.options.identityBase };
   }
 
   async close(): Promise<void> {
@@ -139,18 +143,11 @@ export class PostgresBackend<THKT extends PgQueryResultHKT = PgQueryResultHKT> i
     )[0] as SessionRow | undefined;
   }
 
-  async getSeqMapRows(id: SessionId): Promise<Array<{ fSequence: number; fOriginalSeq: number }>> {
-    return this.eventRows(this.db).where(eq(pgSessionEvents.fSessionId, id)).execute();
-  }
-
-  async getEventRows(id: SessionId, fromSequence?: number): Promise<EventRow[]> {
-    const scoped =
-      fromSequence === undefined
-        ? this.eventRows(this.db).where(eq(pgSessionEvents.fSessionId, id))
-        : this.eventRows(this.db).where(
-            and(eq(pgSessionEvents.fSessionId, id), gte(pgSessionEvents.fSequence, fromSequence)),
-          );
-    return scoped.orderBy(pgSessionEvents.fSequence).execute() as unknown as EventRow[];
+  async getEventRows(id: SessionId): Promise<EventRow[]> {
+    return this.eventRows(this.db)
+      .where(eq(pgSessionEvents.fSessionId, id))
+      .orderBy(pgSessionEvents.fSequence)
+      .execute() as unknown as Promise<EventRow[]>;
   }
 
   async listSessions(): Promise<SessionRow[]> {
@@ -166,6 +163,8 @@ export class PostgresBackend<THKT extends PgQueryResultHKT = PgQueryResultHKT> i
     return {
       upsertSession: (meta, inheritedEventCount, incarnation) =>
       this.upsertSession(tx, meta, inheritedEventCount, incarnation),
+      rewriteSessionHeader: (meta, inheritedEventCount) =>
+        this.rewriteSessionHeader(tx, meta, inheritedEventCount),
       getHead: (id) => this.getHead(tx, id),
       insertEvents: (events) => this.insertEvents(tx, events),
       insertBridges: (rows) => this.insertBridges(tx, rows),
@@ -207,6 +206,18 @@ export class PostgresBackend<THKT extends PgQueryResultHKT = PgQueryResultHKT> i
       .execute();
   }
 
+  private async rewriteSessionHeader(
+    exec: PgAsyncDatabase<THKT>,
+    meta: SessionHeader,
+    inheritedEventCount: number,
+  ): Promise<void> {
+    await exec
+      .update(pgSessions)
+      .set(sessionRewriteRow(meta, inheritedEventCount))
+      .where(eq(pgSessions.fSessionId, meta.id))
+      .execute();
+  }
+
   private async getHead(
     exec: PgAsyncDatabase<THKT>,
     id: SessionId,
@@ -218,7 +229,7 @@ export class PostgresBackend<THKT extends PgQueryResultHKT = PgQueryResultHKT> i
         .where(eq(pgSessions.fSessionId, id))
         .execute()
     )[0] as Pick<SessionRow, "fHeadEventId" | "fHeadSequence"> | undefined;
-    /* v8 ignore next -- appendBatch/commitRepair always materialize the row before reading the head */
+    /* v8 ignore next -- appendBatch/rewriteStored always materialize the row before reading the head */
     if (head === undefined) throw new Error(`session "${id}" has no materialized row`);
     return head;
   }

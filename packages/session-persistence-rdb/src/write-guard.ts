@@ -1,42 +1,60 @@
+import type { SessionId } from "@deepseek-ai/dsh-session";
+import { SessionOwnershipLostError } from "@deepseek-ai/dsh-session-persistence";
+
 /**
- * Per-instance write-authority state for one session-persistence backend.
+ * A durable-head divergence detected inside an append transaction: another
+ * process advanced (or rewound) this session's log, so this handle's write
+ * cursor is no longer the log's authority and its ownership is permanently
+ * gone. Reported as the seam's {@link SessionOwnershipLostError} — the error
+ * every caller of `append` already handles — while preserving the exact
+ * divergence diagnostics the base message omits.
+ */
+export class WriterDivergenceError extends SessionOwnershipLostError {
+  /** @param id - the session whose durable head diverged. */
+  constructor(id: SessionId, detail: string) {
+    super(id);
+    this.message = `${this.message} (${detail})`;
+  }
+}
+
+/**
+ * Per-instance CROSS-PROCESS write-authority state for one session-persistence
+ * backend.
  *
- * Each `PersistenceCoordinator` instance keeps its own event cursor in memory
- * and appends contiguous batches. Two backend instances (another `dsh`
- * process, or a duplicate persistence plugin in the same process) sharing one
- * database therefore must not both append to the same session id: each would
- * believe its own cursor is the log's authority and silently write over (or
- * interleave with) the other's tail. Since 0.1.2 the persisted seq IS the
- * event's logical seq, so an interleaved double-write would collide on
- * `UNIQUE(f_session_id, f_sequence)` — but only at the last row of a batch and
- * only after both writers committed their common prefix; the guard rejects
- * the second writer up front, before any row lands.
+ * Since 0.1.5 the durability seam is handle-based: one process claims a
+ * session's write ownership through its in-process registry
+ * (`src/tracker.ts`, `SessionAlreadyOwnedError`), and that registry cannot see
+ * a second `dsh` process sharing the same database. Two processes appending to
+ * one session id each keep their own cursor and would silently interleave (or
+ * overwrite) the other's tail, so this guard supplies the remaining half of the
+ * single-writer rule: before any row of a batch lands, the append transaction
+ * checks that the on-disk head still equals the head this instance last
+ * confirmed — its own writes or the read it opened the handle with. A mismatch
+ * means another writer advanced the log, and the append fails loud instead of
+ * corrupting it.
  *
- * This guard records, per session, the last CONFIRMED head this instance has
- * seen — its own writes or `loadStored` observations — and rejects any append
- * whose on-disk head no longer matches. One writer per session per log; a
- * second writer fails loud instead of corrupting the log. Different session
- * ids are independent (each has its own head), so two instances writing
- * different sessions remain a supported multi-process deployment.
+ * This guard is deliberately NOT the in-process ownership mechanism: an
+ * in-process duplicate is the seam's `SessionAlreadyOwnedError`, while this
+ * guard reports a durable-head divergence. Different session ids are
+ * independent (each has its own head), so two processes writing different
+ * sessions remain a supported deployment.
  *
- * Pure in-memory state machine — no I/O — so the coordinator's timing contract
- * (never-read vs. confirmed absence vs. confirmed head; confirm after append /
- * after load / re-confirm after repair) is directly unit-testable instead of
- * requiring end-to-end multi-instance setups.
+ * Pure in-memory state machine — no I/O — so the timing contract (never-read
+ * vs. confirmed absence vs. confirmed head; confirm after append / after a read
+ * / re-confirm after a repair) is directly unit-testable instead of requiring
+ * end-to-end multi-process setups.
  * @module @visecy/dsh-session-persistence-rdb/write-guard
  */
 
-import type { SessionId } from "@deepseek-ai/dsh-session";
-
 /**
- * The write-authority state machine for one backend instance. Not part of the
- * {@link Backend} seam: it guards the orchestration layer's own invariants and
- * lives entirely in memory.
+ * The cross-process write-authority state machine for one backend instance. Not
+ * part of the {@link Backend} seam: it guards the handle append path's own
+ * invariant and lives entirely in memory.
  */
 export class WriteGuard {
   /**
    * Last CONFIRMED head per session — the head this instance itself wrote or
-   * observed via `loadStored`. `-1` records a confirmed absence (no row).
+   * observed when it loaded the stored log. `-1` records a confirmed absence.
    * `undefined` (absent from the map) means this instance never read or wrote
    * the session.
    */
@@ -57,7 +75,7 @@ export class WriteGuard {
    * Fail loud when the on-disk head no longer matches this instance's last
    * confirmed head for the session. `undefined` (never read/written here) is
    * only acceptable for a session with NO row: a row written by someone else
-   * means this instance's coordinator cursor is not the log's authority.
+   * means this instance's handle cursor is not the log's authority.
    * @param id - the session id.
    * @param storedHead - the on-disk head cursor, read inside the append
    *   transaction before any row is inserted.
@@ -66,15 +84,17 @@ export class WriteGuard {
     const known = this.headSeqs.get(id);
     if (known === undefined) {
       if (storedHead !== -1) {
-        throw new Error(
-          `session "${id}" has a persisted log this instance has not read; another writer may own it — load the session first`,
+        throw new WriterDivergenceError(
+          id,
+          "a persisted log exists that this instance has not read; another writer may own it — open the session for write first",
         );
       }
       return;
     }
     if (known !== storedHead) {
-      throw new Error(
-        `session "${id}" was modified by another writer (stored head ${storedHead}, this instance last confirmed head ${known}); ` +
+      throw new WriterDivergenceError(
+        id,
+        `modified by another writer: stored head ${storedHead}, this instance last confirmed head ${known}; ` +
           "concurrent writers on one session are not supported",
       );
     }

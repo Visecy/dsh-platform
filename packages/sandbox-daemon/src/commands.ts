@@ -26,13 +26,18 @@ export interface CommandStatus {
   endedAt?: number
 }
 
-interface Record {
+interface CommandRecord {
   cmdId: string
   sessionId?: string
   spec: CommandSpec
   status: CommandStatus
   dir: string
-  groupDir: string
+  /**
+   * Set once the process group has launched. Optional because the record is
+   * registered before `launchGroup` resolves, so a concurrent `status()` /
+   * `rangeStatus()` can observe a record without a group directory.
+   */
+  groupDir?: string
   stdoutFile: string
   stderrFile: string
   stdoutStream: WriteStream
@@ -44,7 +49,7 @@ interface Record {
 }
 
 export class CommandRegistry {
-  private records = new Map<string, Record>()
+  private records = new Map<string, CommandRecord>()
   private timer?: NodeJS.Timeout
   private accepting = true
   readonly opts: { runtimeRoot: string; defaultGraceMs: number; pollMs?: number }
@@ -74,7 +79,7 @@ export class CommandRegistry {
     const stderrStream = createWriteStream(stderrFile)
 
     const env = mergeEnv(scrubEnv(process.env as Record<string, string>), spec.env)
-    const record: Record = {
+    const record: CommandRecord = {
       cmdId,
       sessionId: spec.sessionId,
       spec,
@@ -122,6 +127,9 @@ export class CommandRegistry {
   async status(cmdId: string): Promise<CommandStatus | undefined> {
     const rec = this.records.get(cmdId)
     if (rec === undefined) return undefined
+    // No group dir yet: the command is still in `starting` (or its launch
+    // threw) and has no exit record to read.
+    if (rec.groupDir === undefined) return { ...rec.status }
     const exit = await readGroupExit(rec.groupDir)
     if (exit !== undefined && rec.status.phase !== 'killed') {
       rec.status.phase = 'exited'
@@ -130,6 +138,19 @@ export class CommandRegistry {
       rec.status.endedAt = exit.at
     }
     return { ...rec.status }
+  }
+
+  /**
+   * Managed-range quiescence probe. `groupAlive` deliberately counts zombies
+   * as gone, so this reports whether any RUNNING process still belongs to the
+   * command's process group — including backgrounded grandchildren that
+   * outlive the direct child. Unknown commands report `{ alive: false }` so a
+   * provider polling a reaped command converges instead of spinning.
+   */
+  rangeStatus(cmdId: string): { alive: boolean; pgid?: number } {
+    const rec = this.records.get(cmdId)
+    if (rec === undefined || rec.groupDir === undefined) return { alive: false }
+    return { alive: groupAlive(rec.status.pgid), pgid: rec.status.pgid }
   }
 
   async readOutput(cmdId: string, opts: { stream: 'stdout' | 'stderr'; from: number }): Promise<{ frames: string; nextOffset: number }> {
@@ -197,12 +218,19 @@ export class CommandRegistry {
     const now = Date.now()
     for (const rec of this.records.values()) {
       if (rec.deadline !== undefined && now > rec.deadline && (rec.status.phase === 'running' || rec.status.phase === 'starting')) {
+        // A record is registered before launchGroup publishes its pgid; a
+        // zero/negative group id must NEVER reach terminateGroup, whose
+        // `kill(-pgid)` would otherwise address PID 1 (the container's init,
+        // usually this very process).
+        if (!(rec.status.pgid > 0)) continue
         rec.status.reason = 'timeout'
         rec.killed = true
-        terminateGroup(rec.status.pgid, 200).then((ok) => {
-          rec.status.phase = 'killed'
-          rec.status.endedAt = Date.now()
-        })
+        // Publish the phase synchronously: the kill decision is what status
+        // reports, and a concurrent status() reading exit.json would otherwise
+        // race the async termination and publish 'exited' for a killed command.
+        rec.status.phase = 'killed'
+        rec.status.endedAt = now
+        void terminateGroup(rec.status.pgid, 200)
       }
     }
   }

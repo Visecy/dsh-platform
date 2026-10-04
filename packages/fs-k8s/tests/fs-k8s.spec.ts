@@ -100,4 +100,63 @@ describe('FsK8s', () => {
     await client.write(podRoot + '/bin.dat', new Uint8Array([0, 1, 2, 255]))
     await expect(fs.readText(target)).rejects.toMatchObject({ code: 'FS_NOT_TEXT' })
   })
+
+  // DSH 0.1.5 added `readByteRange` to the fs seam; dsh-api-workspace-files
+  // calls it for every workspace file window/download, so its exact window
+  // semantics (inclusive start, shorter at EOF, empty past EOF) are contract.
+  describe('readByteRange (DSH 0.1.5 seam member)', () => {
+    const dec = (b: Uint8Array) => new TextDecoder().decode(b)
+
+    it('returns the requested window', async () => {
+      const target = t(podRoot + '/range.txt')
+      await fs.writeText(target, '0123456789')
+      expect(dec(await fs.readByteRange(target, { offset: 2, length: 4 }))).toBe('2345')
+    })
+
+    it('returns a short window when the file ends inside it', async () => {
+      const target = t(podRoot + '/range-eof.txt')
+      await fs.writeText(target, 'abcdef')
+      expect(dec(await fs.readByteRange(target, { offset: 4, length: 10 }))).toBe('ef')
+    })
+
+    it('returns empty (not an error) when the offset is at or past EOF', async () => {
+      const target = t(podRoot + '/range-past.txt')
+      await fs.writeText(target, 'abc')
+      expect((await fs.readByteRange(target, { offset: 3, length: 5 })).byteLength).toBe(0)
+      expect((await fs.readByteRange(target, { offset: 99, length: 5 })).byteLength).toBe(0)
+    })
+
+    it('never buffers more than the window for a large file', async () => {
+      const target = t(podRoot + '/range-big.bin')
+      const client = new (await import('../src/client.ts')).DaemonFilesClient(daemonUrl)
+      const big = new Uint8Array(1024 * 1024).map((_, i) => i % 251)
+      await client.write(podRoot + '/range-big.bin', big)
+      const window = await fs.readByteRange(target, { offset: 1024 * 512, length: 16 })
+      expect(window.byteLength).toBe(16)
+      expect([...window]).toEqual([...big.subarray(1024 * 512, 1024 * 512 + 16)])
+    })
+  })
+
+  it('readBytes fails FS_TOO_LARGE on the bytes read, not a prior stat', async () => {
+    const target = t(podRoot + '/too-big.txt')
+    await fs.writeText(target, 'x'.repeat(64))
+    expect((await fs.readBytes(target, undefined, 64)).byteLength).toBe(64)
+    await expect(fs.readBytes(target, undefined, 63)).rejects.toMatchObject({ code: 'FS_TOO_LARGE' })
+  })
+
+  // The seam documents stat as target-shaped (follows links) and lstat as
+  // path-shaped (does not); the two must stay distinguishable.
+  it('stat follows a symlink while lstat reports the link itself', async () => {
+    const { symlink } = await import('node:fs/promises')
+    await fs.writeText(t(podRoot + '/link-target.txt'), 'linked')
+    // Pod paths are virtual ('/workspace/x' -> <daemon root>/workspace/x), so
+    // the link target must be relative to resolve inside the daemon root.
+    await symlink('link-target.txt', join(root, 'workspace', 'link.txt'))
+    const stat = await fs.stat(t(podRoot + '/link.txt'))
+    const lstat = await fs.lstat(hostRoot + '/link.txt')
+    expect(stat?.type).toBe('file')
+    expect(stat?.size).toBe('linked'.length)
+    expect(lstat?.type).toBe('symlink')
+    expect(await fs.readText(t(podRoot + '/link.txt'))).toBe('linked')
+  })
 })

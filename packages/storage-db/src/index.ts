@@ -119,6 +119,12 @@ class PostgresDriver implements DbDriver {
 export class DbStorageBackend implements StorageBackend {
   readonly kv: KvFacet
   private closed = false
+  /**
+   * Schema initialization is idempotent but not free (DDL + PRAGMA/transaction
+   * per call). Cache the in-flight/finished promise so every unit open on one
+   * backend instance reuses the first run instead of re-issuing DDL.
+   */
+  private schemaReady: Promise<void> | undefined
 
   constructor(private driver: DbDriver) {
     this.kv = {
@@ -126,8 +132,13 @@ export class DbStorageBackend implements StorageBackend {
     }
   }
 
+  private ensureSchemaOnce(): Promise<void> {
+    this.schemaReady ??= Promise.resolve(this.driver.ensureSchema?.()).then(() => undefined)
+    return this.schemaReady
+  }
+
   private async ensureUnit(descriptor: KvUnitDescriptor): Promise<void> {
-    await this.driver.ensureSchema?.()
+    await this.ensureSchemaOnce()
     const existing = await this.driver.get<{ version: number }>(
       'SELECT version FROM dsh_storage_units WHERE name = ?',
       descriptor.name,

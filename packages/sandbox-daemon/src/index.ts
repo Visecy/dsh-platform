@@ -100,7 +100,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartedDaemon> {
       }
       if (path === '/files/info' && method === 'POST') {
         const b = JSON.parse(await readBody(req))
-        ok(res, { info: await files.info(b.path) })
+        ok(res, { info: await files.info(b.path, { follow: b.follow === true }) })
         return
       }
       if (path === '/files/remove' && method === 'POST') {
@@ -176,6 +176,15 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartedDaemon> {
       m = path.match(/^\/commands\/([^/]+)\/status$/)
       if (m !== null && method === 'GET') {
         ok(res, { status: await commands.status(m[1]) })
+        return
+      }
+      // Managed-range quiescence: the command's exit.json only reports the
+      // DIRECT child, while the provider's `waitForExit` contract is "the
+      // whole managed process group is empty" (a backgrounded grandchild keeps
+      // the range alive after the direct command exits).
+      m = path.match(/^\/commands\/([^/]+)\/range-status$/)
+      if (m !== null && method === 'GET') {
+        ok(res, { range: commands.rangeStatus(m[1]) })
         return
       }
       m = path.match(/^\/commands\/([^/]+)\/kill$/)

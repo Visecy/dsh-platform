@@ -1,3 +1,9 @@
 node_modules/
 packages/*/dist/
 *.tsbuildinfo
+
+# Test debris: the sandbox-daemon / fs-k8s / subprocess-k8s suites create their
+# working roots inside the package directory.
+packages/*/.tmp-*/
+packages/*/.dbg*/
+packages/*/.smoke-*

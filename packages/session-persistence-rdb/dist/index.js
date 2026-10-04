@@ -4,19 +4,30 @@ import { randomUUID as randomUUID3 } from "node:crypto";
 import { Pool } from "pg";
 import { drizzle as drizzlePg } from "drizzle-orm/node-postgres";
 import {
+  SessionAlreadyExistsError as SessionAlreadyExistsError2,
   SessionPersistence,
-  SessionPersistenceRevision,
-  PersistenceCoordinator
+  SessionPersistenceNotFoundError as SessionPersistenceNotFoundError2,
+  SessionPersistenceRevision as SessionPersistenceRevision2,
+  assertVersion as assertVersion2,
+  materializeCreateHeader
 } from "@deepseek-ai/dsh-session-persistence";
 import {
-  SessionLogOffset
+  SessionLogOffset as SessionLogOffset2
 } from "@deepseek-ai/dsh-session";
 
 // src/write-guard.ts
+import { SessionOwnershipLostError } from "@deepseek-ai/dsh-session-persistence";
+var WriterDivergenceError = class extends SessionOwnershipLostError {
+  /** @param id - the session whose durable head diverged. */
+  constructor(id, detail) {
+    super(id);
+    this.message = `${this.message} (${detail})`;
+  }
+};
 var WriteGuard = class {
   /**
    * Last CONFIRMED head per session — the head this instance itself wrote or
-   * observed via `loadStored`. `-1` records a confirmed absence (no row).
+   * observed when it loaded the stored log. `-1` records a confirmed absence.
    * `undefined` (absent from the map) means this instance never read or wrote
    * the session.
    */
@@ -35,7 +46,7 @@ var WriteGuard = class {
    * Fail loud when the on-disk head no longer matches this instance's last
    * confirmed head for the session. `undefined` (never read/written here) is
    * only acceptable for a session with NO row: a row written by someone else
-   * means this instance's coordinator cursor is not the log's authority.
+   * means this instance's handle cursor is not the log's authority.
    * @param id - the session id.
    * @param storedHead - the on-disk head cursor, read inside the append
    *   transaction before any row is inserted.
@@ -44,19 +55,35 @@ var WriteGuard = class {
     const known = this.headSeqs.get(id);
     if (known === void 0) {
       if (storedHead !== -1) {
-        throw new Error(
-          `session "${id}" has a persisted log this instance has not read; another writer may own it \u2014 load the session first`
+        throw new WriterDivergenceError(
+          id,
+          "a persisted log exists that this instance has not read; another writer may own it \u2014 open the session for write first"
         );
       }
       return;
     }
     if (known !== storedHead) {
-      throw new Error(
-        `session "${id}" was modified by another writer (stored head ${storedHead}, this instance last confirmed head ${known}); concurrent writers on one session are not supported`
+      throw new WriterDivergenceError(
+        id,
+        `modified by another writer: stored head ${storedHead}, this instance last confirmed head ${known}; concurrent writers on one session are not supported`
       );
     }
   }
 };
+
+// src/migrate.ts
+import {
+  sessionFormatCatalog,
+  SessionFormatUnsupportedMigrationError
+} from "@deepseek-ai/dsh-session-format-catalog";
+import { SESSION_FORMAT_VERSION, SessionLogOffset } from "@deepseek-ai/dsh-session";
+import {
+  SessionFormatUnsupportedError,
+  SessionPersistenceCorruptionError,
+  assertStoredId,
+  assertVersion,
+  validateStoredEvents
+} from "@deepseek-ai/dsh-session-persistence";
 
 // src/adapters/to-sqlite.ts
 import { sql } from "drizzle-orm";
@@ -373,6 +400,7 @@ var tEvents = sqliteTables["t_events"];
 var tSessionEvents = sqliteTables["t_session_events"];
 var DEFAULT_BUSY_TIMEOUT_MS = 5e3;
 function eventDimensions(event) {
+  if (event.type === "todo/write") return { role: "state", name: "todos", actionId: "" };
   switch (event.type) {
     case "turn/start":
     case "turn/end":
@@ -384,8 +412,10 @@ function eventDimensions(event) {
     case "request/header":
     case "request/context":
       return { role: "user", name: "", actionId: "" };
+    case "system/message":
+      return { role: "system", name: "", actionId: "" };
     case "assistant/message":
-    case "assistant/chunk":
+    case "assistant/attempt":
       return { role: "model", name: "", actionId: "" };
     case "tool/call":
       return { role: "function", name: event.data.name, actionId: event.data.callId };
@@ -393,28 +423,17 @@ function eventDimensions(event) {
       const block = event.data.message?.content[0];
       return { role: "function", name: "", actionId: block?.toolCallId ?? "" };
     }
-    case "todo/write":
-      return { role: "state", name: "todos", actionId: "" };
     default:
       return { role: "", name: "", actionId: "" };
   }
 }
 
 // src/log.ts
-function rowToMeta(row) {
-  if (!Number.isSafeInteger(row.fCreatedAt) || row.fCreatedAt < 0) {
-    throw new Error("stored session createdAt must be a non-negative safe integer");
-  }
-  return {
-    version: row.fVersion,
-    id: row.fSessionId,
-    createdAt: row.fCreatedAt,
-    ...row.fCwd !== null ? { cwd: row.fCwd } : {},
-    ...row.fParentSession !== null ? { parentSession: row.fParentSession } : {},
-    isSeeded: row.fSeedLength !== null,
-    ...row.fOrigin !== null ? { origin: row.fOrigin } : {},
-    ...row.fDelegationDepth === null ? {} : { delegationDepth: row.fDelegationDepth }
-  };
+function replaceRange(op) {
+  const start = op.start ?? op.startSeq;
+  const end = op.end ?? op.endSeq;
+  if (typeof start !== "number" || typeof end !== "number") return void 0;
+  return { start, end };
 }
 function sessionInsertRow(meta, inheritedEventCount, incarnation) {
   return {
@@ -442,6 +461,12 @@ function sessionConflictRow(meta) {
     fDelegationDepth: meta.delegationDepth ?? null
   };
 }
+function sessionRewriteRow(meta, inheritedEventCount) {
+  return {
+    ...sessionConflictRow(meta),
+    fSeedLength: meta.isSeeded ? inheritedEventCount : null
+  };
+}
 function hasLegacyRenumbering(rows) {
   return rows.some((row) => row.fOriginalSeq !== row.fSequence);
 }
@@ -454,39 +479,6 @@ function storedInheritedCount(storedCut, seqRows, legacy) {
   }
   return count;
 }
-function remapSurfaceOp(op, remap) {
-  if (op === "append") return op;
-  return { op: "replace", start: remap(op.start), end: remap(op.end) };
-}
-function remapShadowedRange(range, remap) {
-  return { start: remap(range.start), end: remap(range.end) };
-}
-function rowToEvent(row, seqMap) {
-  const remap = (seq) => seqMap?.get(seq) ?? seq;
-  const surfaceFields = {
-    ...row.fSourceEventSeqs !== null ? {
-      sourceEventSeqs: JSON.parse(row.fSourceEventSeqs).map(remap)
-    } : {},
-    ...row.fSurfaceOp !== null ? {
-      surfaceOp: remapSurfaceOp(JSON.parse(row.fSurfaceOp), remap)
-    } : {}
-  };
-  const data = JSON.parse(row.fData);
-  if (row.fKind === "compaction/summary" || row.fKind === "compaction/prune") {
-    const metering = data;
-    if (metering.shadowedRange !== void 0) {
-      metering.shadowedRange = remapShadowedRange(metering.shadowedRange, remap);
-    }
-  }
-  return {
-    type: row.fKind,
-    seq: row.fSequence,
-    time: row.fCreatedAt,
-    data,
-    ...row.fEncoding === IGNORABLE_EVENT_ENCODING ? { ignorable: true } : {},
-    ...surfaceFields
-  };
-}
 function buildSeqMap(rows) {
   const map = /* @__PURE__ */ new Map();
   for (const row of rows) {
@@ -494,42 +486,655 @@ function buildSeqMap(rows) {
   }
   return map;
 }
-function scanRows(rows, base = 0, seqMap) {
+function releasedSurfaceOp(op, remap) {
+  if (op === "append") return "append";
+  if (op === null || typeof op !== "object") return op;
+  const range = replaceRange(op);
+  if (range === void 0) return op;
+  return { op: "replace", start: remap(range.start), end: remap(range.end) };
+}
+function currentSurfaceOp(op) {
+  if (op === "append") return "append";
+  if (op === null || typeof op !== "object") return op;
+  const range = replaceRange(op);
+  if (range === void 0) return op;
+  return { op: "replace", startSeq: range.start, endSeq: range.end };
+}
+function remapReleasedData(type, data, remap) {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return;
+  const record = data;
+  const remapArray = (value) => {
+    if (!Array.isArray(value)) return value;
+    return value.map((entry) => typeof entry === "number" ? remap(entry) : entry);
+  };
+  switch (type) {
+    case "compaction/summary":
+    case "compaction/prune": {
+      const range = record["shadowedRange"];
+      if (range !== null && typeof range === "object" && !Array.isArray(range)) {
+        const { start, end } = range;
+        if (typeof start === "number" && typeof end === "number") {
+          record["shadowedRange"] = { start: remap(start), end: remap(end) };
+        }
+      }
+      if (record["shadowedSeqs"] !== void 0) {
+        record["shadowedSeqs"] = remapArray(record["shadowedSeqs"]);
+      }
+      break;
+    }
+    case "session/title":
+    case "session/title-llm-request": {
+      if (record["messageSeqs"] !== void 0) {
+        record["messageSeqs"] = remapArray(record["messageSeqs"]);
+      }
+      break;
+    }
+    case "command/done": {
+      const source = record["sourceEventSeq"];
+      if (typeof source === "number") record["sourceEventSeq"] = remap(source);
+      break;
+    }
+    default:
+      break;
+  }
+}
+function rowToReleasedRow(row, remap = (seq) => seq, projectSurface = releasedSurfaceOp) {
+  const data = JSON.parse(row.fData);
+  remapReleasedData(row.fKind, data, remap);
+  const released = {
+    type: row.fKind,
+    seq: row.fSequence,
+    time: row.fCreatedAt,
+    data
+  };
+  if (row.fEncoding === IGNORABLE_EVENT_ENCODING) released.ignorable = true;
+  if (row.fSourceEventSeqs !== null) {
+    const sources = JSON.parse(row.fSourceEventSeqs).map(remap);
+    if (sources.length > 0) released.sourceEventSeqs = sources;
+  }
+  if (row.fSurfaceOp !== null) {
+    released.surfaceOp = projectSurface(JSON.parse(row.fSurfaceOp), remap);
+  }
+  return released;
+}
+function scanRows(rows, base = 0) {
   const parsed = rows.map((row) => {
     try {
-      return { ok: true, event: rowToEvent(row, seqMap) };
+      JSON.parse(row.fData);
+      return true;
     } catch {
-      return { ok: false };
+      return false;
     }
   });
   let lastTurnEnd = -1;
   for (let i = parsed.length - 1; i >= 0; i--) {
-    if (parsed[i]?.ok && rows[i]?.fKind === "turn/end") {
+    if (parsed[i] === true && rows[i]?.fKind === "turn/end") {
       lastTurnEnd = i;
       break;
     }
   }
   const preserved = [];
   for (let i = 0; i < rows.length; i++) {
-    const p = parsed[i];
-    if (!p?.ok || p.event === void 0) {
+    const row = rows[i];
+    if (parsed[i] !== true) {
+      if (i <= lastTurnEnd)
+        throw new Error(`corrupt session log: unparsable committed event at seq ${row.fSequence}`);
+      break;
+    }
+    if (row.fSequence !== base + i) {
       if (i <= lastTurnEnd)
         throw new Error(
-          `corrupt session log: unparsable committed event at seq ${rows[i]?.fSequence}`
+          `corrupt session log: seq gap in committed region (expected ${base + i}, got ${row.fSequence})`
         );
       break;
     }
-    if (p.event.seq !== base + i) {
-      if (i <= lastTurnEnd)
-        throw new Error(
-          `corrupt session log: seq gap in committed region (expected ${base + i}, got ${p.event.seq})`
-        );
-      break;
-    }
-    preserved.push(p.event);
+    preserved.push(row);
   }
   return preserved.length < rows.length ? { preserved, tornFrom: base + preserved.length } : { preserved };
 }
+
+// src/migrate.ts
+if (sessionFormatCatalog.currentVersion !== SESSION_FORMAT_VERSION) {
+  throw new Error(
+    `session-persistence-rdb: format catalog v${sessionFormatCatalog.currentVersion} does not match Session v${SESSION_FORMAT_VERSION}`
+  );
+}
+function physicalHeader(row, inheritedEventCount) {
+  const seeded = row.fSeedLength !== null;
+  const base = {
+    type: "session",
+    version: row.fVersion,
+    id: row.fSessionId,
+    createdAt: row.fCreatedAt,
+    delegationDepth: row.fDelegationDepth ?? 0,
+    ...row.fCwd !== null ? { cwd: row.fCwd } : {},
+    ...row.fParentSession !== null ? { parentSession: row.fParentSession } : {},
+    ...row.fOrigin !== null ? { origin: row.fOrigin } : {}
+  };
+  return row.fVersion >= 2 ? { ...base, isSeeded: seeded } : { ...base, ...seeded ? { seedLength: inheritedEventCount } : {} };
+}
+function migrationFailure(error, id, location) {
+  if (error instanceof SessionFormatUnsupportedMigrationError) {
+    return new SessionFormatUnsupportedError(
+      location === void 0 ? `${error.message} (session "${id}")` : `${error.message} (session "${id}"; raw store: ${location.path})`,
+      location
+    );
+  }
+  if (error instanceof SessionPersistenceCorruptionError) return error;
+  if (error instanceof SessionFormatUnsupportedError) return error;
+  return new SessionPersistenceCorruptionError(
+    `session "${id}": stored log is corrupt: ${error instanceof Error ? error.message : String(error)}${location === void 0 ? "" : ` (raw store: ${location.path})`}`,
+    { cause: error }
+  );
+}
+function storedHeader(row, location) {
+  const headerValue = physicalHeader(row, row.fSeedLength ?? 0);
+  let header;
+  try {
+    const classification = sessionFormatCatalog.readHeader(headerValue);
+    if (classification.status === "unsupported") {
+      throw new SessionFormatUnsupportedError(
+        `${classification.reason} (session "${row.fSessionId}")${location === void 0 ? "" : `; raw store: ${location.path}`}`,
+        location
+      );
+    }
+    if (classification.status === "malformed") {
+      const reason = new Error(classification.reason);
+      throw new SessionPersistenceCorruptionError(
+        `session "${row.fSessionId}": stored header is malformed: ${classification.reason}`,
+        { cause: reason }
+      );
+    }
+    header = classification.header;
+  } catch (error) {
+    if (error instanceof SessionFormatUnsupportedError || error instanceof SessionPersistenceCorruptionError) {
+      throw error;
+    }
+    throw migrationFailure(error, row.fSessionId, location);
+  }
+  const meta = header;
+  assertVersion(meta, location);
+  assertStoredId(row.fSessionId, meta);
+  return meta;
+}
+function decodeStoredLog(row, rows, location) {
+  const id = row.fSessionId;
+  let preserved;
+  let tornFrom;
+  try {
+    ({ preserved, tornFrom } = scanRows(rows));
+  } catch (error) {
+    throw new SessionPersistenceCorruptionError(
+      `session "${id}": ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    );
+  }
+  const legacy = hasLegacyRenumbering(rows);
+  const inheritedEventCount = storedInheritedCount(row.fSeedLength, rows, legacy);
+  const headerValue = physicalHeader(row, inheritedEventCount);
+  let restore;
+  try {
+    restore = sessionFormatCatalog.createRestore(headerValue, {
+      recovery: "strict",
+      validation: "transformed"
+    });
+  } catch (error) {
+    throw migrationFailure(error, id, location);
+  }
+  const remap = legacy ? buildSeqMap(rows) : void 0;
+  const remapSeq = (seq) => remap?.get(seq) ?? seq;
+  const dropPrunedChunkProvenance = legacy && !preserved.some((candidate) => candidate.fKind === "assistant/chunk");
+  const projectSurface = row.fVersion === SESSION_FORMAT_VERSION ? currentSurfaceOp : void 0;
+  for (const candidate of preserved) {
+    let releasedRow;
+    try {
+      releasedRow = rowToReleasedRow(candidate, remapSeq, projectSurface);
+      if (dropPrunedChunkProvenance && releasedRow.type === "assistant/message" && releasedRow.sourceEventSeqs !== void 0) {
+        delete releasedRow.sourceEventSeqs;
+      }
+    } catch (error) {
+      throw migrationFailure(error, id, location);
+    }
+    try {
+      restore.decodeRow(releasedRow);
+    } catch (error) {
+      throw migrationFailure(error, id, location);
+    }
+  }
+  let artifact;
+  try {
+    artifact = restore.finish();
+  } catch (error) {
+    throw migrationFailure(error, id, location);
+  }
+  const meta = artifact.header;
+  assertVersion(meta, location);
+  assertStoredId(row.fSessionId, meta);
+  const events2 = validateStoredEvents(
+    meta,
+    artifact.events.map((event) => event),
+    location
+  );
+  return {
+    meta,
+    inheritedEventCount: SessionLogOffset(artifact.inheritedEventCount),
+    events: events2,
+    eventState: "detached",
+    ...tornFrom !== void 0 ? { tornFrom } : {},
+    legacy,
+    current: !legacy && row.fVersion === SESSION_FORMAT_VERSION
+  };
+}
+
+// src/handle.ts
+import {
+  SessionHandleClosedError,
+  SessionPersistenceNotFoundError,
+  SessionReadOnlyError,
+  assertContiguous,
+  materializeAppendBatch
+} from "@deepseek-ai/dsh-session-persistence";
+var LIVE_WRITE_BATCH_MAX_DELAY_MS = 200;
+function toError(error) {
+  return error instanceof Error ? error : new Error(String(error));
+}
+var RdbSessionHandle = class {
+  constructor(storage, id, header, access, state) {
+    this.storage = storage;
+    this.id = id;
+    this.header = header;
+    this.access = access;
+    this.state = state;
+    this.observedLength = state.primed?.events.length ?? 0;
+  }
+  storage;
+  id;
+  header;
+  access;
+  state;
+  /** Per-handle mutation chain; the stored promise never rejects. */
+  chain = Promise.resolve();
+  closing;
+  /** Highest event count this handle has observed (monotonic-read guard). */
+  observedLength = 0;
+  /** Routed live events awaiting their batching deadline (persistence-owned copies). */
+  buffered = [];
+  batchTimer;
+  /** Set when a drain failed; the automatic timer stays quiet until the next drain. */
+  drainPaused = false;
+  draining;
+  /** Exact fork-inherited prefix length stored with this session's log. */
+  get inheritedEventCount() {
+    return this.state.inheritedEventCount;
+  }
+  /**
+   * Read a slice of the valid contiguous logical log; see the seam contract.
+   * @param offset - first logical seq to include (default 0).
+   * @param length - maximum events returned (default: the rest).
+   * @param options - optional cancellation.
+   * @returns a caller-owned outer slice carrying its values' ownership state.
+   */
+  async read(offset = 0, length, options) {
+    this.assertOpen("read");
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new TypeError(`read offset must be a non-negative safe integer, got ${String(offset)}`);
+    }
+    if (length !== void 0 && (!Number.isSafeInteger(length) || length < 0)) {
+      throw new TypeError(`read length must be a non-negative safe integer, got ${String(length)}`);
+    }
+    options?.signal?.throwIfAborted();
+    const events2 = await this.sourceEvents(options?.signal);
+    const end = length === void 0 ? void 0 : offset + length;
+    return { eventState: "detached", events: events2.slice(offset, end) };
+  }
+  /**
+   * Durably append a contiguous batch; see the seam contract.
+   * @param events - the contiguous batch in seq order.
+   * @param options - optional cancellation observed before the write starts.
+   */
+  async append(events2, options) {
+    this.assertOpen("append");
+    const batch = materializeAppendBatch(events2);
+    return this.run("append", async () => {
+      options?.signal?.throwIfAborted();
+      await this.flushBuffered();
+      await this.persistContiguous(batch);
+    });
+  }
+  /**
+   * The durability barrier: routed live events drain durably and the session is
+   * materialized, so an explicitly flushed empty session survives this process.
+   * @param options - optional cancellation observed before the barrier starts.
+   */
+  flush(options) {
+    return this.run("flush", async () => {
+      options?.signal?.throwIfAborted();
+      if (this.access !== "write") throw new SessionReadOnlyError(this.id, "flush");
+      await this.flushBuffered();
+      options?.signal?.throwIfAborted();
+      if (this.state.materialized) return;
+      await this.storage.materializeHeader(this.header, this.state.inheritedEventCount);
+      this.state.materialized = true;
+      this.storage.markMaterialized(this.id);
+    });
+  }
+  /**
+   * Release the handle; see the seam contract. Idempotent and uncancellable: a
+   * write handle first drains its routed live buffer, so teardown loses nothing
+   * regardless of which fiber unwinds first.
+   * @returns settlement of the release.
+   */
+  close() {
+    return this.closing ??= (async () => {
+      let drainFailure;
+      for (; ; ) {
+        try {
+          await this.drainLive();
+        } catch (error) {
+          drainFailure = error;
+          break;
+        }
+        await this.chain;
+        if (this.buffered.length === 0) break;
+      }
+      await this.chain;
+      if (this.batchTimer !== void 0) {
+        clearTimeout(this.batchTimer);
+        this.batchTimer = void 0;
+      }
+      this.storage.releaseHandle(this, this.state.materialized);
+      if (drainFailure !== void 0) throw toError(drainFailure);
+    })();
+  }
+  /** `await using` support: delegates to {@link close}. */
+  [Symbol.asyncDispose]() {
+    return this.close();
+  }
+  /**
+   * Buffer one published live session event and arm the bounded batching
+   * window when it is idle. The routing installer is the only caller.
+   * @param event - the live event, retained as a persistence-owned copy.
+   * @param reportBackgroundFailure - observes a deadline-driven drain failure
+   *   (the events stay buffered; the next {@link drainLive} retries loudly).
+   */
+  enqueueLive(event, reportBackgroundFailure) {
+    this.buffered.push(structuredClone(event));
+    if (this.batchTimer !== void 0 || this.drainPaused) return;
+    this.batchTimer = setTimeout(() => {
+      this.batchTimer = void 0;
+      this.drainLive().catch(reportBackgroundFailure);
+    }, LIVE_WRITE_BATCH_MAX_DELAY_MS);
+    this.batchTimer.unref?.();
+  }
+  /**
+   * Durably drain the routed live buffer through the mutation chain; concurrent
+   * callers join one drain, and a failure retains the batch in order so
+   * `session/flush` can retry and reject loudly.
+   */
+  drainLive() {
+    this.draining ??= this.enqueueChain(() => this.flushBuffered()).finally(() => {
+      this.draining = void 0;
+    });
+    return this.draining;
+  }
+  /** The events this handle can currently serve, honoring this handle's view. */
+  async sourceEvents(signal) {
+    const primed = this.state.primed;
+    if (primed !== void 0 && this.access === "write") return primed.events;
+    if (!this.state.materialized && this.storage.hasPending(this.id)) return [];
+    const log = await this.storage.loadStored(this.id, signal);
+    if (log === void 0) {
+      if (this.storage.hasPending(this.id)) return [];
+      throw new SessionPersistenceNotFoundError(this.id);
+    }
+    if (log.events.length < this.observedLength) {
+      throw new Error(
+        `session "${this.id}": stored log shrank below a previously observed prefix (${log.events.length} < ${this.observedLength})`
+      );
+    }
+    this.observedLength = log.events.length;
+    return log.events;
+  }
+  /** The shared durable-append body: contiguity, torn-tail repair, storage write, state advance. */
+  async persistContiguous(batch) {
+    if (this.access !== "write") throw new SessionReadOnlyError(this.id, "append");
+    if (batch.length === 0) return;
+    assertContiguous(this.id, batch, this.state.cursor);
+    if (this.state.tornFrom !== void 0) {
+      await this.storage.truncateTornTail(this.header, this.state.tornFrom);
+      this.state.tornFrom = void 0;
+    }
+    await this.storage.appendBatch(this.header, this.state.inheritedEventCount, batch);
+    this.state.materialized = true;
+    this.state.cursor += batch.length;
+    this.state.primed = void 0;
+    this.observedLength = this.state.cursor;
+    this.storage.markMaterialized(this.id);
+  }
+  /** Drain the routed live buffer; assumes the caller holds the mutation chain. */
+  async flushBuffered() {
+    if (this.batchTimer !== void 0) {
+      clearTimeout(this.batchTimer);
+      this.batchTimer = void 0;
+    }
+    this.drainPaused = false;
+    while (this.buffered.length > 0) {
+      const batch = this.buffered.splice(0);
+      try {
+        await this.persistContiguous(materializeAppendBatch(batch));
+      } catch (error) {
+        this.buffered = batch.concat(this.buffered);
+        this.drainPaused = true;
+        throw error;
+      }
+    }
+  }
+  /** Serialize one operation onto the chain without the closed-handle refusal. */
+  enqueueChain(op) {
+    const next = this.chain.then(op);
+    this.chain = next.then(
+      () => void 0,
+      () => void 0
+    );
+    return next;
+  }
+  /** Serialize one public mutating operation onto this handle's chain. */
+  async run(operation, op) {
+    this.assertOpen(operation);
+    return this.enqueueChain(async () => {
+      this.assertOpen(operation);
+      return op();
+    });
+  }
+  assertOpen(operation) {
+    if (this.closing !== void 0) throw new SessionHandleClosedError(this.id, operation);
+  }
+};
+
+// src/tracker.ts
+import {
+  SessionAlreadyExistsError,
+  SessionAlreadyOwnedError,
+  SessionHandleClosedError as SessionHandleClosedError2,
+  SessionPersistenceRevision
+} from "@deepseek-ai/dsh-session-persistence";
+var RdbTracker = class {
+  /** @param name - backend label used in in-memory revision tokens and teardown errors. */
+  constructor(name) {
+    this.name = name;
+  }
+  name;
+  /** Every open handle; teardown closes what remains. */
+  openHandles = /* @__PURE__ */ new Set();
+  /** `null` marks a claim whose handle is still being constructed. */
+  writers = /* @__PURE__ */ new Map();
+  pending = /* @__PURE__ */ new Map();
+  counter = 0;
+  /**
+   * Claim write ownership and record the created session as pending, making it
+   * observable to this process before it materializes.
+   * @param header - the validated detached header.
+   * @param inheritedEventCount - the exact fork-inherited prefix length.
+   * @throws {SessionAlreadyExistsError} when a concurrent create or an open
+   *   write handle holds the id — for create, the duplicate is the fact.
+   */
+  registerCreated(header, inheritedEventCount) {
+    if (this.writers.has(header.id)) throw new SessionAlreadyExistsError(header.id);
+    this.writers.set(header.id, null);
+    this.pending.set(header.id, {
+      header,
+      revision: SessionPersistenceRevision(`memory:${this.name}:${++this.counter}`),
+      inheritedEventCount
+    });
+  }
+  /**
+   * Claim write ownership for an existing session.
+   * @param id - the session to claim.
+   * @throws {SessionAlreadyOwnedError} when an active write handle exists.
+   */
+  claimWrite(id) {
+    if (this.writers.has(id)) throw new SessionAlreadyOwnedError(id);
+    this.writers.set(id, null);
+  }
+  /**
+   * Roll a failed write open back.
+   * @param id - the session whose claim is dropped.
+   */
+  releaseClaim(id) {
+    this.writers.delete(id);
+  }
+  /**
+   * The pending entry for a created-but-unmaterialized session, if any.
+   * @param id - the session to look up.
+   * @returns the pending header and in-memory revision.
+   */
+  pendingOf(id) {
+    return this.pending.get(id);
+  }
+  /**
+   * Whether this process still tracks a created-but-unmaterialized session.
+   * @param id - the session to test.
+   * @returns true while the pending entry exists.
+   */
+  hasPending(id) {
+    return this.pending.has(id);
+  }
+  /**
+   * Iterate the pending sessions for listing.
+   * @returns the pending entries, keyed by session id.
+   */
+  pendingEntries() {
+    return this.pending.entries();
+  }
+  /**
+   * Drop a pending entry once the session materialized durably.
+   * @param id - the session that reached durable storage.
+   */
+  materialized(id) {
+    this.pending.delete(id);
+  }
+  /**
+   * Track one open handle for teardown and, for a write handle, bind it as the
+   * session's live event route.
+   * @param handle - the just-constructed handle.
+   * @returns the same handle, for construction-site chaining.
+   */
+  adopt(handle) {
+    this.openHandles.add(handle);
+    if (handle.access === "write") this.writers.set(handle.id, handle);
+    return handle;
+  }
+  /**
+   * Release one handle's bookkeeping on close. A write handle drops its
+   * ownership claim; a creator that never materialized leaves nothing behind —
+   * the session never existed.
+   * @param handle - the closing handle.
+   * @param materialized - whether the session reached durable storage.
+   */
+  release(handle, materialized) {
+    this.openHandles.delete(handle);
+    if (handle.access !== "write") return;
+    this.writers.delete(handle.id);
+    if (!materialized) this.pending.delete(handle.id);
+  }
+  /**
+   * Drain and flush every active write handle — the service-wide durability
+   * barrier behind `SessionPersistence.flush`.
+   * @throws {AggregateError} naming each session whose flush failed; the
+   *   remaining handles still flush.
+   */
+  async flushAll() {
+    const errors = [];
+    for (const writer of [...this.writers.values()]) {
+      if (writer === null) continue;
+      try {
+        await writer.drainLive();
+        await writer.flush();
+      } catch (error) {
+        if (error instanceof SessionHandleClosedError2) continue;
+        errors.push(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+    if (errors.length > 0) throw new AggregateError(errors, `${this.name} flush failed`);
+  }
+  /**
+   * Install the backend's live session routing and teardown. Persistence
+   * enforces one active write handle per id, so the listeners route published
+   * sessions' events by id; the teardown effect closes every open handle —
+   * close drains the routed buffer — and then runs the backend's own teardown
+   * (closing the database connection). Registrations are effects of the current
+   * fiber.
+   * @param ctx - the backend's context.
+   * @param closeStorage - backend teardown, run after every handle is closed.
+   */
+  install(ctx, closeStorage) {
+    ctx.on("session/event", (session, event) => {
+      this.writers.get(session.id)?.enqueueLive(event, (error) => {
+        ctx.logger.warn(
+          `session-persistence-rdb: background write for session "${session.id}" failed (buffered events retained): ${String(error)}`
+        );
+      });
+    });
+    ctx.on("session/flush", (session) => {
+      const writer = this.writers.get(session.id);
+      if (writer === null || writer === void 0) return void 0;
+      return (async () => {
+        await writer.drainLive();
+        await writer.flush();
+      })();
+    });
+    ctx.on("session/disposed", (session) => {
+      const writer = this.writers.get(session.id);
+      if (writer === null || writer === void 0) return;
+      writer.close().catch((error) => {
+        ctx.logger.warn(
+          `session-persistence-rdb: final drain for session "${session.id}" failed: ${String(error)}`
+        );
+      });
+    });
+    ctx.effect(
+      () => async () => {
+        const errors = [];
+        for (const handle of [...this.openHandles]) {
+          try {
+            await handle.close();
+          } catch (error) {
+            errors.push(error);
+          }
+        }
+        try {
+          await closeStorage();
+        } catch (error) {
+          errors.push(error);
+        }
+        if (errors.length > 0) {
+          throw new AggregateError(errors, `${this.name} dispose failed`);
+        }
+      },
+      `${this.name} open handles`
+    );
+  }
+};
 
 // src/sqlite.ts
 import { randomUUID } from "node:crypto";
@@ -616,12 +1221,14 @@ var SqliteBackend = class {
   options;
   kind = "sqlite";
   storeIdentity;
+  location;
   /** The resolved database path (queue key); set by {@link open}. */
   dbPath = "";
   db;
   async open() {
     const actual = this.options.path === ":memory:" ? this.options.path : resolve(this.options.path);
     this.dbPath = actual;
+    this.location = { kind: "sqlite", path: actual };
     if (actual !== ":memory:") {
       await mkdir(dirname(actual), { recursive: true, mode: 448 });
       await createDatabaseFile(actual);
@@ -657,14 +1264,8 @@ var SqliteBackend = class {
   async getSession(id) {
     return this.db.select().from(tSessions).where(eq(tSessions.fSessionId, id)).get();
   }
-  async getSeqMapRows(id) {
-    return this.eventRows().where(eq(tSessionEvents.fSessionId, id)).all();
-  }
-  async getEventRows(id, fromSequence) {
-    const scoped = fromSequence === void 0 ? this.eventRows().where(eq(tSessionEvents.fSessionId, id)) : this.eventRows().where(
-      and(eq(tSessionEvents.fSessionId, id), gte(tSessionEvents.fSequence, fromSequence))
-    );
-    return scoped.orderBy(tSessionEvents.fSequence).all();
+  async getEventRows(id) {
+    return this.eventRows().where(eq(tSessionEvents.fSessionId, id)).orderBy(tSessionEvents.fSequence).all();
   }
   async listSessions() {
     return this.db.select().from(tSessions).all();
@@ -692,6 +1293,7 @@ var SqliteBackend = class {
    */
   tx = {
     upsertSession: (meta, inheritedEventCount, incarnation) => this.upsertSession(meta, inheritedEventCount, incarnation),
+    rewriteSessionHeader: (meta, inheritedEventCount) => this.rewriteSessionHeader(meta, inheritedEventCount),
     getHead: (id) => this.getHead(id),
     insertEvents: (events2) => this.insertEvents(events2),
     insertBridges: (rows) => this.insertBridges(rows),
@@ -707,6 +1309,9 @@ var SqliteBackend = class {
       target: tSessions.fSessionId,
       set: sessionConflictRow(meta)
     }).run();
+  }
+  async rewriteSessionHeader(meta, inheritedEventCount) {
+    this.db.update(tSessions).set(sessionRewriteRow(meta, inheritedEventCount)).where(eq(tSessions.fSessionId, meta.id)).run();
   }
   async getHead(id) {
     const head = this.db.select({ fHeadEventId: tSessions.fHeadEventId, fHeadSequence: tSessions.fHeadSequence }).from(tSessions).where(eq(tSessions.fSessionId, id)).get();
@@ -769,6 +1374,7 @@ var PostgresBackend = class {
   options;
   kind = "postgres";
   storeIdentity;
+  location;
   async open() {
     const storeId = await this.db.transaction(async (tx) => {
       const probe = await tx.execute(
@@ -808,6 +1414,7 @@ var PostgresBackend = class {
       return storeId2;
     });
     this.storeIdentity = `${this.options.identityBase}:store:${storeId}`;
+    this.location = { kind: "postgres", path: this.options.identityBase };
   }
   async close() {
     await this.options.close();
@@ -815,14 +1422,8 @@ var PostgresBackend = class {
   async getSession(id) {
     return (await this.db.select().from(pgSessions).where(eq2(pgSessions.fSessionId, id)).execute())[0];
   }
-  async getSeqMapRows(id) {
-    return this.eventRows(this.db).where(eq2(pgSessionEvents.fSessionId, id)).execute();
-  }
-  async getEventRows(id, fromSequence) {
-    const scoped = fromSequence === void 0 ? this.eventRows(this.db).where(eq2(pgSessionEvents.fSessionId, id)) : this.eventRows(this.db).where(
-      and2(eq2(pgSessionEvents.fSessionId, id), gte2(pgSessionEvents.fSequence, fromSequence))
-    );
-    return scoped.orderBy(pgSessionEvents.fSequence).execute();
+  async getEventRows(id) {
+    return this.eventRows(this.db).where(eq2(pgSessionEvents.fSessionId, id)).orderBy(pgSessionEvents.fSequence).execute();
   }
   async listSessions() {
     return this.db.select().from(pgSessions).execute();
@@ -834,6 +1435,7 @@ var PostgresBackend = class {
   txFor(tx) {
     return {
       upsertSession: (meta, inheritedEventCount, incarnation) => this.upsertSession(tx, meta, inheritedEventCount, incarnation),
+      rewriteSessionHeader: (meta, inheritedEventCount) => this.rewriteSessionHeader(tx, meta, inheritedEventCount),
       getHead: (id) => this.getHead(tx, id),
       insertEvents: (events2) => this.insertEvents(tx, events2),
       insertBridges: (rows) => this.insertBridges(tx, rows),
@@ -855,6 +1457,9 @@ var PostgresBackend = class {
       target: pgSessions.fSessionId,
       set: sessionConflictRow(meta)
     }).execute();
+  }
+  async rewriteSessionHeader(exec, meta, inheritedEventCount) {
+    await exec.update(pgSessions).set(sessionRewriteRow(meta, inheritedEventCount)).where(eq2(pgSessions.fSessionId, meta.id)).execute();
   }
   async getHead(exec, id) {
     const head = (await exec.select({ fHeadEventId: pgSessions.fHeadEventId, fHeadSequence: pgSessions.fHeadSequence }).from(pgSessions).where(eq2(pgSessions.fSessionId, id)).execute())[0];
@@ -922,7 +1527,10 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
     this.config = resolved;
     this.backend = injectedBackend ?? createBackend(resolved);
     this.ready = this.init();
-    this.coordinator = new PersistenceCoordinator(this.ctx, this);
+    this.tracker.install(ctx, async () => {
+      await this.ready;
+      await this.backend.close();
+    });
   }
   config;
   static inject = ["sessions", "settings"];
@@ -945,210 +1553,277 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
    */
   static settingsNs = "session-persistence-rdb";
   /**
-   * Backend label for the coordinator's dispose diagnostics. Intentionally
-   * shadows cordis `Service.name` (set to `'sessionPersistence'` by the base);
-   * see the JSONL backend for why this does not affect service resolution.
+   * Backend label for teardown diagnostics and live-routing warnings.
+   * Intentionally shadows cordis `Service.name` (set to `'sessionPersistence'`
+   * by the base); see the JSONL backend for why this does not affect service
+   * resolution.
    */
   name = "session-persistence-rdb";
-  /** One RDB database holds every session; there is no per-session raw artifact. */
-  supportsRawArtifacts = false;
   backend;
   storeIdentity;
   ready;
-  coordinator;
   /**
-   * Write-authority state: the confirmed head per session (concurrent-writer
-   * detection). See {@link WriteGuard} for the timing contract.
+   * Write-authority state: the confirmed head per session (CROSS-process
+   * concurrent-writer detection). See {@link WriteGuard} for the timing
+   * contract; the in-process single-writer registry lives in the tracker.
    */
   writeGuard = new WriteGuard();
+  /** In-process write ownership, live event routing, and open-handle teardown. */
+  tracker = new RdbTracker("session-persistence-rdb");
   async init() {
     await this.backend.open();
     this.storeIdentity = this.backend.storeIdentity;
   }
-  // --- SessionPersistence service surface (delegated to the coordinator) ---
-  /** The backend has one database, not an independent local artifact per session. */
-  locate(_meta) {
-    return void 0;
-  }
-  create(meta, inheritedEventCount) {
-    return this.coordinator.create(meta, inheritedEventCount);
-  }
-  ensureMaterialized(session) {
-    return this.coordinator.ensureMaterialized(session);
-  }
-  append(id, events2) {
-    return this.coordinator.append(id, events2);
-  }
-  prepare(id, signal) {
-    return this.coordinator.prepare(id, signal);
-  }
-  load(id) {
-    return this.coordinator.load(id);
-  }
-  inspect(id, signal) {
-    return this.coordinator.inspect(id, signal);
-  }
-  borrowSession(id, signal) {
-    return this.coordinator.borrowSession(id, signal);
-  }
-  readFrom(id, fromSeq, signal) {
-    return this.coordinator.readFrom(id, fromSeq, signal);
-  }
-  // One method serves both public `list` and the backend hook; delegating it to
-  // the coordinator would call this hook recursively.
-  // --- PersistenceBackend hooks (the storage primitives) ---
-  /** Read a stored prefix by id (ids are globally unique — no scope to scan). */
-  loadStored(id, signal) {
-    return this.readPrefix(id, signal);
-  }
   /**
-   * Seek-capable suffix read: the backend selects `f_sequence >= fromSeq`
-   * directly, so the read scales with the suffix, not the log. A legacy
-   * (rc.2-era, dense-renumbered) log still needs every row's upstream seq for
-   * provenance remapping, so a lightweight two-column map is read alongside.
-   * The read is non-mutating: torn rows past the preserved region are dropped,
-   * never repaired. The returned metadata carries the session's inherited cut
-   * exactly like {@link loadStored}.
+   * Refusal diagnostics: this backend has ONE database, not an independent
+   * artifact per session, so a format refusal points at the database the
+   * instance serves rather than at a per-session file.
    */
-  async loadStoredFrom(id, fromSeq, signal) {
-    const log = await this.readLog(id, { fromSeq }, signal);
-    if (log === void 0) return void 0;
-    return {
-      meta: log.meta,
-      inheritedEventCount: SessionLogOffset(log.inheritedEventCount),
-      events: log.events
-    };
+  locate() {
+    return this.backend.location;
   }
+  // --- SessionPersistence service surface ---
   /**
-   * Read a session's row + ordered events into a {@link StoredPrefix}. The
-   * torn-tail marker is the persisted seq from which a never-committed tail
-   * must be deleted (`scanRows` already returns it as `number | undefined`).
-   * Records the confirmed head (or confirmed absence) so a later
-   * `appendBatch` can detect a second writer that advanced the log.
+   * Create a new stored session and take its write ownership. The session is
+   * visible to this process through `stat`/`list`/`open` immediately; its
+   * database row appears on the first append or on `flush`/`close`.
+   * @param header - the immutable header to store.
+   * @param options - optional cancellation and the exact fork-inherited prefix.
+   * @returns the owned write handle.
+   * @throws {SessionAlreadyExistsError} when the id already exists.
    */
-  async readPrefix(id, signal) {
-    const log = await this.readLog(id, {}, signal);
-    if (log === void 0) {
-      this.writeGuard.confirmHead(id, -1);
-      return void 0;
+  async create(header, options) {
+    options?.signal?.throwIfAborted();
+    const snapshot = materializeCreateHeader(header);
+    assertVersion2(snapshot, this.locate());
+    if (snapshot.isSeeded && options?.inheritedEventCount === void 0) {
+      throw new Error("seeded session header requires an inherited event count");
     }
-    this.writeGuard.confirmHead(id, log.events.at(-1)?.seq ?? -1);
-    return {
-      meta: log.meta,
-      // The inherited cut travels OUT of band: the 0.1.2 header forbids
-      // `seedLength`, so every body-bearing read carries it alongside the
-      // header (mirrors the JSONL backend's fromHeaderLine pairing).
-      inheritedEventCount: SessionLogOffset(log.inheritedEventCount),
-      events: log.events,
-      // The revision must identify exactly these values and match
-      // readStoredRevision's representation (see listSnapshots).
-      revision: SessionPersistenceRevision(
-        `${this.storeIdentity}:incarnation:${log.incarnation}:revision:${log.revision}`
-      ),
-      ...log.tornFrom !== void 0 ? { tornMarker: log.tornFrom } : {}
-    };
-  }
-  /**
-   * Read the current source-qualified revision for one stored session without
-   * loading its event log. Returns `undefined` when the identity is absent.
-   * The representation matches {@link loadStored}'s `revision` and
-   * {@link listSnapshots} — the coordinator compares them with `===`.
-   */
-  async readStoredRevision(id, signal) {
-    signal?.throwIfAborted();
+    const inheritedEventCount = SessionLogOffset2(options?.inheritedEventCount ?? 0);
+    if (!snapshot.isSeeded && inheritedEventCount !== 0) {
+      throw new Error("unseeded session header inherited event count must be 0");
+    }
     await this.ready;
-    signal?.throwIfAborted();
-    const row = await this.backend.getSession(id);
-    if (row === void 0) return void 0;
-    return SessionPersistenceRevision(
-      `${this.storeIdentity}:incarnation:${row.fIncarnation}:revision:${row.fRevision}`
+    options?.signal?.throwIfAborted();
+    if (this.tracker.hasPending(snapshot.id)) throw new SessionAlreadyExistsError2(snapshot.id);
+    if (await this.backend.getSession(snapshot.id) !== void 0) {
+      throw new SessionAlreadyExistsError2(snapshot.id);
+    }
+    options?.signal?.throwIfAborted();
+    this.tracker.registerCreated(snapshot, inheritedEventCount);
+    return this.tracker.adopt(
+      new RdbSessionHandle(this, snapshot.id, snapshot, "write", {
+        cursor: 0,
+        materialized: false,
+        inheritedEventCount,
+        // A created session has an empty log until its first append; serving
+        // that from memory keeps the resume handoff read from touching the
+        // database before anything was written.
+        primed: {
+          meta: snapshot,
+          inheritedEventCount,
+          events: [],
+          eventState: "detached",
+          legacy: false,
+          current: true
+        }
+      })
     );
   }
   /**
-   * Shared read pipeline: session row → meta + inherited cut, event rows →
-   * preserved prefix. A whole-log read (`fromSeq` absent) builds the legacy
-   * seq map from the same rows; a suffix read keeps the backend's lightweight
-   * two-column seq-map source so the query still scales with the suffix, not
-   * the log. The session is LEGACY when any of its rows carries
-   * `f_original_seq != f_sequence` (written by the rc.2-era delta-filtering
-   * backend): such logs are read through the upstream→persisted remap path
-   * and their stored cut is translated from upstream space to row space.
-   * Logs written by this build (`f_original_seq == f_sequence` everywhere)
-   * pass through as identity and use the stored cut verbatim.
+   * Open an existing stored session for `read` or single-writer `write`.
+   *
+   * A `write` open of a released-format log rewrites it into the current format
+   * (in one transaction) BEFORE ownership is granted, so every later append
+   * lands next to current-format rows.
+   * @param id - the stored session to open.
+   * @param access - `read` (no ownership) or `write` (atomic in-process claim).
+   * @param options - optional cancellation.
+   * @returns the open handle.
+   * @throws {SessionPersistenceNotFoundError} when the session does not exist.
+   * @throws {SessionAlreadyOwnedError} for `write` when ownership is taken.
    */
-  async readLog(id, options = {}, signal) {
+  async open(id, access, options) {
+    options?.signal?.throwIfAborted();
+    await this.ready;
+    options?.signal?.throwIfAborted();
+    if (access === "read") {
+      const pending = this.tracker.pendingOf(id);
+      if (pending !== void 0) {
+        return this.tracker.adopt(
+          new RdbSessionHandle(this, id, pending.header, "read", {
+            cursor: 0,
+            materialized: false,
+            inheritedEventCount: pending.inheritedEventCount
+          })
+        );
+      }
+      const stored = await this.loadStored(id, options?.signal);
+      if (stored === void 0) throw new SessionPersistenceNotFoundError2(id);
+      return this.tracker.adopt(
+        new RdbSessionHandle(this, id, stored.meta, "read", {
+          cursor: 0,
+          materialized: true,
+          inheritedEventCount: stored.inheritedEventCount,
+          ...stored.tornFrom !== void 0 ? { tornFrom: stored.tornFrom } : {}
+        })
+      );
+    }
+    this.tracker.claimWrite(id);
+    try {
+      const loaded = await this.loadStored(id, options?.signal);
+      if (loaded === void 0) throw new SessionPersistenceNotFoundError2(id);
+      const stored = loaded.current ? loaded : await this.rewriteStored(loaded);
+      options?.signal?.throwIfAborted();
+      return this.tracker.adopt(
+        new RdbSessionHandle(this, id, stored.meta, "write", {
+          cursor: stored.events.length,
+          materialized: true,
+          inheritedEventCount: stored.inheritedEventCount,
+          ...stored.tornFrom !== void 0 ? { tornFrom: stored.tornFrom } : {},
+          primed: stored
+        })
+      );
+    } catch (error) {
+      this.tracker.releaseClaim(id);
+      throw error;
+    }
+  }
+  /**
+   * Flush every active write handle in one durability barrier; see the seam
+   * contract.
+   * @returns resolution once every write handle active at the call has flushed.
+   */
+  async flush() {
+    await this.ready;
+    await this.tracker.flushAll();
+  }
+  /**
+   * Observe one stored session without reading its event log.
+   * @param id - the stored session to observe.
+   * @param options - optional cancellation.
+   * @returns the snapshot, or `undefined` when the session does not exist.
+   */
+  async stat(id, options) {
+    options?.signal?.throwIfAborted();
+    await this.ready;
+    options?.signal?.throwIfAborted();
+    const pending = this.tracker.pendingOf(id);
+    if (pending !== void 0) {
+      return { header: pending.header, revision: pending.revision };
+    }
+    const row = await this.backend.getSession(id);
+    if (row === void 0) return void 0;
+    options?.signal?.throwIfAborted();
+    return { header: storedHeader(row, this.locate()), revision: this.revisionOf(row) };
+  }
+  /**
+   * List every stored session visible to this process: materialized rows plus
+   * this process's created-but-unmaterialized sessions.
+   * @param options - optional cancellation.
+   * @returns one snapshot per session, in no promised order.
+   */
+  async list(options) {
+    const signal = options?.signal;
+    signal?.throwIfAborted();
+    await this.ready;
+    signal?.throwIfAborted();
+    const rows = await this.backend.listSessions();
+    signal?.throwIfAborted();
+    const snapshots = rows.map((row) => ({
+      header: storedHeader(row, this.locate()),
+      revision: this.revisionOf(row)
+    }));
+    const listed = new Set(rows.map((row) => row.fSessionId));
+    for (const [id, pending] of this.tracker.pendingEntries()) {
+      if (listed.has(id)) continue;
+      snapshots.push({ header: pending.header, revision: pending.revision });
+    }
+    return snapshots;
+  }
+  // --- RdbHandleStorage: the storage primitives the handles drive ---
+  /**
+   * Read one stored session's row + ordered events and decode them into the
+   * current format. Records the confirmed head (or confirmed absence) so a
+   * later append can detect another PROCESS that advanced the log.
+   * @param id - the stored session.
+   * @param signal - optional cancellation for the two reads and the decode.
+   * @returns the migrated log, or `undefined` when no row exists.
+   */
+  async loadStored(id, signal) {
     signal?.throwIfAborted();
     await this.ready;
     signal?.throwIfAborted();
     const row = await this.backend.getSession(id);
-    if (row === void 0) return void 0;
-    const meta = rowToMeta(row);
-    let eventRows;
-    let seqRows;
-    let fromSeq = 0;
-    if (options.fromSeq === void 0) {
-      eventRows = await this.backend.getEventRows(id);
-      seqRows = eventRows;
-    } else {
-      fromSeq = options.fromSeq;
-      eventRows = await this.backend.getEventRows(id, fromSeq);
-      seqRows = await this.backend.getSeqMapRows(id);
+    if (row === void 0) {
+      this.writeGuard.confirmHead(id, -1);
+      return void 0;
     }
+    const rows = await this.backend.getEventRows(id);
     signal?.throwIfAborted();
-    const legacy = hasLegacyRenumbering(seqRows);
-    const seqMap = legacy ? buildSeqMap(seqRows) : void 0;
-    const inheritedEventCount = storedInheritedCount(row.fSeedLength, seqRows, legacy);
-    const { preserved, tornFrom } = scanRows(eventRows, fromSeq, seqMap);
-    return {
-      meta,
-      inheritedEventCount,
-      events: preserved,
-      incarnation: row.fIncarnation,
-      revision: row.fRevision,
-      ...tornFrom !== void 0 ? { tornFrom } : {}
-    };
+    const log = decodeStoredLog(row, rows, this.locate());
+    signal?.throwIfAborted();
+    this.writeGuard.confirmHead(id, log.events.length - 1);
+    return log;
   }
   /**
-   * Durably append a batch in ONE transaction: materialize the sessions row (if
-   * lazy) and INSERT every event (plus its bridge row), or roll back entirely.
-   * Since 0.1.2 NOTHING is dropped or renumbered: every event the coordinator
-   * delivers — deltas and ignorable events included — is persisted verbatim
-   * with its exact seq, so a batch that is only delta/ignorable events is a
-   * normal append (and a seeded session's first materializing batch includes
-   * its complete inherited prefix — the coordinator only invokes this hook
-   * once a batch reaches the declared cut).
-   * The transaction is the atomicity + durability boundary, so a mid-batch
-   * failure (a UNIQUE violation on a duplicated seq) leaves the stored log
-   * untouched.
-   *
-   * SQLite acquires the write lock up front (`BEGIN IMMEDIATE`, queued behind
-   * `busy_timeout`); PostgreSQL relies on the transaction's row locks and the
-   * `UNIQUE (f_session_id, f_sequence)` constraint to reject a colliding batch.
-   * Either way {@link WriteGuard.assertNoConcurrentWriter} rejects a second
-   * writer before any row lands — a session has exactly one writer per log,
-   * and a second writer fails loud instead of corrupting the log.
-   *
-   * The row upsert runs UNCONDITIONALLY, not only when `!isMaterialized`:
-   * the materialized flag is coordinator memory and cannot be trusted as the
-   * row's existence signal. On conflict only the header columns refresh —
-   * the head cursor, identity, revision, and the stored inherited cut are
-   * preserved (the cut deliberately survives: a legacy row's cut lives in its
-   * first generation's upstream space, and rewriting it would corrupt every
-   * later translation — see `sessionConflictRow` in `log.ts`).
-   * @param storage - the session's header plus its exact inherited cut.
-   * @param events - the contiguous batch to persist, in seq order.
-   * @param _isMaterialized - whether a sessions row already exists (lazy
-   *   materialization is handled by the unconditional upsert).
+   * Rewrite a released-format session log into the current format in ONE
+   * transaction: replace the header columns (including the inherited cut, which
+   * the ordinary conflict update deliberately preserves), drop the old bridge
+   * rows, insert the migrated events as identity rows, and bump the revision.
+   * The orphaned `t_events` entities of the replaced rows are left in place —
+   * like a torn-tail truncate, deletion only ever touches the session's
+   * bridge.
+   * @param log - the migrated (already decoded) released-format log.
+   * @returns the re-read current-format log.
    */
-  async appendBatch(storage, events2, _isMaterialized) {
+  async rewriteStored(log) {
     await this.ready;
-    const { meta } = storage;
+    const { meta, inheritedEventCount, events: events2 } = log;
+    await this.backend.transaction(async (tx) => {
+      await tx.rewriteSessionHeader(meta, inheritedEventCount);
+      await tx.deleteBridgeTail(meta.id, 0);
+      if (events2.length > 0) {
+        const { headEventId, headSequence } = await appendEventTail(tx, meta, events2, {
+          parentId: "",
+          nextSeq: 0
+        });
+        await tx.updateHead(meta.id, headEventId, headSequence);
+      } else {
+        await tx.updateHead(meta.id, "", -1);
+      }
+      await tx.bumpRevision(meta.id);
+    });
+    const rewritten = await this.loadStored(meta.id);
+    if (rewritten === void 0) {
+      throw new Error(`session "${meta.id}" disappeared during its format migration`);
+    }
+    return rewritten;
+  }
+  /**
+   * Durably append one validated batch to a session's tail in ONE transaction:
+   * materialize the header row (if the session is new) and insert every event
+   * plus its bridge row, or roll back entirely.
+   *
+   * {@link WriteGuard.assertNoConcurrentWriter} rejects a second PROCESS's
+   * writer before any row lands: each backend instance keeps its own cursor and
+   * would otherwise append through a stale view of the log. SQLite additionally
+   * acquires the write lock up front (`BEGIN IMMEDIATE`, queued behind
+   * `busy_timeout`); PostgreSQL relies on the transaction's row locks and the
+   * `UNIQUE (f_session_id, f_sequence)` constraint.
+   * @param meta - the session's current-format header.
+   * @param inheritedEventCount - its exact inherited cut.
+   * @param events - the contiguous batch to persist, in seq order.
+   */
+  async appendBatch(meta, inheritedEventCount, events2) {
+    await this.ready;
+    if (events2.length === 0) return;
     let confirmedHead = -1;
     await this.backend.transaction(async (tx) => {
-      await tx.upsertSession(meta, storage.inheritedEventCount, randomUUID3());
+      await tx.upsertSession(meta, inheritedEventCount, randomUUID3());
       const head = await tx.getHead(meta.id);
       this.writeGuard.assertNoConcurrentWriter(meta.id, head.fHeadSequence);
-      const { headEventId, headSequence } = await appendEventTail(tx, storage, events2, {
+      const { headEventId, headSequence } = await appendEventTail(tx, meta, events2, {
         parentId: head.fHeadEventId,
         nextSeq: head.fHeadSequence + 1
       });
@@ -1160,80 +1835,55 @@ var SessionPersistenceRdb = class _SessionPersistenceRdb extends SessionPersiste
   }
   /**
    * Durably materialize a header-only session: create the `t_sessions` row (in
-   * one transaction) WITHOUT any event row. This is the backend half of the
-   * service's `ensureMaterialized` — an explicitly durable EMPTY session, so
-   * unlike {@link appendBatch} there is no head-cursor advance and no revision
-   * bump (a fresh row already starts at revision 0; row existence IS the
-   * materialization signal). The inherited cut is stored exactly like a
-   * materializing append's.
+   * one transaction) WITHOUT any event row. Row existence IS the
+   * materialization signal, so there is no head-cursor advance and no revision
+   * bump.
+   * @param meta - the session's current-format header.
+   * @param inheritedEventCount - its exact inherited cut.
    */
-  async materializeHeader(storage) {
+  async materializeHeader(meta, inheritedEventCount) {
     await this.ready;
     await this.backend.transaction(async (tx) => {
-      await tx.upsertSession(storage.meta, storage.inheritedEventCount, randomUUID3());
+      await tx.upsertSession(meta, inheritedEventCount, randomUUID3());
     });
   }
   /**
-   * Make a crash repair durable in ONE transaction: DELETE the torn tail (from
-   * `tornMarker`), rewind the head cursor to the last surviving event, INSERT
-   * the synthetic `closers`, and bump the revision once. After COMMIT the
-   * stored rows == the balanced log. Closers are persisted verbatim like any
-   * other event (they never carry dropped content).
+   * Durably drop a never-committed torn tail: DELETE the bridge rows from
+   * `from`, rewind the head cursor to the last surviving event, and bump the
+   * revision once. Called by a write handle immediately before its first new
+   * append (the seam's "a torn tail is truncated by the write path before its
+   * first append").
+   * @param meta - the session's current-format header.
+   * @param from - the presented seq the tail starts at.
    */
-  async commitRepair(storage, tornMarker, closers) {
+  async truncateTornTail(meta, from) {
     await this.ready;
-    const { meta } = storage;
-    if (tornMarker === void 0 && closers.length === 0) return;
     await this.backend.transaction(async (tx) => {
-      if (tornMarker !== void 0) {
-        await tx.deleteBridgeTail(meta.id, tornMarker);
-        const prev = await tx.getPrevBridge(meta.id, tornMarker - 1);
-        if (prev === void 0) {
-          await tx.updateHead(meta.id, "", -1);
-        } else {
-          await tx.updateHead(meta.id, prev.fEventId, prev.fSequence);
-        }
-      }
-      if (closers.length > 0) {
-        const last = await tx.getLastBridge(meta.id);
-        const { headEventId, headSequence } = await appendEventTail(tx, storage, closers, {
-          parentId: last?.fEventId ?? "",
-          nextSeq: (last?.fSequence ?? -1) + 1
-        });
-        await tx.updateHead(meta.id, headEventId, headSequence);
-      }
+      await tx.deleteBridgeTail(meta.id, from);
+      const prev = await tx.getPrevBridge(meta.id, from - 1);
+      await tx.updateHead(meta.id, prev?.fEventId ?? "", prev?.fSequence ?? -1);
       await tx.bumpRevision(meta.id);
     });
     const row = await this.backend.getSession(meta.id);
     this.writeGuard.confirmHead(meta.id, row?.fHeadSequence ?? -1);
   }
-  /** List all materialized sessions' metadata (every row is a materialized session). */
-  async list(signal) {
-    signal?.throwIfAborted();
-    await this.ready;
-    signal?.throwIfAborted();
-    const rows = await this.backend.listSessions();
-    signal?.throwIfAborted();
-    return rows.map(rowToMeta);
+  /** Whether this process still tracks a created-but-unmaterialized session. */
+  hasPending(id) {
+    return this.tracker.hasPending(id);
   }
-  /** List metadata with a source-qualified monotonic revision per session. */
-  async listSnapshots(signal) {
-    signal?.throwIfAborted();
-    await this.ready;
-    signal?.throwIfAborted();
-    const rows = await this.backend.listSessions();
-    signal?.throwIfAborted();
-    return rows.map((row) => ({
-      header: rowToMeta(row),
-      revision: SessionPersistenceRevision(
-        `${this.storeIdentity}:incarnation:${row.fIncarnation}:revision:${row.fRevision}`
-      )
-    }));
+  /** Drop a session's in-process pending entry once it reached durable storage. */
+  markMaterialized(id) {
+    this.tracker.materialized(id);
   }
-  /** Close the database connection (awaited by the coordinator's dispose, post-drain). */
-  async close() {
-    await this.ready;
-    await this.backend.close();
+  /** Release one handle's in-process bookkeeping on close. */
+  releaseHandle(handle, materialized) {
+    this.tracker.release(handle, materialized);
+  }
+  /** Source-qualified revision token for one stored row. */
+  revisionOf(row) {
+    return SessionPersistenceRevision2(
+      `${this.storeIdentity}:incarnation:${row.fIncarnation}:revision:${row.fRevision}`
+    );
   }
 };
 function createBackend(config) {
@@ -1264,8 +1914,7 @@ function surfaceBindings(event) {
     se.surfaceOp !== void 0 ? JSON.stringify(se.surfaceOp) : null
   ];
 }
-async function appendEventTail(tx, storage, events2, anchor) {
-  const { meta } = storage;
+async function appendEventTail(tx, meta, events2, anchor) {
   let parentId = anchor.parentId;
   let nextSeq = anchor.nextSeq;
   const eventRows = [];

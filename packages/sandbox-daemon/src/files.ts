@@ -12,6 +12,7 @@ import {
   link,
   lstat,
   mkdir,
+  open,
   opendir,
   readFile,
   readdir,
@@ -29,6 +30,7 @@ export type FilesErrorCode =
   | 'VERSION_CONFLICT'
   | 'OUT_OF_ROOT'
   | 'NOT_DIRECTORY'
+  | 'NOT_REGULAR_FILE'
   | 'IO_ERROR'
 
 export class FilesError extends Error {
@@ -72,18 +74,45 @@ export class FilesService implements FilesApi {
 
   // ── public API ─────────────────────────────────────────────────────────
 
+  /**
+   * Positional read: returns the bytes at `[offset, offset + maxBytes)`,
+   * shorter at EOF, empty when `offset` is at or past the end. Bounded by the
+   * WINDOW, never by the file — the daemon opens the file and reads directly
+   * into a window-sized buffer, so a whole-file read is the only case that
+   * allocates file-sized memory and an oversized window can never appear.
+   * `maxBytes` omitted means "the whole file" (the provider's unbounded read
+   * path); every seam-bounded caller passes an explicit window.
+   */
   async read(path: string, opts?: { offset?: number; maxBytes?: number }): Promise<Uint8Array> {
     const abs = this.confine(path)
+    const offset = Math.max(0, Math.trunc(opts?.offset ?? 0))
+    const requested = opts?.maxBytes === undefined ? Number.POSITIVE_INFINITY : Math.max(0, Math.trunc(opts.maxBytes))
+    let handle: Awaited<ReturnType<typeof open>> | undefined
     try {
-      const buf = await readFile(abs)
-      const offset = opts?.offset ?? 0
-      const max = opts?.maxBytes ?? buf.length
-      return new Uint8Array(buf.subarray(offset, offset + max))
+      handle = await open(abs, 'r')
+      const info = await handle.stat()
+      if (info.isDirectory()) throw new FilesError('NOT_REGULAR_FILE', `not a regular file: ${path}`)
+      const want = Math.max(0, Math.min(info.size - offset, requested))
+      if (want === 0) return new Uint8Array(0)
+      const out = Buffer.allocUnsafe(want)
+      let filled = 0
+      while (filled < want) {
+        const { bytesRead } = await handle.read(out, filled, want - filled, offset + filled)
+        if (bytesRead === 0) break
+        filled += bytesRead
+      }
+      return new Uint8Array(out.subarray(0, filled))
     } catch (e) {
+      if (e instanceof FilesError) throw e
       if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new FilesError('NOT_FOUND', `no such file: ${path}`)
       }
+      if ((e as NodeJS.ErrnoException).code === 'EISDIR') {
+        throw new FilesError('NOT_REGULAR_FILE', `not a regular file: ${path}`)
+      }
       throw new FilesError('IO_ERROR', String(e))
+    } finally {
+      await handle?.close().catch(() => undefined)
     }
   }
 
@@ -149,6 +178,8 @@ export class FilesService implements FilesApi {
       const type: FileType = lst.isDirectory() ? 'directory' : lst.isSymbolicLink() ? 'symlink' : lst.isFile() ? 'file' : 'other'
       entries.push({ name, type, path: join(path, name).replace(/\\/g, '/'), size: lst.isFile() ? lst.size : undefined })
     }
+    // The seam promises a stable name order; readdir's order is filesystem-defined.
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
     return entries
   }
 
@@ -163,11 +194,17 @@ export class FilesService implements FilesApi {
     }
   }
 
-  async info(path: string): Promise<EntryInfo | undefined> {
+  /**
+   * Path metadata. `follow: true` resolves symbolic links (the dsh fs seam's
+   * `stat`, target-shaped); the default inspects the path itself (the seam's
+   * `lstat`, which lets a consumer reject the link before any follow).
+   */
+  async info(path: string, opts?: { follow?: boolean }): Promise<EntryInfo | undefined> {
     const abs = this.confine(path)
+    const follow = opts?.follow === true
     let lst: Awaited<ReturnType<typeof lstat>>
     try {
-      lst = await lstat(abs)
+      lst = follow ? await stat(abs) : await lstat(abs)
     } catch {
       return undefined
     }
@@ -187,7 +224,7 @@ export class FilesService implements FilesApi {
       size: lst.isFile() ? lst.size : undefined,
       mode: lst.mode & 0o777,
       modifiedTime: lst.mtimeMs,
-      symlinkTarget: lst.isSymbolicLink() ? (await readlinkSafe(abs)) : undefined,
+      symlinkTarget: !follow && lst.isSymbolicLink() ? (await readlinkSafe(abs)) : undefined,
       version,
     }
   }

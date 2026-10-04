@@ -23,14 +23,16 @@ export function scrubEnv(ambient: Record<string, string | undefined>): Record<st
   return out
 }
 
-/** Merge explicit spec env over the scrubbed base (undefined = tombstone). */
+/** Merge explicit spec env over the scrubbed base (null/undefined = tombstone). */
 export function mergeEnv(
   base: Record<string, string>,
-  specEnv: Record<string, string | undefined> | undefined,
+  specEnv: Record<string, string | null | undefined> | undefined,
 ): Record<string, string> {
   const out = { ...base }
   for (const [k, v] of Object.entries(specEnv ?? {})) {
-    if (v === undefined) delete out[k]
+    // `undefined` is the in-process tombstone; `null` is its wire spelling
+    // (JSON.stringify drops undefined values, so over HTTP only null survives).
+    if (v === undefined || v === null) delete out[k]
     else out[k] = v
   }
   return out

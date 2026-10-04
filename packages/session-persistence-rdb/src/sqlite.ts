@@ -17,6 +17,7 @@ import { DatabaseSync } from "node:sqlite";
 import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { drizzle, type NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 import type { SessionHeader, SessionId } from "@deepseek-ai/dsh-session";
+import type { SessionLocation } from "@deepseek-ai/dsh-session-persistence";
 import {
   type Backend,
   type BackendTx,
@@ -26,7 +27,7 @@ import {
 } from "./backend.ts";
 import { createTablesSql } from "./adapters/index.ts";
 import { sqliteTableDefs } from "./entities/index.ts";
-import { sessionConflictRow, sessionInsertRow } from "./log.ts";
+import { sessionConflictRow, sessionInsertRow, sessionRewriteRow } from "./log.ts";
 import {
   DEFAULT_BUSY_TIMEOUT_MS,
   SCHEMA_VERSION,
@@ -198,6 +199,7 @@ export interface SqliteBackendOptions {
 export class SqliteBackend implements Backend {
   readonly kind = "sqlite" as const;
   storeIdentity!: string;
+  location!: SessionLocation;
 
   /** The resolved database path (queue key); set by {@link open}. */
   private dbPath = "";
@@ -209,6 +211,9 @@ export class SqliteBackend implements Backend {
     const actual =
       this.options.path === ":memory:" ? this.options.path : resolve(this.options.path);
     this.dbPath = actual;
+    // Refusal diagnostics name the database this backend serves (the only
+    // artifact this provider owns).
+    this.location = { kind: "sqlite", path: actual };
     if (actual !== ":memory:") {
       await mkdir(dirname(actual), { recursive: true, mode: 0o700 });
       await createDatabaseFile(actual);
@@ -252,7 +257,7 @@ export class SqliteBackend implements Backend {
 
   async close(): Promise<void> {
     // `open` may have failed before assigning `db` (e.g. the queued init threw);
-    // close must not crash the coordinator's dispose on top of that failure.
+    // close must not crash the fiber's teardown on top of that failure.
     if (this.db === undefined) return;
     this.db.$client.close();
   }
@@ -263,18 +268,11 @@ export class SqliteBackend implements Backend {
       | undefined;
   }
 
-  async getSeqMapRows(id: SessionId): Promise<Array<{ fSequence: number; fOriginalSeq: number }>> {
-    return this.eventRows().where(eq(tSessionEvents.fSessionId, id)).all();
-  }
-
-  async getEventRows(id: SessionId, fromSequence?: number): Promise<EventRow[]> {
-    const scoped =
-      fromSequence === undefined
-        ? this.eventRows().where(eq(tSessionEvents.fSessionId, id))
-        : this.eventRows().where(
-            and(eq(tSessionEvents.fSessionId, id), gte(tSessionEvents.fSequence, fromSequence)),
-          );
-    return scoped.orderBy(tSessionEvents.fSequence).all() as unknown as EventRow[];
+  async getEventRows(id: SessionId): Promise<EventRow[]> {
+    return this.eventRows()
+      .where(eq(tSessionEvents.fSessionId, id))
+      .orderBy(tSessionEvents.fSequence)
+      .all() as unknown as EventRow[];
   }
 
   async listSessions(): Promise<SessionRow[]> {
@@ -326,6 +324,8 @@ export class SqliteBackend implements Backend {
   private readonly tx: BackendTx = {
     upsertSession: (meta, inheritedEventCount, incarnation) =>
       this.upsertSession(meta, inheritedEventCount, incarnation),
+    rewriteSessionHeader: (meta, inheritedEventCount) =>
+      this.rewriteSessionHeader(meta, inheritedEventCount),
     getHead: (id) => this.getHead(id),
     insertEvents: (events) => this.insertEvents(events),
     insertBridges: (rows) => this.insertBridges(rows),
@@ -353,6 +353,17 @@ export class SqliteBackend implements Backend {
       .run();
   }
 
+  private async rewriteSessionHeader(
+    meta: SessionHeader,
+    inheritedEventCount: number,
+  ): Promise<void> {
+    this.db
+      .update(tSessions)
+      .set(sessionRewriteRow(meta, inheritedEventCount))
+      .where(eq(tSessions.fSessionId, meta.id))
+      .run();
+  }
+
   private async getHead(
     id: SessionId,
   ): Promise<Pick<SessionRow, "fHeadEventId" | "fHeadSequence">> {
@@ -361,7 +372,7 @@ export class SqliteBackend implements Backend {
       .from(tSessions)
       .where(eq(tSessions.fSessionId, id))
       .get() as Pick<SessionRow, "fHeadEventId" | "fHeadSequence"> | undefined;
-    /* v8 ignore next -- appendBatch/commitRepair always materialize the row before reading the head */
+    /* v8 ignore next -- appendBatch/rewriteStored always materialize the row before reading the head */
     if (head === undefined) throw new Error(`session "${id}" has no materialized row`);
     return head;
   }

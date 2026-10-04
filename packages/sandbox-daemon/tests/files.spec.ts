@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile, readFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FilesService, FilesError } from '../src/files.ts'
+import type { WriteOutcome } from '../src/protocol.ts'
 
 let root: string
 let svc: FilesService
@@ -29,6 +30,29 @@ describe('FilesService', () => {
     const bin = new Uint8Array([0, 1, 2, 255, 254])
     await svc.write('/bin.dat', bin)
     expect(Array.from(await svc.read('/bin.dat'))).toEqual(Array.from(bin))
+  })
+
+  // The window is the bound, not the file: DSH 0.1.5's fs seam adds
+  // `readByteRange` on exactly these semantics, and the provider maps them
+  // onto /files/read {offset, maxBytes}.
+  it('read windows are bounded and legal past EOF', async () => {
+    await svc.write('/win.txt', enc('0123456789'))
+    expect(dec(await svc.read('/win.txt', { offset: 2, maxBytes: 4 }))).toBe('2345')
+    expect(dec(await svc.read('/win.txt', { offset: 8, maxBytes: 100 }))).toBe('89')
+    expect((await svc.read('/win.txt', { offset: 10, maxBytes: 5 })).byteLength).toBe(0)
+    expect((await svc.read('/win.txt', { offset: 999, maxBytes: 5 })).byteLength).toBe(0)
+    expect((await svc.read('/win.txt', { offset: 0, maxBytes: 0 })).byteLength).toBe(0)
+  })
+
+  it('read of a directory rejects NOT_REGULAR_FILE', async () => {
+    await svc.mkdir('/adir')
+    await expect(svc.read('/adir')).rejects.toMatchObject({ code: 'NOT_REGULAR_FILE' })
+  })
+
+  it('list returns entries in stable name order', async () => {
+    for (const name of ['zeta.txt', 'alpha.txt', 'mid.txt']) await svc.write('/sorted/' + name, enc('x'))
+    const entries = await svc.list('/sorted')
+    expect(entries.map((e) => e.name)).toEqual(['alpha.txt', 'mid.txt', 'zeta.txt'])
   })
 
   it('createIfAbsent refuses existing paths', async () => {

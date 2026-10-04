@@ -1,4 +1,4 @@
-// packages/platform-domain/src/index.ts
+// src/index.ts
 import { DomainFacility, defineDomain, domainTable } from "@deepseek-ai/dsh-storage-domain";
 import { storageBackendServiceKey } from "@deepseek-ai/dsh-storage";
 import { z } from "zod";

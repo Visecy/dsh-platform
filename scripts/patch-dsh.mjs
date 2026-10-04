@@ -18,25 +18,37 @@
  * trust pins in a deployment where the OIDC gate (dsh-auth-oidc)
  * authenticates every request first.
  *
- * DSH 0.1.2-rc.1 delta vs the 0.1.1-rc.2 fragments:
- *  - the old "privileged RPC fence" fragment is GONE upstream: 0.1.2 removed
- *    the PRIVILEGED_METHODS loopback tier and replaced it with one uniform
- *    fence (Host/Origin check against config `trustedHosts` → 403) on every
- *    /api request, RPC channel and WebSocket upgrade. trustedHosts is now
+ * DSH 0.1.5-rc.1 delta vs the 0.1.2-rc.1 fragments: NONE — both fragments are
+ * byte-stable across the jump and are kept verbatim.
+ *  - the "privileged RPC fence" is still gone (0.1.2 removed the
+ *    PRIVILEGED_METHODS loopback tier and replaced it with one uniform fence:
+ *    a Host/Origin check against config `trustedHosts` → 403 on every /api
+ *    request, RPC channel and WebSocket upgrade). `trustedHosts` remains
  *    official configuration (`dsh web --trusted-host` → webRuntime →
  *    connection row config), so the platform configures it in
  *    docker/profiles/web.cordis.patch.yml instead of patching compiled code.
- *  - 0.1.2 ADDED a browser-session layer: every request must also present an
- *    authority-bound signed cookie minted from a per-process launch token
+ *    Note: entries must be bare `host[:port]` authorities — assertTrustedAuthority
+ *    rejects schemes, paths and whitespace at plugin load.
+ *  - the browser-session layer is unchanged: every request must also present
+ *    an authority-bound signed cookie minted from a per-process launch token
  *    (BrowserAuth). Remote browsers behind the platform's OIDC gate can never
  *    redeem that token (the gate 302s the tokenized URL to the IdP, which
  *    drops the query), so this cookie layer is bypassed — the OIDC gate
  *    remains the sole session layer while the Host/Origin fence stays active
  *    as defense in depth.
- *  - the browser-side `isLoopback` classification changed spelling (it now
- *    also consults the shell transport's `ownsHost`); the platform still
- *    forces `true` so remote browsers keep host-backed settings persistence,
- *    the host document store and produced-file open affordances.
+ *  - the browser-side `isLoopback` classification is unchanged (it consults
+ *    the shell transport's `ownsHost`); the platform still forces `true` so
+ *    remote browsers keep host-backed settings persistence, the host document
+ *    store and produced-file open affordances.
+ *  - 0.1.5 added one boot global the fork must deliver
+ *    (`__DSH_CONNECTION_RECOVERY__`, index-injected by dsh-client-connection);
+ *    `dsh-host-webserver` is byte-identical, so the vendored fork already
+ *    renders `kind: "global"` rows. The second patch's keep-guard asserts the
+ *    injection site still exists so a future removal fails the build loudly.
+ *  - 0.1.5 made `webServer` an OPTIONAL inject for dsh-client-connection and
+ *    dsh-client-modules: if the forked webserver fails to load, DSH now boots
+ *    without `/api` and without the `/plugins` bundle route instead of failing
+ *    loudly. scripts/verify-profile.mjs asserts both routes after boot.
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -85,6 +97,10 @@ const patches = [
     assertCount: 1,
     // the Host/Origin fence and the rest of the BrowserAuth machinery stay:
     keep: /!isTrustedApiRequest\(request, this\.trustedHosts\)/,
+    // 0.1.5 ships connection recovery timing to the page through this
+    // index-injection global; the vendored webserver fork renders kind:"global"
+    // rows, so its disappearance would silently drop operator recovery config:
+    keepAll: [/__DSH_CONNECTION_RECOVERY__/],
   },
 ]
 
@@ -117,6 +133,13 @@ for (const patch of patches) {
   }
   if (patch.keep && !patch.keep.test(patched)) {
     console.error(`[patch-dsh] FAIL keep-guard missing in ${patch.file} (${patch.what})`)
+    failed = true
+    continue
+  }
+  const keepAll = patch.keepAll ?? []
+  const missingKeep = keepAll.find((guard) => !guard.test(patched))
+  if (missingKeep !== undefined) {
+    console.error(`[patch-dsh] FAIL keep-guard ${missingKeep} missing in ${patch.file} (${patch.what})`)
     failed = true
     continue
   }

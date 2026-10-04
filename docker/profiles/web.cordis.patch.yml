@@ -12,19 +12,48 @@
   disabled: true
 - id: directory-picker
   disabled: true
+# The web app announces this process's launch-token URL on stdout
+# (`dsh web: http://…/?token=<launchToken>`) and tries to hand the URL to a
+# desktop browser. In a container that means (a) a process-wide authentication
+# secret lands in the pod logs and (b) every boot logs a failed browser launch.
+# Neither is wanted here: the OIDC gate is the entry point, and any in-process
+# consumer that really needs the tokenized URL can call
+# `ctx.connection.authenticatedUrl(origin)` directly.
+- id: web-runtime
+  name: '@deepseek-ai/dsh-web-app'
+  inject:
+    - webStartup
+  config:
+    openBrowser: false
+    printUrl: false
+    surfaceContext: true
+    trustedHosts: !!js ctx.webStartup.trustedHosts
 # the official ui-workspace row is disabled: its sidebar/hero surfaces are
 # owned by the vendored WorkspaceBrowser in @visecy/dsh-workspace-k8s
 # (status patches), and both registering the same locale namespace crashes
 # the official apply.
 - id: ui-workspace
   disabled: true
-# DSH 0.1.2: dsh-client-connection runs one uniform Host/Origin fence over
-# every /api request / RPC channel / WebSocket upgrade, gated on its official
-# `trustedHosts` config. The CLI already forwards --trusted-host values into
-# this row via ctx.webRuntime; restate the row so deployments can also list
-# public authorities through DSH_TRUSTED_HOSTS (comma-separated) without CLI
-# args. The built-in browser-session cookie layer is bypassed by
-# scripts/patch-dsh.mjs — the OIDC gate is the deployment's session layer.
+# DSH 0.1.5 row inventory notes (dsh-web-app):
+#  - `file-upload` (host `fileUploads` + client `fileUpload`), `resources` and
+#    `workspace-files` are LOAD-BEARING: 0.1.5's dsh-api-session-controller
+#    requires the `fileUploads` inject, so disabling `file-upload` leaves
+#    `session-controller` pending and fails the launcher activation assertion.
+#    Do not add disables for them.
+#  - `open-in-app` / `ui-open-in-app` are safe to disable in a remote
+#    deployment (nothing injects their service); they are left enabled here so
+#    the official produced-file affordances keep working through
+#    subprocess-k8s.
+#  - `tool-str-replace-editor` no longer exists in 0.1.5's base profile.
+# DSH 0.1.2+ (unchanged in 0.1.5): dsh-client-connection runs one uniform
+# Host/Origin fence over every /api request / RPC channel / WebSocket upgrade,
+# gated on its official `trustedHosts` config. The CLI already forwards
+# --trusted-host values into this row via ctx.webRuntime; restate the row so
+# deployments can also list public authorities through DSH_TRUSTED_HOSTS
+# (comma-separated, BARE host[:port] authorities only — assertTrustedAuthority
+# rejects schemes, paths and whitespace at plugin load). The built-in
+# browser-session cookie layer is bypassed by scripts/patch-dsh.mjs — the OIDC
+# gate is the deployment's session layer.
 - id: connection
   name: '@deepseek-ai/dsh-client-connection'
   inject:

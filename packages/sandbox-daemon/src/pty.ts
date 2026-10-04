@@ -21,7 +21,7 @@ export interface PtyInfo {
   startedAt: number
 }
 
-interface Record {
+interface PtyRecord {
   ptyId: string
   spec: PtySpec
   pid: number
@@ -33,7 +33,7 @@ interface Record {
 }
 
 export class PtyRegistry {
-  private records = new Map<string, Record>()
+  private records = new Map<string, PtyRecord>()
   readonly opts: { runtimeRoot: string }
   constructor(opts: { runtimeRoot: string }) {
     this.opts = opts
@@ -62,7 +62,7 @@ export class PtyRegistry {
       if (rec !== undefined && rec.phase === 'running') rec.phase = 'exited'
     })
 
-    const record: Record = {
+    const record: PtyRecord = {
       ptyId,
       spec,
       pid: proc.pid,

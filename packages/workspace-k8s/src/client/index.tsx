@@ -19,19 +19,21 @@
  * resolve through the eval closure to this module's scope, so they must
  * stay imported here.
  *
- * The 0.1.2 client stack has no `@deepseek-ai/dsh-client-runtime` package:
+ * The 0.1.5 client stack has no `@deepseek-ai/dsh-client-runtime` package:
  * client plugins type their ctx as the cordis Context (see the official
  * ui-workspace /client declaration: exports `apply(ctx)` + `inject`). The
  * fibers/events this apply() consumes (`ctx.slots`, `ctx.get`, `ctx.on`)
  * belong to that root context, so a minimal structural interface stands in
- * for the vanished ClientContext type.
+ * for the vanished ClientContext type. `layout` is declared in the inject
+ * list because the vendored 0.1.5 browser's UiWorkspaceService navigates
+ * through `ctx.layout.selectPanel/beginNavigation` (provided by ui-layout).
  */
 import { poll, runStatusAction, statusSource } from './store.ts'
 import { WorkspaceDetailView } from './WorkspaceDetailView.tsx'
 import { VENDORED_WORKSPACE_BROWSER } from './vendored-workspace.ts'
 import { WORKSPACE_UI_CSS } from './styles.ts'
 
-export const inject = ['slots', 'sessions', 'workspaces', 'locale', 'connection']
+export const inject = ['slots', 'sessions', 'workspaces', 'locale', 'connection', 'layout']
 
 /** Structural client root context consumed by apply() (see header note). */
 interface ClientContext {
