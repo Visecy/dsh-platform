@@ -39,6 +39,11 @@ const external = [
 await build({
   entryPoints: [clientSrc],
   outfile: join(root, 'lib/client.js'),
+  // esbuild embeds paths relative to the working directory into the bundle's
+  // path comments, so a build from any other CWD rewrote this committed
+  // artifact and left the tree dirty. Pin the root so the output is a pure
+  // function of the sources regardless of where the build was invoked.
+  absWorkingDir: resolve(here, '..'),
   bundle: true,
   platform: 'browser',
   format: 'cjs',
