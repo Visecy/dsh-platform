@@ -62,16 +62,6 @@ jobs:
           cd packages/workspace-picker && pnpm test && cd ../..
           cd packages/identity-bridge && pnpm test && cd ../..
 
-      # npm Trusted Publisher: no NPM_TOKEN. The registry verifies our GitHub
-      # Actions OIDC token against the publisher configured on npmjs.com.
-      - name: Publish to npm (@visecy)
-        run: |
-          for p in auth-oidc fs-k8s subprocess-k8s workspace-k8s workspace-picker identity-bridge; do
-            cd packages/$p
-            npm publish --access public --provenance --registry=https://registry.npmjs.org
-            cd ../..
-          done
-
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -97,3 +87,21 @@ jobs:
           file: docker/dsh-sandbox-daemon.Dockerfile
           push: true
           tags: ${{ env.DAEMON_IMAGE }}:${{ github.ref_name }},${{ env.DAEMON_IMAGE }}:latest
+
+      # npm Trusted Publisher: no NPM_TOKEN. The registry verifies our GitHub
+      # Actions OIDC token against the publisher configured on npmjs.com.
+      #
+      # `identity-bridge` is deliberately NOT in this loop yet: the FIRST publish
+      # of a package that does not exist on the registry cannot use Trusted
+      # Publishing (the publisher is configured on the package's own page), so it
+      # needs a one-time manual bootstrap before it can join the list. Nothing
+      # depends on that here -- the images install every platform plugin from
+      # THIS CHECKOUT, not from the registry -- so leaving it out cannot produce a
+      # half-released image.
+      - name: Publish to npm (@visecy)
+        run: |
+          for p in auth-oidc fs-k8s subprocess-k8s workspace-k8s workspace-picker; do
+            cd packages/$p
+            npm publish --access public --provenance --registry=https://registry.npmjs.org
+            cd ../..
+          done
