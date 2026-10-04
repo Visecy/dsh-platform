@@ -348,9 +348,17 @@ OFFICIAL-INTEGRATION SMOKE OK: both patches have a supported replacement, and id
 | 7 | `5c9bf6a` | `docs(readme): the workspace UI is decoupled, not vendored` |
 | 8 | `8a08e0d` | `test(workspace-ui): pin the picker wiring the official row depends on` |
 | 9 | `7898fc1` | `build(workspace-k8s): drop the vendored browser's official devDependency` |
+| 10 | `a5497b3` | `docs(sdd): report the workspace UI decoupling (Tasks 1-4)`（本文件；`.superpowers/sdd/.gitignore` 是 `*`，需 `git add -f`，与既有 report 一致） |
+| 11 | `e150cf8` | `chore: ignore verification debris at the repo root`（新增 `.tmp-*` 规则） |
+| 12 | `b13c0d1` | `build(scripts): actually delete the enable-workspace-ui injector`（**补提交**：`git rm` 的删除一度被后一条 `git restore --staged` 复原，导致 `cd70daa`…`9b54fcf` 期间 HEAD 里仍留着该脚本；补提交后 `git ls-tree HEAD scripts/` 已无此文件） |
 
-工作树：除并发会话正在写的 `packages/session-persistence-rdb/**` 外干净；本次未提交任何该包文件。
-`lib/client.js` 与已提交版本一致（`git status` 无差异）。
+工作树：除并发会话正在写的 `packages/session-persistence-rdb/**` 与 `pnpm-lock.yaml` 外干净；
+本次未提交任何该包文件。`lib/client.js` 与已提交版本一致（`git status` 无差异）；
+`git ls-tree HEAD scripts/` 里已无 `enable-workspace-ui.mjs`。
+
+> 注：`pnpm-lock.yaml` 在我提交 `7898fc1` 之后又被并发会话改动（正在升 `dsh-session` /
+> `dsh-session-persistence` / `dsh-session-format-catalog` 到 0.2.0-rc.2），我**没有**再碰它；
+> 我的那次 lockfile 变更（删除 `dsh-client-ui-workspace`）已在 `7898fc1` 里。
 
 ---
 
