@@ -3,3 +3,11 @@ packages/*/node_modules
 .git
 pnpm-lock.yaml
 *.tsbuildinfo
+
+# pnpm leaves root-owned 0700 `.tmp-<pkg>-*` directories inside a package it
+# installs from a `file:` path. CI runs `pnpm install` in the very workspace that
+# becomes this build context, so without this line those directories are COPYed
+# into the image -- and the runtime user cannot read them, which makes the
+# deployment's `cp -r /opt/dsh-home/. $DSH_HOME/` fail and the container
+# crash-loop. Observed on ghcr.io/visecy/dsh-web-platform:v0.1.74.
+**/.tmp-*

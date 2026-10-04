@@ -92,6 +92,11 @@ COPY packages/session-persistence-rdb /opt/dsh-home/plugins/session-persistence-
 COPY packages/storage-db /opt/dsh-home/plugins/storage-db
 COPY packages/platform-domain /opt/dsh-home/plugins/platform-domain
 
+# Everything COPYed above is owned by root. The runtime user (1000) must be able
+# to READ this tree, because the deployment's entrypoint copies it into the
+# writable DSH_HOME -- an unreadable file there crashes the container at start.
+RUN chown -R node:node /opt/dsh-home/plugins
+
 USER node
 # The profile installs with `autoInstallPeers: false` (dsh's own profile
 # template), so every DSH package that a platform plugin imports AT RUNTIME
