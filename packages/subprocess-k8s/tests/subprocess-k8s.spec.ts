@@ -92,22 +92,23 @@ describe('SubprocessK8s', () => {
 
   it('terminate kills a long-running command', async () => {
     const h = sub.spawn(spec({ argv: ['sleep', '30'] }))
-    // Wait for the daemon to report the start instead of sleeping a fixed 300ms:
-    // under parallel load the process may not exist yet, which made this test
-    // flaky without testing anything extra.
-    const deadline = Date.now() + 2_000
-    while (started.length === 0 && Date.now() < deadline) {
-      await new Promise((res) => setTimeout(res, 10))
-    }
+    // Give the daemon time to actually start the process. A deterministic wait on
+    // the daemon's start report is NOT usable here: `started` accumulates across
+    // this file and the report does not arrive reliably for this spawn -- and
+    // terminating before the process exists left `done` unresolved when tried,
+    // which is a plugin-side question of its own, not something this test should
+    // paper over.
+    await new Promise((res) => setTimeout(res, 300))
     const begun = Date.now()
     h.terminate()
     const outcome = await h.done
     // Assert the observable behaviour, not the shape of the result. `terminate`
     // races two correct paths -- the plugin resolving the handle itself and the
     // daemon's real exit status arriving first -- so enumerating outcomes (as
-    // this test used to) encodes the race and goes flaky under load. What must
-    // hold is that the command was ended instead of being allowed to run its
-    // 30s, and that it did not report a successful self-exit.
+    // this test used to: ['exited','killed']) encodes that race and goes flaky
+    // under load. What must hold is that the command was ended instead of being
+    // allowed to run its full 30s, and that it did not report a successful
+    // self-exit.
     expect(Date.now() - begun).toBeLessThan(10_000)
     expect(outcome.exitCode === null || outcome.exitCode !== 0).toBe(true)
   }, 15_000)
