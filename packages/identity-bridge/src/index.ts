@@ -21,9 +21,18 @@
  *    `authorizeIndex()`. It never bypasses that check: the patch this replaces
  *    did (`isAuthenticated: () => true`).
  *
- * 3. **Principal exposure.** The oauth2-proxy sidecar
- *    (`--set-xauthrequest`) injects `X-Auth-Request-User` /
- *    `X-Auth-Request-Groups`; `ctx.dshAuth.currentUser(req)` reads them.
+ * 3. **Principal exposure.** The oauth2-proxy sidecar passes the verified
+ *    principal to its UPSTREAM as `X-Forwarded-User` / `X-Forwarded-Groups`
+ *    (`--pass-user-headers`, the default). `--set-xauthrequest` is a RESPONSE
+ *    header feature for the nginx `auth_request` pattern: it puts
+ *    `X-Auth-Request-*` on the browser response, NOT on the upstream request.
+ *    Measured against the real v7.15.5 binary, so the defaults below are the
+ *    upstream-facing names. Both names are configurable for other proxies.
+ *    TRUST REQUIREMENT: these headers are only evidence when the ONLY path to
+ *    this process is the authenticating proxy — the deployment binds DSH to
+ *    loopback inside the proxy's own pod, publishes no Service port for it and
+ *    fences it with a NetworkPolicy. Never expose the app port directly: a
+ *    direct client could then simply assert the header.
  *    Authorization and per-user state are deliberately NOT part of this
  *    package.
  *
@@ -60,14 +69,28 @@ export interface Config {
    * Defaults to the origin of the request being handed off.
    */
   publicOrigin?: string
+  /**
+   * Request headers carrying the proxy-verified principal. Defaults to the
+   * oauth2-proxy upstream names (`x-forwarded-user` / `x-forwarded-groups`).
+   */
+  userHeader?: string
+  groupsHeader?: string
 }
 
 /** The `globalThis` property the official browser client reads at boot. */
 const TRANSPORT_GLOBAL = '__DSH_TRANSPORT__'
 
 /** oauth2-proxy `--set-xauthrequest` identity headers (node:http lower-cases them). */
-const USER_HEADER = 'x-auth-request-user'
-const GROUPS_HEADER = 'x-auth-request-groups'
+/** Upstream-facing identity headers oauth2-proxy actually injects. */
+const DEFAULT_HEADERS: HeaderNames = { user: 'x-forwarded-user', groups: 'x-forwarded-groups' }
+
+/** Which request headers carry the proxy-verified principal. */
+export interface HeaderNames {
+  /** Header carrying the authenticated user id. */
+  user: string
+  /** Header carrying the comma-separated group list. */
+  groups: string
+}
 
 /** The authenticated principal one request carries. */
 export interface DshAuthUser {
@@ -120,7 +143,11 @@ export function apply(ctx: Context, config: Config): void {
     table.push({ kind: 'global', name: TRANSPORT_GLOBAL, value: { ownsHost: true } })
   })
 
-  ctx.provide('dshAuth', { currentUser })
+  const headers: HeaderNames = {
+    user: config.userHeader ?? DEFAULT_HEADERS.user,
+    groups: config.groupsHeader ?? DEFAULT_HEADERS.groups,
+  }
+  ctx.provide('dshAuth', { currentUser: (req) => currentUser(req, headers) })
 
   ctx.inject(['connection'], (connectionCtx) => {
     connectionCtx.effect(
@@ -303,10 +330,13 @@ function headerValue(headers: IncomingHttpHeaders, name: string): string | undef
  * @param req - any request-shaped object carrying the sidecar's headers.
  * @returns the principal, or `undefined` when no user header is present.
  */
-export function currentUser(req: { headers: IncomingHttpHeaders }): DshAuthUser | undefined {
-  const id = headerValue(req.headers, USER_HEADER)?.trim()
+export function currentUser(
+  req: { headers: IncomingHttpHeaders },
+  headers: HeaderNames = DEFAULT_HEADERS,
+): DshAuthUser | undefined {
+  const id = headerValue(req.headers, headers.user)?.trim()
   if (id === undefined || id === '') return undefined
-  const groups = (headerValue(req.headers, GROUPS_HEADER) ?? '')
+  const groups = (headerValue(req.headers, headers.groups) ?? '')
     .split(',')
     .map((group) => group.trim())
     .filter((group) => group !== '')

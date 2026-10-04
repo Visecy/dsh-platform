@@ -174,7 +174,7 @@ describe('identity-bridge launch-token handoff', () => {
 
   it('provides ctx.dshAuth over the sidecar identity headers', async () => {
     expect(bench.ctx.dshAuth.currentUser({
-      headers: { 'x-auth-request-user': 'alice', 'x-auth-request-groups': 'dsh-admins, devs' },
+      headers: { 'x-forwarded-user': 'alice', 'x-forwarded-groups': 'dsh-admins, devs' },
     })).toEqual({ id: 'alice', groups: ['dsh-admins', 'devs'] })
   })
 })

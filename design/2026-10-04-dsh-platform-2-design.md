@@ -34,7 +34,7 @@
    ▼ 同一个 Pod
 ┌─────────────────────────────────────────────────────────┐
 │ oauth2-proxy sidecar :4180（cookie 会话 = 无状态）        │
-│    └─ 注入 X-Auth-Request-User / -Groups                 │
+│    └─ 上游注入 X-Forwarded-User / -Groups                │
 │                                                          │
 │ DSH 控制面 127.0.0.1:3080（readOnlyRootFilesystem，无 PVC）│
 │    ├─ session-persistence-rdb  → Postgres：会话           │
@@ -75,6 +75,19 @@ DSH 绑 loopback + 同 pod sidecar ⇒ 身份头只可能来自 sidecar，**信�
 ---
 
 ## 4. 四个关键机制
+
+### 4.0 身份头的正确名称（实测修正）
+
+`--set-xauthrequest` 是**响应头**特性（nginx `auth_request` 模式）：它把 `X-Auth-Request-*` 放在
+**浏览器响应**上；oauth2-proxy 传给**上游**的是 `X-Forwarded-User` / `X-Forwarded-Groups`
+（`--pass-user-headers`，默认开）。这是用真实 v7.15.5 二进制实测的（上游只看到 `X-Forwarded-*`，
+浏览器响应才带 `X-Auth-Request-*`）。`identity-bridge` 默认读前者，两者都可通过
+`userHeader`/`groupsHeader` 配置。
+
+**信任前提**：这些头只有在"到达本进程的唯一路径就是认证代理"时才算证据——部署把 DSH 绑在同 pod 的
+loopback、Service 不为它发布端口、NetworkPolicy 锁住它。**绝不能直接暴露应用端口**，否则客户端
+自己伪造这个头即可冒充身份。chart 另开了 `--set-xauthrequest`（好处：oauth2-proxy 会在注入前
+剥掉客户端自带的 `X-Auth-Request-*` / `X-Forwarded-*`）。
 
 ### 4.1 零补丁（替代 P1/P2）
 - **P1（浏览器 `isLoopback`）** → 官方 transport hook：宿主插件监听 `webserver/index-inject` push `{kind:'global', name:'__DSH_TRANSPORT__', value:{ownsHost:true}}`。上游 `ClientTransportHooks.ownsHost` 是有类型、有文档、有官方消费者的接口。**已验证**（`scripts/smoke-official-integration.mjs`，跑在未打补丁的官方产物上）。
