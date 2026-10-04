@@ -1,0 +1,38 @@
+{
+  "name": "@visecy/dsh-logging-stdout",
+  "version": "0.1.0",
+  "description": "Platform-owned stdout sink for ctx.logger (control-plane observability)",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "dist"
+  ],
+  "scripts": {
+    "build": "node ../../scripts/build-pkg.mjs logging-stdout src/index.ts",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/schemastery": "^3.18.4",
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2",
+    "vitest": "^2.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Visecy/dsh-platform.git",
+    "directory": "packages/logging-stdout"
+  }
+}
