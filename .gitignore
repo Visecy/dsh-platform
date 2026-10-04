@@ -7,3 +7,8 @@ packages/*/dist/
 packages/*/.tmp-*/
 packages/*/.dbg*/
 packages/*/.smoke-*
+
+# Verification debris at the repo root: `scripts/harness-profile.sh` builds a
+# throwaway DSH home under a `.tmp-*` name, and verification runs tee their logs
+# next to it. None of it is source.
+.tmp-*
