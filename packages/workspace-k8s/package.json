@@ -8,7 +8,10 @@
     "@kubernetes/client-node": "^2.0.0"
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-brand": "0.1.5-rc.2",
     "@deepseek-ai/dsh-client-ui-workspace": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-storage": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-storage-domain": "0.1.5-rc.2",
     "@types/node": "^26.2.0",
     "@visecy/dsh-sandbox-daemon": "workspace:*",
     "typescript": "^7.0.2",
@@ -17,6 +20,7 @@
   "scripts": {
     "build": "node ../../scripts/build-pkg.mjs workspace-k8s src/index.ts && node ../../scripts/build-workspace-ui.mjs",
     "prepublishOnly": "npm run build",
+    "pretest": "node tests/vendor/materialize.mjs",
     "test": "vitest run"
   },
   "publishConfig": {

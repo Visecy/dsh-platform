@@ -1,0 +1,3 @@
+# materialize.mjs scratch directories (node_modules/ itself is covered by the
+# repository root .gitignore); nothing here is ever committed.
+.node_modules.*
