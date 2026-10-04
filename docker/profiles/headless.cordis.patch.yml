@@ -49,3 +49,17 @@
       name: '@deepseek-ai/dsh-bash-local'
       config:
         cwd: '/workspaces'
+# See docker/profiles/web.cordis.patch.yml for the full reasoning. The official
+# `dsh-workspace` registry persists through the official `dsh-storage-domain`
+# row (`backend: json` under DSH_HOME, an emptyDir); routing it to the postgres
+# backend `storage-db` registers keeps the registry — and with it the only copy
+# of the session<->workspace association — across pod replacements.
+#
+# TOP-LEVEL row by design (not an `insert:` entry): it patches the base row in
+# place instead of adding a second `storage-domain` id to the loader.
+#
+# ORDERING CONSTRAINT: ships together with the workspace-k8s startup reconcile
+# and session rebind; this row alone would freeze an empty association set.
+- id: storage-domain
+  config:
+    backend: postgres

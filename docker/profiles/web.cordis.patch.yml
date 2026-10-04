@@ -129,3 +129,25 @@
     # browser renders again.
     - id: ui-directory-picker-browse
       name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'
+# The official `@deepseek-ai/dsh-workspace` persists its whole registry through
+# `ctx.storageDomain` — workspace records INCLUDING each record's `sessionIds`,
+# which is the only place the session<->workspace association exists. That
+# service is the official `dsh-storage-domain` row, whose base config is
+# `backend: json` rooted at `dshHomePath('storages')`: an emptyDir here, so the
+# registry is wiped on every pod replacement and the sidebar drops every
+# session to "Ungrouped".
+#
+# Restate the row with the backend `storage-db` already registers and provides
+# (`type: postgres` — see storage-db/src/index.ts) so the official facility
+# reaches Postgres. This MUST be a TOP-LEVEL row, not an `insert:` entry: the
+# base profile already owns `storage-domain`, and inserting the same id makes
+# the loader carry two rows for it (see the f830ddf/e06e809 history). A
+# top-level row patches the base row in place and keeps its `name`.
+#
+# ORDERING CONSTRAINT: this row must ship together with the startup reconcile
+# and the session rebind in packages/workspace-k8s. If the first boot on the DB
+# backend still lacks the /workspaces/<id> anchors, the registry writes an empty
+# association set to Postgres and `initialized: true` makes it permanent.
+- id: storage-domain
+  config:
+    backend: postgres
