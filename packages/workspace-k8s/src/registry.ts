@@ -52,13 +52,19 @@ export interface WorkspaceRegistry {
    * The association lives ONLY in the record's `sessionIds`, and the official
    * registry filters that array on read by a canonical-cwd index it builds
    * once, at init. Any session whose `cwd` did not resolve at that moment is
-   * therefore invisible — and is pruned from the medium by the next write. A
-   * rebind is the only repair: an official `attachSession` refreshes that index
-   * (`rememberSessionPath`) and prepends the id, but it short-circuits when the
-   * record already claims the session, so the caller's id must be detached
-   * first or the index is never refreshed.
+   * therefore invisible — and the record's next write prunes it from the
+   * medium.
    *
-   * @returns the session ids actually attached, in final (newest-first) order.
+   * `attachSession` is the only repair. It refreshes the index
+   * (`rememberSessionPath`) only on its not-already-claimed branch — the
+   * durable-membership short-circuit comes first — so an id the record already
+   * claims takes one pass to clear (its mutate tail prunes it) and a second,
+   * ordinary attach to come back. The first pass therefore reports that id as
+   * NOT attached, and the caller must not hand it to another record.
+   *
+   * @returns the ids the record can now index, newest-first. An id that is
+   * requested but absent from the result is still `Ungrouped` and needs another
+   * pass.
    */
   rebind(workspacePath: string, sessions: readonly SessionRebind[]): Promise<string[]>
 }
@@ -184,9 +190,9 @@ export class HostWorkspaceRegistry implements WorkspaceRegistry {
 
     // `entity.sessionIds` is the record's membership filtered by the registry's
     // canonical-cwd index — and that index is exactly what a pod replacement
-    // loses. An id absent here is invisible to the sidebar and is pruned from
-    // the medium by the record's next write, so this getter is the honest
-    // answer to "what does this record currently own?".
+    // loses. An id absent here is invisible to the sidebar AND is pruned from
+    // the medium by the record's next write, so this getter is the only honest
+    // answer to "what can this record currently own?".
     const current = [...(entity.sessionIds ?? [])]
     // Oldest-first: `attachSession` prepends, so replaying history in creation
     // order leaves the membership newest-first, exactly like a live attach.
@@ -198,26 +204,35 @@ export class HostWorkspaceRegistry implements WorkspaceRegistry {
     // newest-first at the FRONT and any membership outside this rebind's scope
     // (still indexed, attached through the ordinary controller path) behind
     // them. That is the state the record holds once this method returns.
-    const next = [...desired.map((session) => session.id).reverse(), ...current.filter((id) => !inScope.has(id))]
+    const next = [...wanted].reverse().concat(current.filter((id) => !inScope.has(id)))
     // Steady state: the record already owns exactly these sessions in this
     // order. Re-attaching would be idempotent, but it would still rewrite the
     // record (and its `updatedAt`) on every periodic pass.
     if (isSameOrder(current, next)) return current
 
-    // The detach is NOT optional: `attachSession` short-circuits on an id the
-    // record already claims, and only its other branch calls
-    // `rememberSessionPath` — the index refresh that makes the membership
-    // visible to the filtered getter again. Detach every id this rebind will
-    // re-attach that the record can currently SEE (the filtered view). An id
-    // the record claims but the index already hides must not be detached: that
-    // write would prune it before the re-attach could refresh the index, which
-    // is the durable half of this bug.
+    // Detach every id this rebind will re-attach that the record can currently
+    // SEE. The detach is required because `attachSession` short-circuits on an
+    // id the DURABLE membership already claims, so without it a mis-ordered
+    // membership would never be re-ordered. An id the record claims but the
+    // index hides must NOT be detached: that write would prune it, and nothing
+    // in this pass can put it back (the re-attach cannot refresh an index the
+    // short-circuit skipped).
     for (const id of current) {
       if (inScope.has(id)) await entity.detachSession(id)
     }
+    // The attach of a session the record durably claims but the index hides
+    // cannot refresh the index (the short-circuit runs first), and its mutate
+    // tail prunes the id from the medium. That is a one-pass regression rather
+    // than a repair, but it is the only way the next pass can attach it again —
+    // by then the durable membership no longer holds the id, so the attach takes
+    // the header-reading branch. Refusing to attach here would leave the
+    // association broken forever, so the prune is the lesser evil.
     for (const id of wanted) await entity.attachSession(id)
-    // Report what the record now owns, not the pre-prepend plan: attaches
-    // prepend, so the entity's own order is the authoritative answer.
+    // Report what the record can index now, not the pre-prepend plan: attaches
+    // prepend, and an attach of a claimed-but-hidden id is a no-op that also
+    // prunes it from the medium, so the entity's own filtered view is the only
+    // truthful answer. Ids that did not end up visible stay out, which is what
+    // keeps the caller from handing the same session to a second record.
     return [...(entity.sessionIds ?? [])]
   }
 

@@ -31,6 +31,21 @@ export interface ReconcilerOptions {
   sessions: SessionHeaderSource
   namespace: string
   hostRoot: string
+  /** Where the pass reports the failures it used to swallow. */
+  logger?: ReconcilerLogger
+}
+
+/**
+ * The slice of `ctx.logger` the pass reports through.
+ *
+ * Every branch that used to `return`/`catch` in silence is a branch that can
+ * leave a session Ungrouped forever, and the live deployment had no way to tell
+ * which one fired. None of them is recoverable in place (the next pass
+ * retries), so they are all `warn`: the noise floor stays "something is wrong"
+ * rather than "the pod booted".
+ */
+export interface ReconcilerLogger {
+  warn(message: string): void
 }
 
 function pvcToWorkspaceId(name: string): string {
@@ -38,17 +53,31 @@ function pvcToWorkspaceId(name: string): string {
 }
 
 /**
+ * Run one diagnostic line without letting the diagnostic break the pass: a
+ * logger that throws must not turn a reporting path into a new silent failure.
+ */
+function report(logger: ReconcilerLogger | undefined, message: string): void {
+  try {
+    logger?.warn(message)
+  } catch {
+    // The pass's real work matters more than the diagnostic.
+  }
+}
+
+/**
  * Canonicalize a stored session `cwd` exactly the way the official registry
  * does before it compares against a record path (`realpath`, both spellings
  * fully qualified). A cwd that does not resolve is not this pass's business:
- * the official attach would reject it, so the session is skipped.
+ * the official attach would reject it, so the session is skipped — but the
+ * caller reports WHY, because "skipped" and "attached" look identical from the
+ * outside.
  */
-async function canonicalPath(path: string): Promise<string | undefined> {
-  if (!path.startsWith('/')) return undefined
+async function canonicalPath(path: string): Promise<{ path: string } | { error: string }> {
+  if (!path.startsWith('/')) return { error: 'is not an absolute path' }
   try {
-    return await realpath(path)
-  } catch {
-    return undefined
+    return { path: await realpath(path) }
+  } catch (error) {
+    return { error: `does not resolve: ${String(error)}` }
   }
 }
 
@@ -59,13 +88,13 @@ export class WorkspaceReconciler {
     const { controller, registry, namespace, hostRoot } = this.opts
     if (controller.listPods === undefined || controller.listPvcs === undefined) return
 
-    const [registered, pods, pvcs] = await Promise.all([
+    const [known, pods, pvcs] = await Promise.all([
       registry.list().catch(() => []),
       controller.listPods(namespace).catch(() => []),
       controller.listPvcs(namespace).catch(() => []),
     ])
 
-    const currentKnown = new Set(registered.map((ws) => ws.workspaceId))
+    const currentKnown = new Set(known.map((ws) => ws.workspaceId))
     // Only resources backed by a PVC are real workspaces. Pod-only resources
     // are stale prototypes/orphans and must NOT be auto-adopted; they are
     // surfaced for manual cleanup instead.
@@ -75,22 +104,45 @@ export class WorkspaceReconciler {
       if (pvcIds.has(pod)) resources.add(pod)
     }
 
+    // Every resource needs its host-side anchor, whether or not the registry
+    // already has the record. The official registry realpaths the directory in
+    // `create` AND in the session paths (`resolveByPath`, `attachSession`), so a
+    // record whose anchor went missing — a re-created PVC, a wiped control
+    // plane — can never be repaired by the rebind below while the directory is
+    // absent. `mkdir` is idempotent, so this runs for known and unknown ids
+    // alike and a failure simply leaves the retry to the next pass.
+    for (const id of resources) {
+      try {
+        await mkdir(`${hostRoot}/${id}`, { recursive: true })
+      } catch (error) {
+        report(this.opts.logger, `workspace reconcile: could not create the host anchor '${hostRoot}/${id}': ${String(error)}`)
+      }
+    }
+
     // Bridge missing k8s resources back into the official registry.
     for (const id of resources) {
       if (currentKnown.has(id)) continue
       try {
-        // workspace.create validates with fs.realpath, so a missing host-side
-        // anchor would make a legitimately-existing pod/PVC fail forever.
-        // The anchor is best-effort: if the control plane cannot create it,
-        // registry.create will fail and the reconciler will retry later.
-        await mkdir(`${hostRoot}/${id}`, { recursive: true }).catch(() => undefined)
         await registry.create(`${hostRoot}/${id}`)
         currentKnown.add(id)
-      } catch {
+      } catch (error) {
         // A failed bridge-creation must not block the rest of reconciliation;
         // it will be retried on the next pass.
+        report(this.opts.logger, `workspace reconcile: could not register '${id}' at '${hostRoot}/${id}': ${String(error)}`)
       }
     }
+
+    // Re-read the registry for the rebind: the view fetched above is from
+    // BEFORE the bridge loop, so on the pass that creates a record it does not
+    // contain that record — and the rebind's own guard would see "no
+    // workspaces" and return without attaching anything. Both the official
+    // `list()` and the bridge that wraps it return a fresh array per call, so
+    // the pre-bridge view never grows in place.
+    const registered = await registry.list().catch((error: unknown) => {
+      report(this.opts.logger, `workspace reconcile: could not list workspaces for the session rebind: ${String(error)}`)
+      return undefined
+    })
+    if (registered === undefined) return
 
     await this.rebindSessions(registered, hostRoot)
   }
@@ -107,16 +159,19 @@ export class WorkspaceReconciler {
    * zero writes.
    */
   private async rebindSessions(registered: readonly { workspaceId: string; path: string }[], hostRoot: string): Promise<void> {
-    const { registry, sessions } = this.opts
+    const { registry, sessions, logger } = this.opts
     // Without the durable session store there is no join key; never invent one.
+    // (The service is resolved per pass, so its absence is a composition fact,
+    // not a fault: no line here.)
     if (sessions === undefined || registered.length === 0) return
 
     let headers: readonly { readonly header: { readonly id: string; readonly cwd?: string; readonly createdAt: number } }[]
     try {
       headers = await sessions.list()
-    } catch {
+    } catch (error) {
       // A storage fault must not be mistaken for "no sessions": skip the pass
       // and let the next tick retry.
+      report(logger, `workspace session rebind skipped: session persistence could not be listed: ${String(error)}`)
       return
     }
 
@@ -124,7 +179,10 @@ export class WorkspaceReconciler {
     // the control plane's own mount always exists, so this only ever rescues a
     // root whose spelling is not canonical (a symlinked /workspaces would
     // otherwise make every cwd look like it belongs outside the platform).
-    const root = await realpath(hostRoot).catch(() => undefined)
+    const root = await realpath(hostRoot).catch((error: unknown) => {
+      report(logger, `workspace session rebind skipped: host root '${hostRoot}' does not resolve: ${String(error)}`)
+      return undefined
+    })
     if (root === undefined) return
 
     // Group the sessions this pass may touch by their canonical cwd. A cwd
@@ -132,12 +190,28 @@ export class WorkspaceReconciler {
     const byPath = new Map<string, SessionRebind[]>()
     for (const snapshot of headers) {
       const { id, cwd, createdAt } = snapshot.header
-      if (cwd === undefined) continue
-      const path = await canonicalPath(cwd)
-      if (path === undefined || !path.startsWith(root + '/')) continue
-      const bucket = byPath.get(path)
-      const entry: SessionRebind = { id, path, createdAt }
-      if (bucket === undefined) byPath.set(path, [entry])
+      if (cwd === undefined) {
+        // The header's cwd is the ONLY join key this pass has. A header without
+        // one is a session that stays Ungrouped until the user re-opens it, and
+        // the persistence backend does not require a cwd, so it is a real case.
+        report(logger, `workspace session rebind skipped session '${id}': its stored header carries no cwd`)
+        continue
+      }
+      const canonical = await canonicalPath(cwd)
+      if ('error' in canonical) {
+        // Not repairable here on purpose: the official attach re-validates the
+        // cwd with realpath+stat and would reject the session anyway. Report it,
+        // because a missing anchor and a healthy pass look identical otherwise.
+        report(logger, `workspace session rebind skipped session '${id}': its cwd '${cwd}' ${canonical.error}`)
+        continue
+      }
+      if (!canonical.path.startsWith(root + '/')) {
+        report(logger, `workspace session rebind skipped session '${id}': its cwd '${cwd}' resolves to '${canonical.path}', outside the platform host root '${root}'`)
+        continue
+      }
+      const entry: SessionRebind = { id, path: canonical.path, createdAt }
+      const bucket = byPath.get(canonical.path)
+      if (bucket === undefined) byPath.set(canonical.path, [entry])
       else bucket.push(entry)
     }
     if (byPath.size === 0) return
@@ -159,9 +233,10 @@ export class WorkspaceReconciler {
       try {
         const attached = await registry.rebind(workspace.path, candidates)
         for (const id of attached) claimed.add(id)
-      } catch {
+      } catch (error) {
         // One unrepairable workspace (missing anchor, session persistence
         // miss) must not abort the rest; the next pass retries it.
+        report(logger, `workspace session rebind failed for '${workspace.path}' (${candidates.length} session(s)): ${String(error)}`)
       }
     }
   }

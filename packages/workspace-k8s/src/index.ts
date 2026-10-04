@@ -196,6 +196,9 @@ export function apply(ctx: Context, config: Config | undefined): void {
     sessions: sessionHeaders,
     namespace: config.namespace,
     hostRoot,
+    // Every rebind failure used to return in silence, which is why the live
+    // deployment's missing associations were undiagnosable from the pod logs.
+    logger: ctx.logger,
   })
   ctx.provide('workspaceReconciler', { reconcile: () => reconciler.reconcile() })
   const deleteWorkspaceAsync = async (workspaceId: string): Promise<void> => {
