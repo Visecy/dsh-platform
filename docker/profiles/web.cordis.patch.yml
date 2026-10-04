@@ -27,12 +27,12 @@
     printUrl: false
     surfaceContext: true
     trustedHosts: !!js ctx.webStartup.trustedHosts
-# the official ui-workspace row is disabled: its sidebar/hero surfaces are
-# owned by the vendored WorkspaceBrowser in @visecy/dsh-workspace-k8s
-# (status patches), and both registering the same locale namespace crashes
-# the official apply.
-- id: ui-workspace
-  disabled: true
+# The official ui-workspace row is ENABLED (default) again: it owns the sidebar
+# workspace/session list, the conversation hero and the `sidebar.workspaces`
+# contract. The platform no longer vendored that browser, so there is no second
+# registrant of the `workspace` locale namespace and nothing to collide with.
+# @visecy/dsh-workspace-k8s only ADDS a status panel on the official slots
+# (main keyed panel + sidebar.panellist entry); see packages/workspace-k8s/src/client.
 # DSH 0.1.5 row inventory notes (dsh-web-app):
 #  - `file-upload` (host `fileUploads` + client `fileUpload`), `resources` and
 #    `workspace-files` are LOAD-BEARING: 0.1.5's dsh-api-session-controller
