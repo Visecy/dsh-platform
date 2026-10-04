@@ -1,71 +1,127 @@
 /**
  * Shared workspace catalog store for the client UI.
  *
- * Both the vendored official browser (via the injected `statusSource` hook)
- * and the workspace detail view consume this one polled snapshot. The
- * snapshot is replaced only when the poll returns, so useSyncExternalStore /
- * HostObservable consumers see stable references between polls.
+ * One polled snapshot of `/workspaces/api/list` feeds the `main` status panel,
+ * its `sidebar.panellist` icon and the optional `shell.overlay` pill. The
+ * snapshot object is replaced only when a poll settles, so
+ * `useSyncExternalStore` consumers see a stable reference between polls.
+ *
+ * Failure is a first-class state: a failed list poll or a rejected action kept
+ * its API `error.message` in the snapshot rather than only on the console, so
+ * the panel can render it. The platform has been bitten by silent client
+ * failures before; this store does not have one.
  */
 import { workspaceApi, type CatalogWorkspace } from './api.ts'
-
-export interface StatusRow extends CatalogWorkspace {
-  /** Display label for the phase (rendered by the vendored browser). */
-  label: string
-}
+import type { StatusAction } from './panel-model.ts'
 
 export interface StatusPayload {
+  /** When the snapshot was produced (ms epoch); the panel's clock for countdowns. */
   at: number
-  rows: StatusRow[]
+  rows: CatalogWorkspace[]
+  /** Last API `error.message`, or '' when the last call succeeded. */
   error: string
+  /** Workspace id with an action in flight, so the panel can lock its buttons. */
+  pendingId: string
+  /** True while a list poll is in flight. */
+  loading: boolean
 }
 
-export const PHASE_LABEL: Record<string, string> = {
-  running: '运行中',
-  sleep: '休眠中',
-  provision: '创建中',
-  waking: '唤醒中',
-  orphan: '待清理',
-  deleted: '已删除',
-  unknown: '未知',
-}
+const EMPTY: StatusPayload = { at: 0, rows: [], error: '', pendingId: '', loading: false }
 
-let payload: StatusPayload = { at: 0, rows: [], error: '' }
+let payload: StatusPayload = EMPTY
 const listeners = new Set<() => void>()
+
+/** Current snapshot; stable between polls. */
+export function getSnapshot(): StatusPayload {
+  return payload
+}
+
+/**
+ * Subscribe to snapshot replacements.
+ * @param fn - listener invoked after every poll/action settles.
+ * @returns unsubscribe function.
+ */
+export function subscribeStatus(fn: () => void): () => void {
+  listeners.add(fn)
+  return () => { listeners.delete(fn) }
+}
 
 function notify(): void {
   for (const fn of listeners) fn()
 }
 
-export const statusSource = {
-  getSnapshot: (): StatusPayload => payload,
-  subscribe: (fn: () => void): (() => void) => {
-    listeners.add(fn)
-    return () => { listeners.delete(fn) }
-  },
-  // The vendored browser reports its visible workspace ids here; the real
-  // catalog polls everything, so this is a no-op.
-  setScope: (): void => {},
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
+/** Refresh the catalog. Never rejects: failures land in `snapshot.error`. */
 export async function poll(): Promise<void> {
+  payload = { ...payload, loading: true }
+  notify()
   try {
     const list = await workspaceApi.list()
-    payload = {
-      at: Date.now(),
-      rows: list.map((r) => ({ ...r, label: PHASE_LABEL[r.phase] ?? r.phase })),
-      error: '',
-    }
-  } catch (e) {
-    payload = { ...payload, error: e instanceof Error ? e.message : String(e) }
+    payload = { at: Date.now(), rows: list, error: '', pendingId: payload.pendingId, loading: false }
+  } catch (error) {
+    payload = { ...payload, at: Date.now(), error: messageOf(error), loading: false }
   }
   notify()
 }
 
-/** Workspace action dispatch (wake/sleep/delete/cleanup) + immediate refresh. */
-export async function runStatusAction(workspaceId: string, action: string): Promise<void> {
-  if (action === 'ensure') await workspaceApi.ensure(workspaceId)
-  else if (action === 'sleep') await workspaceApi.sleep(workspaceId)
-  else if (action === 'delete') await workspaceApi.delete(workspaceId)
-  else if (action === 'cleanup') await workspaceApi.cleanup(workspaceId)
-  await poll()
+/**
+ * Keep the snapshot current: one immediate poll, then one per interval. The
+ * interval is unref'd so a mounted panel can never hold the process open.
+ * @param intervalMs - poll cadence.
+ * @returns disposer that stops the poller.
+ */
+export function startPolling(intervalMs: number): () => void {
+  let inFlight = false
+  let stopped = false
+  const tick = (): void => {
+    if (inFlight || stopped) return
+    inFlight = true
+    void poll().finally(() => { inFlight = false })
+  }
+  tick()
+  const timer = setInterval(tick, intervalMs)
+  // Node keeps the event loop alive for a plain interval; the web client does
+  // not care, the tests and any Node-side import do.
+  ;(timer as unknown as { unref?: () => void }).unref?.()
+  return () => {
+    stopped = true
+    clearInterval(timer)
+  }
+}
+
+/**
+ * Dispatch one lifecycle action, then refresh the snapshot.
+ *
+ * The returned promise resolves after the refresh and rejects when the action
+ * itself failed; either way the failure text is already in the snapshot (and
+ * every subscriber has been notified), so the panel shows it without a console
+ * round-trip. Callers that only fire-and-forget can ignore the rejection.
+ * @param workspaceId - platform workspace id (the path segment, not the native UUID).
+ * @param action - lifecycle verb.
+ * @returns promise settling after the refresh.
+ */
+export function runStatusAction(workspaceId: string, action: StatusAction): Promise<void> {
+  payload = { ...payload, pendingId: workspaceId, error: '' }
+  notify()
+  const dispatched = (async (): Promise<void> => {
+    switch (action) {
+      case 'ensure': await workspaceApi.ensure(workspaceId); break
+      case 'sleep': await workspaceApi.sleep(workspaceId); break
+      case 'delete': await workspaceApi.delete(workspaceId); break
+      case 'cleanup': await workspaceApi.cleanup(workspaceId); break
+    }
+  })()
+  return dispatched.then(async () => {
+    payload = { ...payload, pendingId: '' }
+    notify()
+    await poll()
+  }, async (error: unknown) => {
+    payload = { ...payload, pendingId: '', error: messageOf(error) }
+    notify()
+    await poll().catch(() => undefined)
+    throw error
+  })
 }
