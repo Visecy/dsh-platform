@@ -117,4 +117,22 @@ describe('workspace-k8s plugin load', () => {
     // and the interval keeps retrying.
     await until(() => ctx.get('workspaceReconciler') !== undefined)
   })
+
+  it('reports a failed pass through ctx.logger while the plugin keeps loading', async () => {
+    const ctrl = new FakeController(['ws-a-data'])
+    const ctx = new Context()
+    const warnings: string[] = []
+    ctx.logger.warn = ((message: unknown) => { warnings.push(String(message)) }) as never
+    void ctx.plugin(
+      { name, apply },
+      { namespace: 'dsh', image: 'visecy/dsh-sandbox-daemon:test', controller: ctrl, hostRoot: tempRoot() },
+    )
+    // No official registry in this composition, so the bridge cannot register
+    // anything. That failure used to disappear with the catch that swallowed it;
+    // the whole point of threading `ctx.logger` into the reconciler is that a
+    // silent non-repair becomes one line in the pod logs.
+    await until(() => warnings.length > 0)
+    expect(warnings.join('\n')).toContain('ws-a')
+    expect(warnings.join('\n')).toContain('workspace registry unavailable')
+  })
 })
