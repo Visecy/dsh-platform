@@ -57,8 +57,10 @@ pnpm --dir "$HEADLESS" --store-dir "$STORE" add -w \
   "file:$REPO/packages/platform-domain" \
   > "$HARNESS/headless-add.log" 2>&1
 
-# 3. the platform's client bundle + profile patch layer
-node "$REPO/scripts/enable-workspace-ui.mjs" "$PROFILE"
+# 3. the platform's profile patch layer. The workspace client UI needs no
+#    injection step: @visecy/dsh-workspace-k8s is installed above as a file:
+#    dependency, and its own package.json declares the client bundle, so the
+#    profile picks the panel up the same way it picks up the plugin rows.
 cp "$REPO/docker/profiles/web.cordis.patch.yml" "$PROFILE/cordis.patch.yml"
 cp "$REPO/docker/profiles/headless.cordis.patch.yml" "$HEADLESS/cordis.patch.yml"
 
