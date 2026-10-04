@@ -128,10 +128,15 @@ interface IndexRouteOptions {
  * Publish the browser transport hook, provide the identity seam, and claim the
  * exact `/` route once Connection is available (the transport hook itself does
  * not depend on Connection).
+ * `config` is optional: a profile row may omit `config:` entirely, and cordis
+ * then calls this body with `undefined` (this package exports no runtime
+ * `Config` schema, so nothing normalizes the value first). Every read below
+ * must tolerate that — a throw here fails the whole plugin tree, not just this
+ * plugin.
  * @param ctx - plugin context carrying the webServer service.
- * @param config - resolved plugin config.
+ * @param config - resolved plugin config, or `undefined` for a config-less row.
  */
-export function apply(ctx: Context, config: Config): void {
+export function apply(ctx: Context, config: Config = {}): void {
   const distIndex = resolveDistIndex(config)
   const options: IndexRouteOptions = {
     distIndex,
@@ -262,13 +267,13 @@ function requestOrigin(req: IncomingMessage): string {
 
 /**
  * Resolve the index this composition serves.
- * @param config - resolved plugin config.
+ * @param config - resolved plugin config, or `undefined` for a config-less row.
  * @returns the absolute path of index.html.
  * @throws when no distIndex is configured and no official Web frontend is
  * resolvable from this composition.
  */
-function resolveDistIndex(config: Config): string {
-  const configured = config.distIndex
+function resolveDistIndex(config: Config | undefined): string {
+  const configured = config?.distIndex
   if (configured !== undefined && configured !== '') return configured
   const fallback = resolveFrontendDistIndex()
   if (fallback === undefined) {
