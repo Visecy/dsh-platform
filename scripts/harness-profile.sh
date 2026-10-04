@@ -62,6 +62,20 @@ node "$REPO/scripts/enable-workspace-ui.mjs" "$PROFILE"
 cp "$REPO/docker/profiles/web.cordis.patch.yml" "$PROFILE/cordis.patch.yml"
 cp "$REPO/docker/profiles/headless.cordis.patch.yml" "$HEADLESS/cordis.patch.yml"
 
+# Mirror the image: a custom profile defaults to `patchReload: "live"`, which
+# makes the CLI demand the Cordis HMR service at boot. The image sets it to
+# "startup" because the patch layer is baked there, so the harness must match or
+# it would not be testing the shipped composition.
+node -e "
+  const fs = require('node:fs');
+  for (const p of ['$PROFILE', '$HEADLESS']) {
+    const f = p + '/package.json';
+    const m = JSON.parse(fs.readFileSync(f, 'utf8'));
+    m.dsh.profile.patchReload = 'startup';
+    fs.writeFileSync(f, JSON.stringify(m, null, 2) + '\n');
+  }
+"
+
 # 4. fail loudly when a plugin cannot actually be imported from the profile:
 #    `--dump-config` composes configuration without importing plugin bodies, so
 #    a missing RUNTIME peer only shows up here (or at boot, in production).

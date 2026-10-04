@@ -147,6 +147,22 @@ RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
   && node /usr/local/lib/node_modules/check-plugin-imports.mjs /opt/dsh-home/profiles/web \
   && node /usr/local/lib/node_modules/check-plugin-imports.mjs /opt/dsh-home/profiles/headless
 
+# A custom profile defaults to `patchReload: "live"`, which makes the CLI create
+# the Cordis HMR service at boot and watch the user patch layer. In this image
+# the patch layer is BAKED -- there is nothing to watch -- and the profile does
+# not install the HMR plugins, so the CLI's attempt to create them leaves the
+# service absent and the boot fails (observed on v0.1.75: "user patch-layer
+# watching requires the Cordis HMR service"). "startup" is what the built-in
+# profiles use: apply the patch layer once, at startup.
+RUN node -e "\
+  const fs = require('node:fs');\
+  for (const p of ['web', 'headless']) {\
+    const f = '/opt/dsh-home/profiles/' + p + '/package.json';\
+    const m = JSON.parse(fs.readFileSync(f, 'utf8'));\
+    m.dsh.profile.patchReload = 'startup';\
+    fs.writeFileSync(f, JSON.stringify(m, null, 2) + '\\n');\
+    console.log('patchReload=startup for', p);\
+  }"
 RUN node /usr/local/lib/node_modules/enable-workspace-ui.mjs /opt/dsh-home/profiles/web 2>/dev/null || true
 COPY docker/profiles/web.cordis.patch.yml /opt/dsh-home/profiles/web/cordis.patch.yml
 COPY docker/profiles/headless.cordis.patch.yml /opt/dsh-home/profiles/headless/cordis.patch.yml
