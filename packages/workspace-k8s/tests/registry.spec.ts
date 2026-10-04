@@ -6,8 +6,182 @@ const channel = (impl: {
   create?: (path: string, title?: string) => any
   list?: () => readonly any[]
   delete?: (id: string) => Promise<boolean>
+  resolveByPath?: (path: string) => Promise<any>
 }) => ({
   get: (name: string) => (name === 'workspaceRegistry' ? { ...impl } : undefined),
+})
+
+/**
+ * A channel that hands out the official registry object itself. `channel`
+ * above spreads, which snapshots accessors — fine for plain rows, wrong for a
+ * live entity whose `sessionIds` getter is the whole point.
+ */
+const liveChannel = (registry: unknown) => ({
+  get: (name: string) => (name === 'workspaceRegistry' ? registry : undefined),
+})
+
+/**
+ * The official record's session membership as `@deepseek-ai/dsh-workspace`
+ * actually behaves (`lib/index.js`): reads are filtered by a canonical-cwd
+ * index the registry builds once at init, `attachSession` refreshes that index
+ * for the named session BEFORE it short-circuits on an id the record already
+ * claims, membership is written through a prune-by-index mutate, and
+ * `attachSession` prepends.
+ */
+class FakeOfficialEntity {
+  /** Durable membership (what the record claims). */
+  ids: string[]
+  /** The registry's canonical-cwd index: a session absent here reads as unowned. */
+  indexed: Set<string>
+  readonly calls: string[] = []
+  constructor(ids: string[], indexed: string[] = [...ids]) {
+    this.ids = [...ids]
+    this.indexed = new Set(indexed)
+  }
+  get sessionIds(): readonly string[] {
+    return this.ids.filter((id) => this.indexed.has(id))
+  }
+  async attachSession(id: string): Promise<void> {
+    this.calls.push(`attach:${id}`)
+    // Official order: rememberSessionPath() runs BEFORE the already-included
+    // short-circuit, so an attach always refreshes the index. The detach is
+    // still required — without it the record's *durable* membership is
+    // rewritten by the mutate and the not-included branch never runs.
+    this.indexed.add(id)
+    if (!this.ids.includes(id)) this.ids = [id, ...this.ids]
+    this.pruneDurably()
+  }
+  async detachSession(id: string): Promise<void> {
+    this.calls.push(`detach:${id}`)
+    this.ids = this.ids.filter((existing) => existing !== id)
+    this.pruneDurably()
+  }
+  /**
+   * The official entity's `mutate` tail: every write re-filters the durable
+   * membership by the cwd index, which is what makes a hidden session's
+   * association disappear for good if a write happens before an attach can
+   * refresh the index.
+   */
+  private pruneDurably(): void {
+    this.ids = this.ids.filter((id) => this.indexed.has(id))
+  }
+}
+
+describe('HostWorkspaceRegistry.rebind (session<->workspace repair)', () => {
+  it('repairs membership the record claims but the cwd index hides', async () => {
+    // Exactly the broken-deployment state: the record still claims the
+    // session, but the registry's index lost it (its cwd did not resolve at
+    // registry-init time), so the filtered getter hides it and the record's
+    // next write would prune the association durably.
+    const entity = new FakeOfficialEntity(['sess-1'], [])
+    const reg = new HostWorkspaceRegistry(liveChannel({ resolveByPath: async () => entity }), '/workspaces')
+
+    expect(entity.sessionIds).toEqual([])
+    const attached = await reg.rebind('/workspaces/ws-a', [{ id: 'sess-1', path: '/workspaces/ws-a', createdAt: 1 }])
+
+    // The attach refreshes the index (official order: rememberSessionPath()
+    // before the already-included short-circuit), so the membership is visible
+    // again and no longer prunable.
+    expect(entity.calls).toEqual(['attach:sess-1'])
+    expect(entity.ids).toEqual(['sess-1'])
+    expect(entity.sessionIds).toEqual(['sess-1'])
+    expect(attached).toEqual(['sess-1'])
+  })
+
+  it('re-attaches a mis-ordered membership through detach then attach', async () => {
+    // Both sessions are visible but the durable order is wrong (oldest first),
+    // so this pass must go through detach: an attach alone would short-circuit
+    // and leave the order — and the index refresh that comes with it — as is.
+    const entity = new FakeOfficialEntity(['sess-old', 'sess-new'])
+    const reg = new HostWorkspaceRegistry(liveChannel({ resolveByPath: async () => entity }), '/workspaces')
+
+    const attached = await reg.rebind('/workspaces/ws-a', [
+      { id: 'sess-new', path: '/workspaces/ws-a', createdAt: 300 },
+      { id: 'sess-old', path: '/workspaces/ws-a', createdAt: 100 },
+    ])
+
+    expect(entity.calls).toEqual(['detach:sess-old', 'detach:sess-new', 'attach:sess-old', 'attach:sess-new'])
+    expect(entity.sessionIds).toEqual(['sess-new', 'sess-old'])
+    expect(attached).toEqual(['sess-new', 'sess-old'])
+  })
+
+  it('attaches oldest-first so the prepend yields newest-first, and skips unrelated records', async () => {
+    const entity = new FakeOfficialEntity([])
+    const reg = new HostWorkspaceRegistry(liveChannel({ resolveByPath: async () => entity }), '/workspaces')
+
+    // Deliberately unsorted input: the rebind owns the ordering.
+    await reg.rebind('/workspaces/ws-a', [
+      { id: 'sess-new', path: '/workspaces/ws-a', createdAt: 300 },
+      { id: 'sess-old', path: '/workspaces/ws-a', createdAt: 100 },
+      { id: 'sess-mid', path: '/workspaces/ws-a', createdAt: 200 },
+    ])
+
+    expect(entity.calls).toEqual(['attach:sess-old', 'attach:sess-mid', 'attach:sess-new'])
+    expect(entity.sessionIds).toEqual(['sess-new', 'sess-mid', 'sess-old'])
+  })
+
+  it('is idempotent: a repeated pass writes the same membership, never a duplicate', async () => {
+    const entity = new FakeOfficialEntity([])
+    const reg = new HostWorkspaceRegistry(liveChannel({ resolveByPath: async () => entity }), '/workspaces')
+    const sessions = [
+      { id: 'sess-old', path: '/workspaces/ws-a', createdAt: 100 },
+      { id: 'sess-new', path: '/workspaces/ws-a', createdAt: 300 },
+    ]
+
+    await reg.rebind('/workspaces/ws-a', sessions)
+    const afterFirst = [...entity.calls]
+    await reg.rebind('/workspaces/ws-a', sessions)
+
+    expect(entity.ids).toEqual(['sess-new', 'sess-old'])
+    expect(entity.sessionIds).toEqual(['sess-new', 'sess-old'])
+    // The repair itself takes detach+attach per session; the second pass is a
+    // no-op because the first one left the record in rebind order.
+    expect(afterFirst).toEqual(['attach:sess-old', 'attach:sess-new'])
+    expect(entity.calls).toEqual(afterFirst)
+  })
+
+  it('does not re-attach a membership that is already in rebind order', async () => {
+    const entity = new FakeOfficialEntity(['sess-new', 'sess-old'])
+    const reg = new HostWorkspaceRegistry(liveChannel({ resolveByPath: async () => entity }), '/workspaces')
+
+    await reg.rebind('/workspaces/ws-a', [
+      { id: 'sess-old', path: '/workspaces/ws-a', createdAt: 100 },
+      { id: 'sess-new', path: '/workspaces/ws-a', createdAt: 300 },
+    ])
+    entity.calls.length = 0
+    await reg.rebind('/workspaces/ws-a', [
+      { id: 'sess-old', path: '/workspaces/ws-a', createdAt: 100 },
+      { id: 'sess-new', path: '/workspaces/ws-a', createdAt: 300 },
+    ])
+
+    // Steady state: no write, so the periodic pass costs nothing.
+    expect(entity.calls).toEqual([])
+  })
+
+  it('leaves membership outside the rebind scope alone', async () => {
+    const entity = new FakeOfficialEntity(['sess-new', 'sess-foreign'])
+    const reg = new HostWorkspaceRegistry(liveChannel({ resolveByPath: async () => entity }), '/workspaces')
+
+    await reg.rebind('/workspaces/ws-a', [{ id: 'sess-old', path: '/workspaces/ws-a', createdAt: 100 }])
+
+    expect(entity.calls).toEqual(['attach:sess-old'])
+    expect(entity.sessionIds).toEqual(['sess-old', 'sess-new', 'sess-foreign'])
+  })
+
+  it('is a no-op for an unknown path, an absent registry or an empty session list', async () => {
+    const entity = new FakeOfficialEntity([])
+    const unknownPath = new HostWorkspaceRegistry(liveChannel({ resolveByPath: async () => undefined }), '/workspaces')
+    await expect(unknownPath.rebind('/workspaces/ws-a', [{ id: 's', path: '/workspaces/ws-a', createdAt: 1 }]))
+      .resolves.toEqual([])
+
+    const absent = new HostWorkspaceRegistry({ get: () => undefined }, '/workspaces')
+    await expect(absent.rebind('/workspaces/ws-a', [{ id: 's', path: '/workspaces/ws-a', createdAt: 1 }]))
+      .resolves.toEqual([])
+
+    const reg = new HostWorkspaceRegistry(liveChannel({ resolveByPath: async () => entity }), '/workspaces')
+    await expect(reg.rebind('/workspaces/ws-a', [])).resolves.toEqual([])
+    expect(entity.calls).toEqual([])
+  })
 })
 
 describe('HostWorkspaceRegistry (ctx.workspaceRegistry bridge, DSH 0.1.2)', () => {

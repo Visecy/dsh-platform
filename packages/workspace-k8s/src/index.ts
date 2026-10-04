@@ -12,7 +12,7 @@ import { registerWorkspaceApi } from './api.ts'
 import { WorkspaceManagement } from './management.ts'
 import { WorkspaceMetricsSampler } from './metrics.ts'
 import { HostWorkspaceRegistry } from './registry.ts'
-import { WorkspaceReconciler } from './reconciler.ts'
+import { WorkspaceReconciler, type SessionHeaderSource } from './reconciler.ts'
 import { wireWorkspaceLifecycle } from './wire.ts'
 
 export const name = '@visecy/dsh-workspace-k8s'
@@ -34,6 +34,12 @@ export interface Config {
   metricIntervalMs?: number
   /** Registry bridge interval (ms). 0 disables the periodic pass. */
   reconcileIntervalMs?: number
+  /**
+   * Control-plane directory the workspace anchors live in, and the canonical
+   * spelling every session `cwd` must have to belong to a platform workspace.
+   * Defaults to `/workspaces`, the mount the deployment provides.
+   */
+  hostRoot?: string
   /** Injectable controller for tests; defaults to the real k8s client. */
   controller?: PodController
 }
@@ -172,15 +178,24 @@ export function apply(ctx: Context, config: Config | undefined): void {
   // consume. DSH 0.1.2 removed apiProxy.workspace.*; the bridge now writes
   // host-to-host through ctx.workspaceRegistry (dsh-workspace) and the
   // official workspace controller serves the browser from the same records.
+  const hostRoot = config.hostRoot ?? '/workspaces'
   const registry = new HostWorkspaceRegistry(
     { get: (name) => ctx.get(name) },
-    '/workspaces',
+    hostRoot,
   )
+  // The session store is the join key for the association repair: durable
+  // session headers carry the `cwd` each stored session was created in. Resolve
+  // it lazily, per pass, so the plugin still loads in a composition without
+  // session persistence and never caches a torn view.
+  const sessionHeaders: SessionHeaderSource = {
+    list: async () => await ctx.sessionPersistence.list(),
+  }
   const reconciler = new WorkspaceReconciler({
     controller: runtime.podController,
     registry,
+    sessions: sessionHeaders,
     namespace: config.namespace,
-    hostRoot: '/workspaces',
+    hostRoot,
   })
   ctx.provide('workspaceReconciler', { reconcile: () => reconciler.reconcile() })
   const deleteWorkspaceAsync = async (workspaceId: string): Promise<void> => {
@@ -208,7 +223,7 @@ export function apply(ctx: Context, config: Config | undefined): void {
     status: workspaceStatus,
     metrics: metricsSampler,
     namespace: config.namespace,
-    hostRoot: '/workspaces',
+    hostRoot,
     image: config.image,
     storageClassName: config.storageClassName,
     storageSize: config.storageSize,
@@ -237,9 +252,29 @@ export function apply(ctx: Context, config: Config | undefined): void {
     ctx.effect(() => registerWorkspaceApi(webServer, management), 'dsh-workspace-k8s: /workspaces/api routes')
   })
 
+  // The reconcile pass must not wait for the interval. It is the only creator
+  // of the `/workspaces/<id>` anchors the official registry validates every
+  // stored session header against, and that validation is one-shot: a session
+  // whose cwd does not resolve at registry init is left out of the grouping and
+  // can only be repaired by a rebind afterwards.
+  const runReconcile = (): void => {
+    // A reconcile failure (no k8s API yet, registry still opening its domain,
+    // session store unreachable) must never fail plugin load: the timer below
+    // retries, and every step of the pass is idempotent.
+    void reconciler.reconcile().catch((error: unknown) => {
+      ctx.logger?.warn?.(`workspace reconcile pass failed: ${String(error)}`)
+    })
+  }
+  runReconcile()
+  // Second chance, and the one that actually repairs on a normal boot: the pass
+  // above can run while the official registry is still invisible, because
+  // `ctx.get` only exposes it after its async `Service.init()` (storage open,
+  // header index, history bootstrap) has finished.
+  ctx.inject(['workspaceRegistry'], () => runReconcile())
+
   const intervalMs = config.reconcileIntervalMs ?? 60_000
   if (intervalMs > 0) {
-    const timer = setInterval(() => { void reconciler.reconcile() }, intervalMs)
+    const timer = setInterval(runReconcile, intervalMs)
     timer.unref?.()
   }
 }

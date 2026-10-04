@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { WorkspaceReconciler } from '../src/reconciler.ts'
+import { WorkspaceReconciler, type SessionHeaderSource } from '../src/reconciler.ts'
 import type { PodController, WorkspacePodSpec } from '../src/k8s-client.ts'
 import type { WorkspaceRegistry } from '../src/registry.ts'
 
@@ -37,13 +37,16 @@ class FakeRegistry implements WorkspaceRegistry {
   }
 }
 
+/** No stored sessions: these cases are about the k8s->registry bridge only. */
+const noSessions: SessionHeaderSource = { list: async () => [] }
+
 describe('WorkspaceReconciler', () => {
   it('registers running workspaces (pod + PVC) that are missing from the official registry', async () => {
     const ctrl = new FakeController()
     ctrl.pods.add('ws-a')
     ctrl.pvcs.add('ws-a-data')
     const reg = new FakeRegistry()
-    const r = new WorkspaceReconciler({ controller: ctrl, registry: reg, namespace: 'dsh', hostRoot: '/workspaces' })
+    const r = new WorkspaceReconciler({ controller: ctrl, registry: reg, sessions: noSessions, namespace: 'dsh', hostRoot: '/workspaces' })
     await r.reconcile()
     expect(reg.created).toEqual(['ws-a'])
   })
@@ -52,7 +55,7 @@ describe('WorkspaceReconciler', () => {
     const ctrl = new FakeController()
     ctrl.pods.add('ws-orphan')
     const reg = new FakeRegistry()
-    const r = new WorkspaceReconciler({ controller: ctrl, registry: reg, namespace: 'dsh', hostRoot: '/workspaces' })
+    const r = new WorkspaceReconciler({ controller: ctrl, registry: reg, sessions: noSessions, namespace: 'dsh', hostRoot: '/workspaces' })
     await r.reconcile()
     expect(reg.created).toEqual([])
   })
@@ -61,7 +64,7 @@ describe('WorkspaceReconciler', () => {
     const ctrl = new FakeController()
     ctrl.pvcs.add('ws-b-data')
     const reg = new FakeRegistry()
-    const r = new WorkspaceReconciler({ controller: ctrl, registry: reg, namespace: 'dsh', hostRoot: '/workspaces' })
+    const r = new WorkspaceReconciler({ controller: ctrl, registry: reg, sessions: noSessions, namespace: 'dsh', hostRoot: '/workspaces' })
     await r.reconcile()
     expect(reg.created).toEqual(['ws-b'])
   })
@@ -70,7 +73,7 @@ describe('WorkspaceReconciler', () => {
     const ctrl = new FakeController()
     ctrl.pods.add('ws-c')
     const reg = new FakeRegistry([{ workspaceId: 'ws-c', path: '/workspaces/ws-c' }])
-    const r = new WorkspaceReconciler({ controller: ctrl, registry: reg, namespace: 'dsh', hostRoot: '/workspaces' })
+    const r = new WorkspaceReconciler({ controller: ctrl, registry: reg, sessions: noSessions, namespace: 'dsh', hostRoot: '/workspaces' })
     await r.reconcile()
     expect(reg.created).toEqual([])
   })
@@ -84,6 +87,7 @@ describe('WorkspaceReconciler', () => {
     const r = new WorkspaceReconciler({
       controller: ctrl,
       registry: reg,
+      sessions: noSessions,
       namespace: 'dsh',
       hostRoot: '/workspaces',
       onDelete: (id) => deleted.push(id),
@@ -103,6 +107,7 @@ describe('WorkspaceReconciler', () => {
     const r = new WorkspaceReconciler({
       controller: ctrl,
       registry: reg,
+      sessions: noSessions,
       namespace: 'dsh',
       hostRoot: '/workspaces',
       onDelete: (id) => deleted.push(id),
