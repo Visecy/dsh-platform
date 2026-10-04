@@ -49,7 +49,6 @@ handoff、从 sidecar 的 `X-Forwarded-User`/`X-Forwarded-Groups` 提供 `ctx.ds
 | identity-bridge | 官方扩展点上的身份 seam（transport hook + token handoff + ctx.dshAuth） | Plan 5 |
 | workspace-picker | ctx.directoryPicker 的 k8s PVC 实现 | Plan 3 |
 | auth-oidc | **deprecated**：OIDC client + session codec 库（不再注册插件，认证已移到 sidecar） | — |
-| user-domain | per-user settings/credentials（**尚未接线**） | Plan 3 |
 | rbac / cluster-access | 会话注册表 + 授权；集群准入（**空实现**） | Plan 4-5 |
 
 ## 与官方产物耦合的地方（升级 DSH 时必须复核）
