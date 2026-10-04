@@ -133,7 +133,12 @@ describe('identity-bridge launch-token handoff', () => {
     const token = new URL(redirect.headers.location ?? '')
     const exchange = await bench.request('GET', token.pathname + token.search, { host: AUTHORITY })
     expect(exchange.status).toBe(303)
-    expect(exchange.headers.location).toBe('/')
+    // 0.2.0-rc.2 answers `location: "./"` where 0.1.5 answered `"/"`; both
+    // resolve to the clean root. Assert the resolved target and that the launch
+    // token is not replayed, which is what "303s to clean /" means.
+    const clean = new URL(String(exchange.headers.location ?? ''), `http://${AUTHORITY}/`)
+    expect(clean.pathname).toBe('/')
+    expect(clean.searchParams.has('token')).toBe(false)
     expect(exchange.headers['set-cookie']?.[0]).toMatch(/^dsh-auth-/)
   })
 

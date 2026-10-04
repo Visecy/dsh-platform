@@ -233,9 +233,9 @@ async function resolveRequirement(requirement, stores) {
     }
   }
   candidates.sort((a, b) =>
-    compareVersions(b.version, a.version)
+    compareVersions(parseVersion(b.version), parseVersion(a.version))
     || (a.entry < b.entry ? -1 : a.entry > b.entry ? 1 : 0))
-  return { match: candidates[0], available: [...new Set(seen)].sort(compareVersions) }
+  return { match: candidates[0], available: [...new Set(seen)].sort((a, b) => compareVersions(parseVersion(a), parseVersion(b))) }
 }
 
 function fixLine(requirement, available) {
