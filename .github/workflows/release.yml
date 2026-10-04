@@ -51,6 +51,10 @@ jobs:
           node scripts/build-pkg.mjs workspace-k8s src/index.ts
           node scripts/build-pkg.mjs workspace-picker src/index.ts
           node scripts/build-pkg.mjs identity-bridge src/index.ts
+          # build-pkg.mjs bundles the HOST half only; workspace-k8s also ships a
+          # browser module (the status panel) that the profile loads through its
+          # package.json `dsh.client` declaration. The image copies this checkout,
+          # so lib/client.js must be regenerated here or it ships stale.
           node scripts/build-workspace-ui.mjs
 
       - name: Test published packages
