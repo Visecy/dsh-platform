@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    // vitest pulls vite's own node typings, whose FSWatcher is structurally
+    // incompatible with @types/node's (vite declares it without ref/unref).
+    // The conflict is inside those two library d.ts files, not in this
+    // package's code, so skip lib checking rather than pin an older
+    // @types/node or drop test type coverage.
+    "skipLibCheck": true,
+    "types": [
+      "node"
+    ],
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "src",
+    "tests"
+  ]
+}

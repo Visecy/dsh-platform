@@ -1,0 +1,40 @@
+{
+  "name": "@visecy/dsh-identity-bridge",
+  "version": "0.1.13",
+  "type": "module",
+  "private": false,
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-host-frontend-static": "0.1.5-rc.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-client-connection": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-host-webserver": "0.1.5-rc.1",
+    "@types/node": "^22.20.1",
+    "typescript": "^5.5.2",
+    "vitest": "^2.1.0"
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-pkg.mjs identity-bridge src/index.ts",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    "types": "./dist/index.d.ts",
+    "default": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Visecy/dsh-platform.git",
+    "directory": "packages/identity-bridge"
+  }
+}
