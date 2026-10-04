@@ -6,13 +6,15 @@
 # the headless web runtime — no Chromium/desktop.
 #
 # Layers:
-#   1. browser trust pins relaxed by scripts/patch-dsh.mjs — the official
-#      client-connection fences every /api request behind a Host/Origin check
-#      plus a per-process launch-token cookie; our OIDC gate authenticates
-#      every request first, so the cookie layer is bypassed while the
-#      Host/Origin fence stays active as defense in depth
+#   1. ZERO compiled-artifact patches: every @deepseek-ai package ships exactly
+#      as npm published it (no compiled-artifact patch script, no webserver
+#      fork). The
+#      remote-browser transport hook and the launch-token cookie handoff come
+#      from @visecy/dsh-identity-bridge, built only on official extension
+#      points (webserver/index-inject + authenticatedUrl/authorizeIndex)
 #   2. @visecy platform plugins pre-installed into the web + headless profiles
-#   3. dsh-web-auth (registerGate webserver fork) pre-installed
+#   3. the oauth2-proxy sidecar (deploy chart) is the deployment's entry point;
+#      this image only ever serves that proxy
 #
 # The baked-in Harness home lives at /opt/dsh-home; the deployment copies it
 # into the runtime DSH_HOME (writable volume) on start.
@@ -63,15 +65,10 @@ RUN ln -s ../lib/node_modules/@deepseek-ai/dsh/lib/bin.js /usr/local/bin/dsh \
 
 USER root
 
-# Official loopback pins relaxed via the DECLARATIVE patch script (exact
-# string replacement + assertions + node --check; fails the build on any
-# mismatch — no fragile sed). See scripts/patch-dsh.mjs.
-COPY scripts/patch-dsh.mjs /usr/local/lib/node_modules/patch-dsh.mjs
+# Official artifacts are used exactly as published; only the platform's own
+# profile tooling is copied in.
 COPY scripts/enable-workspace-ui.mjs /usr/local/lib/node_modules/enable-workspace-ui.mjs
 COPY scripts/check-plugin-imports.mjs /usr/local/lib/node_modules/check-plugin-imports.mjs
-COPY scripts/check-webserver-fork.mjs /usr/local/lib/node_modules/check-webserver-fork.mjs
-RUN node /usr/local/lib/node_modules/patch-dsh.mjs \
-      /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai
 
 ENV HOME=/home/node DSH_HOME=/opt/dsh-home \
     COREPACK_HOME=/tmp/corepack PNPM_HOME=/tmp/pnpm XDG_DATA_HOME=/tmp/xdg
@@ -83,13 +80,6 @@ RUN mkdir -p /opt/dsh-home /home/node && chown -R node:node /opt/dsh-home /home/
 COPY packages/session-persistence-rdb /opt/dsh-home/plugins/session-persistence-rdb
 COPY packages/storage-db /opt/dsh-home/plugins/storage-db
 COPY packages/platform-domain /opt/dsh-home/plugins/platform-domain
-COPY vendor/dsh-web-auth /opt/dsh-home/plugins/dsh-web-auth
-
-# The webserver fork is a COPY of the official plugin plus the request-gate
-# extension (upstream has no middleware hook). Fail the build when a DSH bump
-# changes the official file under it, instead of silently shipping stale code.
-RUN node /usr/local/lib/node_modules/check-webserver-fork.mjs \
-      /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai
 
 USER node
 # The profile installs with `autoInstallPeers: false` (dsh's own profile
@@ -105,7 +95,6 @@ USER node
 RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
   && dsh --profile headless --dump-config > /dev/null 2>&1 || true \
   && pnpm --dir /opt/dsh-home/profiles/web --store-dir /tmp/pnpm-store add -w \
-       @visecy/dsh-auth-oidc@${PLUGIN_VERSION:-latest} \
        @visecy/dsh-fs-k8s@${PLUGIN_VERSION:-latest} \
        @visecy/dsh-subprocess-k8s@${PLUGIN_VERSION:-latest} \
        @visecy/dsh-workspace-k8s@${PLUGIN_VERSION:-latest} \
@@ -114,7 +103,6 @@ RUN dsh --profile web --dump-config > /dev/null 2>&1 || true \
        file:/opt/dsh-home/plugins/session-persistence-rdb \
        file:/opt/dsh-home/plugins/storage-db \
        file:/opt/dsh-home/plugins/platform-domain \
-       file:/opt/dsh-home/plugins/dsh-web-auth \
        @deepseek-ai/dsh-storage@${DSH_VERSION} \
        @deepseek-ai/dsh-storage-domain@${DSH_VERSION} \
        @deepseek-ai/dsh-session-persistence@${DSH_VERSION} \

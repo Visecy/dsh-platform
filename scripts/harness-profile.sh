@@ -41,10 +41,10 @@ pnpm --dir "$PROFILE" --store-dir "$STORE" add -w \
   "file:$REPO/packages/subprocess-k8s" \
   "file:$REPO/packages/workspace-k8s" \
   "file:$REPO/packages/workspace-picker" \
+  "file:$REPO/packages/identity-bridge" \
   "file:$REPO/packages/session-persistence-rdb" \
   "file:$REPO/packages/storage-db" \
   "file:$REPO/packages/platform-domain" \
-  "file:$REPO/vendor/dsh-web-auth" \
   > "$HARNESS/web-add.log" 2>&1
 
 pnpm --dir "$HEADLESS" --store-dir "$STORE" add -w \
@@ -68,18 +68,16 @@ cp "$REPO/docker/profiles/headless.cordis.patch.yml" "$HEADLESS/cordis.patch.yml
 node "$REPO/scripts/check-plugin-imports.mjs" "$PROFILE"
 node "$REPO/scripts/check-plugin-imports.mjs" "$HEADLESS"
 
-# 4b. the vendored webserver fork must still be the official file plus the
-#     request-gate extension; a DSH bump that edits the webserver fails here.
-DSH_BIN="$(readlink -f "$(command -v dsh)")"      # …/dsh/lib/bin.js
-DSH_PKG="$(dirname "$(dirname "$DSH_BIN")")"      # …/@deepseek-ai/dsh
-node "$REPO/scripts/check-webserver-fork.mjs" "$DSH_PKG/node_modules/@deepseek-ai"
-
-# 5. dev-only: the deployment does NOT install dsh-client-connection into the
-#    profile (the CLI ships it as a bundle layer and patch-dsh.mjs patches that
-#    copy), but scripts/smoke-web-trust.mjs needs a local copy to patch and
-#    import. Harmless here because the harness is never booted as a deployment.
+# 5. dev-only: the deployment does NOT install the official host packages into
+#    the profile (the CLI ships them as bundle layers and resolves the profile's
+#    `webserver` / `connection` rows from there), but scripts/smoke-zero-patch.mjs
+#    and scripts/smoke-official-integration.mjs boot that composition directly
+#    and need a local, UNPATCHED copy to import. Harmless here because the
+#    harness is never booted as a deployment.
 pnpm --dir "$PROFILE" --store-dir "$STORE" add -w \
   "@deepseek-ai/dsh-client-connection@${DSH_VERSION}" \
+  "@deepseek-ai/dsh-host-webserver@${DSH_VERSION}" \
+  "@deepseek-ai/dsh-host-frontend-static@${DSH_VERSION}" \
   > "$HARNESS/smoke-add.log" 2>&1
 
 echo "harness ready: $HARNESS"
