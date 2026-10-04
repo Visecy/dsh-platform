@@ -32,6 +32,7 @@
  * @module @visecy/dsh-identity-bridge
  */
 import { readFile } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
@@ -237,32 +238,58 @@ function requestOrigin(req: IncomingMessage): string {
  * @param config - resolved plugin config.
  * @returns the absolute path of index.html.
  * @throws when no distIndex is configured and no official Web frontend is
- * resolvable from this package.
+ * resolvable from this composition.
  */
 function resolveDistIndex(config: Config): string {
   const configured = config.distIndex
   if (configured !== undefined && configured !== '') return configured
-  const fallback = defaultDistIndex()
+  const fallback = resolveFrontendDistIndex()
   if (fallback === undefined) {
-    throw new Error('identity-bridge: distIndex is required; @deepseek-ai/dsh-web-frontend is not resolvable from this package')
+    throw new Error('identity-bridge: distIndex is required; @deepseek-ai/dsh-web-frontend is not resolvable from this composition')
   }
   return fallback
 }
 
+/** The official Web frontend package the served index comes from. */
+const FRONTEND_MANIFEST = '@deepseek-ai/dsh-web-frontend/package.json'
+
+/**
+ * Resolution anchors for the shipped Web frontend, in order: this package, then
+ * the DSH CLI running this process. The official image installs the frontend
+ * inside the CLI's own `node_modules`, which nothing under a profile can reach
+ * by plain Node resolution — the CLI anchor is what makes the default work
+ * there. A deployment that keeps the frontend somewhere else passes `distIndex`.
+ * @returns absolute file anchors, best effort.
+ */
+export function frontendAnchors(): string[] {
+  const anchors = [import.meta.url]
+  const cli = process.argv[1]
+  if (cli !== undefined && cli !== '') {
+    try {
+      anchors.push(realpathSync(cli))
+    } catch {
+      // argv[1] need not exist (embedded or ephemeral launchers): no CLI anchor.
+    }
+  }
+  return anchors
+}
+
 /**
  * The shipped Web frontend's dist index, resolved the way the official Web
- * bundle resolves it: anchored on the frontend package manifest, never
- * configured. The deployment passes `distIndex` when the frontend lives
- * somewhere this package cannot resolve.
- * @returns the absolute path of index.html, or `undefined` when unresolvable.
+ * bundle resolves it (`@deepseek-ai/dsh-web-frontend`'s dist, never
+ * configured), from the first anchor that has the package.
+ * @param anchors - module anchors to resolve from; defaults to {@link frontendAnchors}.
+ * @returns the absolute path of index.html, or `undefined` when no anchor has it.
  */
-function defaultDistIndex(): string | undefined {
-  try {
-    const manifest = createRequire(import.meta.url).resolve('@deepseek-ai/dsh-web-frontend/package.json')
-    return join(dirname(manifest), 'dist', 'index.html')
-  } catch {
-    return undefined
+export function resolveFrontendDistIndex(anchors: readonly string[] = frontendAnchors()): string | undefined {
+  for (const anchor of anchors) {
+    try {
+      return join(dirname(createRequire(anchor).resolve(FRONTEND_MANIFEST)), 'dist', 'index.html')
+    } catch {
+      // An anchor without the frontend: try the next one.
+    }
   }
+  return undefined
 }
 
 /** One header value, joining the array form node:http uses for repeated headers. */
