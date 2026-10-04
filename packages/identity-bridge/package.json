@@ -4,12 +4,12 @@
   "type": "module",
   "private": false,
   "dependencies": {
-    "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-host-frontend-static": "0.1.5-rc.1"
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh-host-frontend-static": "0.2.0-rc.2"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-client-connection": "0.1.5-rc.1",
-    "@deepseek-ai/dsh-host-webserver": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-connection": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "0.2.0-rc.2",
     "@types/node": "^22.20.1",
     "typescript": "^5.5.2",
     "vitest": "^2.1.0"

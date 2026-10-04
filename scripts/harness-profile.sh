@@ -7,7 +7,7 @@
 set -euo pipefail
 
 HARNESS="${1:?usage: harness-profile.sh <harness-dir> [dsh-version]}"
-DSH_VERSION="${2:-0.1.5-rc.1}"
+DSH_VERSION="${2:-0.2.0-rc.2}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 STORE="${DSH_STORE_DIR:-/home/ovizro/Code/.pnpm-store}"
 

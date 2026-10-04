@@ -4,8 +4,8 @@
   "type": "module",
   "private": false,
   "dependencies": {
-    "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-fs": "0.1.5-rc.1"
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh-fs": "0.2.0-rc.2"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",

@@ -4,13 +4,13 @@
   "type": "module",
   "private": false,
   "dependencies": {
-    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/cordis": "^4.0.4",
     "@kubernetes/client-node": "^2.0.0"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-brand": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-storage": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-storage-domain": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-brand": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-storage": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-storage-domain": "0.2.0-rc.2",
     "@types/node": "^26.2.0",
     "@visecy/dsh-sandbox-daemon": "workspace:*",
     "typescript": "^7.0.2",
