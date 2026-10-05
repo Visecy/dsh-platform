@@ -7,6 +7,7 @@
  * ensure + getEndpoint), so concurrent sessions on different workspaces reach
  * their own pod. Without a resolver, the static daemonEndpoint is used.
  */
+import { posix } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import {
   FileSystem,
@@ -219,24 +220,78 @@ export class FsK8s extends FileSystem {
    */
   private outsideEveryWorkspace(displayPath: string, workspaceId: string): FsError {
     const root = this.translate.hostRoot
-    if (!this.reportedOutside.has(displayPath)) {
-      this.reportedOutside.add(displayPath)
-      try {
-        this.ctx.logger?.warn?.(
-          `fs-k8s: ${displayPath} is outside every workspace of this platform `
-          + `('${workspaceId}' is not registered under ${root}); no pod or volume was created for it`,
-        )
-      } catch {
-        // A broken log sink must not replace the caller's precise answer with a
-        // logging failure.
-      }
-    }
+    this.reportOutside(
+      displayPath,
+      `${displayPath} is outside every workspace of this platform `
+      + `('${workspaceId}' is not registered under ${root})`,
+    )
     return new FsError(
       `${displayPath} is not inside a workspace of this platform: no workspace named '${workspaceId}' is registered under ${root}, `
       + `so no pod or volume was created for it and the control plane keeps no copy of that path; `
       + `use a path under ${root}/<workspace-id>`,
       'FS_NOT_FOUND',
     )
+  }
+
+  /**
+   * The degradation for a host path that is not even under the host root.
+   *
+   * `translate.toPod` refuses such a path with `path escapes workspace root:
+   * <path>` — an assertion about the HOST path space, written for the control
+   * plane's benefit and not a caller-facing answer. `resolve` used to forward
+   * that text as `FS_PERMISSION_DENIED`, and one official caller treats that as
+   * fatal on EVERY message: `@deepseek-ai/dsh-agent-instructions` finds the
+   * project root by walking UP from the session cwd to `/`, probing
+   * `<dir>/.git` at each step, and only `FS_NOT_FOUND` means "no marker here"
+   * (`lib/index.js:410` `isMissingProviderPathError`, `:451` `existsAsMarker`
+   * whose non-missing arm at `:458` rethrows, `:480` `findProjectRoot`). The
+   * walk always ends at `/` (`dirname('/') === '/'`), so the last probe of any
+   * session with no `.git` in its ancestry is `/.git` — and the turn died there
+   * with
+   *
+   *   path escapes workspace root: /.git
+   *
+   * even though the session's cwd was a healthy `/workspaces/agents`
+   * (`t_sessions.f_cwd` on the live cluster) and the fence had already answered
+   * `/workspaces/.git` with `FS_NOT_FOUND` (7b536ea).
+   *
+   * So this answers the way 7b536ea taught, and the same way that fence answers
+   * `/workspaces/.git`: the path is not inside a workspace of this platform, so
+   * nothing exists at it from the platform's point of view. `/` is not a
+   * workspace, no pod or volume exists above the workspace anchors, the control
+   * plane mounts no file world there (its `/workspaces` is an emptyDir of
+   * realpath anchors, and no daemon listens on the static fallback), so there is
+   * no copy of such a path to serve — "absent" is both the true answer and the
+   * one the caller can act on. Refusing here rather than serving something keeps
+   * the containment fence exactly where it was: no target is handed out, no
+   * daemon call is made, no bytes move.
+   */
+  private outsideTheWorkspaceRoot(displayPath: string): FsError {
+    const path = posix.normalize(displayPath)
+    const root = this.translate.hostRoot
+    this.reportOutside(path, `${path} is outside the workspace root ${root} of this platform and names no workspace`)
+    return new FsError(
+      `${path} is outside the workspace root ${root} of this platform, so it names no workspace: `
+      + `no pod or volume exists for it and the control plane keeps no copy of that path; `
+      + `use a path under ${root}/<workspace-id>`,
+      'FS_NOT_FOUND',
+    )
+  }
+
+  /**
+   * One `logger.warn` per path per process for a path this platform cannot
+   * serve: a file view probing several such paths is one condition, not one
+   * line per operation (the same rule `degradedWatches` applies).
+   */
+  private reportOutside(path: string, headline: string): void {
+    if (this.reportedOutside.has(path)) return
+    this.reportedOutside.add(path)
+    try {
+      this.ctx.logger?.warn?.(`fs-k8s: ${headline}; no pod or volume was created for it`)
+    } catch {
+      // A broken log sink must not replace the caller's precise answer with a
+      // logging failure.
+    }
   }
 
   private asFsError(e: unknown): FsError {
@@ -269,8 +324,11 @@ export class FsK8s extends FileSystem {
     let podPath: string
     try {
       podPath = this.translate.toPod(abs)
-    } catch (e) {
-      throw new FsError((e as Error).message, 'FS_PERMISSION_DENIED')
+    } catch {
+      // The fence's own text (`path escapes workspace root: …`) is an internal
+      // assertion, not an answer a caller can act on — see
+      // `outsideTheWorkspaceRoot`.
+      throw this.outsideTheWorkspaceRoot(abs)
     }
     return {
       targetKey: FsTargetKey(`dsh-k8s:${podPath}`),

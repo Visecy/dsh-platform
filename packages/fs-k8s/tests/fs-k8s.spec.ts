@@ -73,8 +73,16 @@ describe('FsK8s', () => {
     expect(fs.contains(target, await fs.resolve(`${hostRoot}/${WORKSPACE}`))).toBe(false)
   })
 
-  it('resolve rejects escape outside workspace root', async () => {
-    await expect(fs.resolve('/etc/passwd')).rejects.toMatchObject({ code: 'FS_PERMISSION_DENIED' })
+  it('resolve rejects escape outside workspace root as an ABSENT path, not a permission failure', async () => {
+    // This assertion used to pin `FS_PERMISSION_DENIED`. That code was the
+    // production defect: `@deepseek-ai/dsh-agent-instructions` walks up from the
+    // session cwd probing `<dir>/.git` and rethrows anything that is not
+    // `FS_NOT_FOUND` (`lib/index.js:410`, `:451-459`, `:480-488`), so the always
+    // -reached `/.git` probe failed every message in a healthy workspace session
+    // with `path escapes workspace root: /.git`. The path is still refused — no
+    // target, no daemon call — but as "this platform has no such path", which is
+    // what `tests/outside-the-root.spec.ts` pins in full (including the walk).
+    await expect(fs.resolve('/etc/passwd')).rejects.toMatchObject({ code: 'FS_NOT_FOUND' })
   })
 
   it('readText of missing file maps to FS_NOT_FOUND', async () => {

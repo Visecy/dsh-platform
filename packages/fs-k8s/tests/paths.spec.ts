@@ -27,6 +27,7 @@ import { startDaemon } from '@visecy/dsh-sandbox-daemon'
 import { Context } from '@deepseek-ai/cordis'
 import { FsError } from '@deepseek-ai/dsh-fs'
 import { FsK8s } from '../src/index.ts'
+import { findProjectRoot } from './official-walk.ts'
 
 /** The host root AND the pod root the deployment configures. */
 const ROOT = '/workspaces'
@@ -171,5 +172,73 @@ describe('deployment routing with the platform resolver mounted', () => {
     // would have been the ensure that materializes it.
     expect(resolved).not.toContain('.git')
     expect(resolved).toEqual([WORKSPACE, WORKSPACE])
+  })
+})
+
+/**
+ * The MESSAGE-TIME walk, end to end against a REAL daemon: what
+ * `@deepseek-ai/dsh-agent-instructions` does on every turn of every session, on
+ * the deployment's own path layout.
+ *
+ * The workspace here has NO `.git` — which is the operator's case: their
+ * sessions run in `/workspaces/agents` (`t_sessions.f_cwd`), the pod has no
+ * `/workspaces/agents/.git`, and `/workspaces/.git` names no workspace. So the
+ * walk climbs out of the workspace root and probes `/.git`, the last ancestor
+ * before `dirname('/') === '/'` ends it.
+ *
+ * Before the fix that probe was answered `FS_PERMISSION_DENIED` — the one code
+ * the official probe does NOT tolerate (`lib/index.js:410`, `:451-459`) — so
+ * every message in a healthy workspace session died with
+ * `path escapes workspace root: /.git`. This spec drives the whole chain
+ * against the real daemon: workspace probe → membership fence → out-of-root.
+ */
+describe('the message-time project-root walk on a session in a real workspace', () => {
+  let quietDir: string
+  let quietServer: import('node:http').Server
+  let quiet: FsK8s
+  const asked: string[] = []
+  const woken: string[] = []
+
+  beforeAll(async () => {
+    // The PVC mount of a workspace that is NOT a git repository.
+    quietDir = await mkdtemp(join(process.cwd(), '.tmp-fswalk-'))
+    const started = await startDaemon({ root: quietDir, port: 0, commandTimeoutMs: 30_000 })
+    quietServer = started.server
+    const ctx = new Context()
+    ctx.provide('workspaceEndpointResolver', {
+      resolve: (workspaceId: string): string => {
+        woken.push(workspaceId)
+        return started.baseUrl
+      },
+      isWorkspace: async (workspaceId: string): Promise<boolean> => {
+        asked.push(workspaceId)
+        return workspaceId === WORKSPACE
+      },
+    })
+    quiet = new FsK8s(ctx, { daemonEndpoint: started.baseUrl, hostRoot: ROOT, podRoot: ROOT })
+  })
+
+  afterAll(async () => {
+    await new Promise<void>((res) => quietServer.close(() => res()))
+    await rm(quietDir, { recursive: true, force: true })
+  })
+
+  it('walks out of the workspace to /, and every refusal it sees is FS_NOT_FOUND', async () => {
+    const probes: string[] = []
+    const refusals: string[] = []
+
+    const projectRoot = await findProjectRoot(quiet, WS_ROOT, ['.git'], probes).catch((error: unknown) => {
+      refusals.push((error as FsError).code)
+      throw error
+    })
+
+    // Two levels of ancestors, then the root of the host filesystem.
+    expect(probes).toEqual([`${WS_ROOT}/.git`, `${ROOT}/.git`, '/.git'])
+    expect(refusals).toEqual([])
+    expect(projectRoot).toBe(WS_ROOT)
+    // The workspace's own probe really was a pod call (the real daemon answered
+    // "absent"), and no workspace was ever woken for the two ancestors above it.
+    expect(asked).toEqual([WORKSPACE, '.git'])
+    expect(woken).toEqual([WORKSPACE])
   })
 })
