@@ -29,6 +29,23 @@
   disabled: true
 - id: fs-sandbox
   disabled: true
+# Verified present in THIS composition too before adding the row
+# (`--dump-default-config --profile headless` lists the official entry as
+# `- id: credentials / name: '@deepseek-ai/dsh-credentials-local'`), so this is
+# not the `patch: entry "…" not found` failure mode this file warns about above.
+#
+# The provider that replaces it is `@visecy/dsh-platform-domain`, mounted below:
+# it publishes `ctx.credentials` over the PostgreSQL-backed
+# `platform_credentials` domain. Both profiles must agree, because whichever
+# profile runs the harness reads the same credential — a headless run still
+# resolving the model key from the ephemeral `$DSH_HOME/.credentials.yaml` would
+# find it empty after the web profile had stored it in the database. Rationale,
+# the seam it implements, and its scope (credentials yes; a settings provider
+# does not exist as a seam in 0.2) are documented once in
+# docker/profiles/web.cordis.patch.yml and in
+# packages/platform-domain/src/credentials.ts.
+- id: credentials
+  disabled: true
 - insert:
     # FIRST platform row on purpose: rows mount in list order, so every row
     # mounted after this one has its warn/error output reach the pod log.

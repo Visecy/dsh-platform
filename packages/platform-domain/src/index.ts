@@ -4,11 +4,20 @@
  * Declares the platform's storage-domain layouts and opens them through
  * `ctx.storageDomain`. Consumers read `ctx.platformDomains` to reach typed
  * tables for workspaces, users, settings, and credential records.
+ *
+ * It also PUBLISHES the durable credentials provider over the credential-records
+ * table (`ctx.credentials`, the 0.2 credential seam): the store and the table
+ * that holds it belong together, and the provider needs exactly the domains this
+ * row has already opened. `credentials.ts` documents the seam it implements and
+ * the official behaviours it reproduces. The profiles disable the official
+ * file-backed `credentials` row, because the service must have one provider —
+ * two would fail activation rather than share a store.
  */
 import { Context } from '@deepseek-ai/cordis'
 import { DomainFacility, defineDomain, domainTable, type Domain } from '@deepseek-ai/dsh-storage-domain'
 import { storageBackendServiceKey } from '@deepseek-ai/dsh-storage'
 import { z } from 'zod'
+import { CredentialStore } from './credentials.ts'
 
 export const inject = ['storage'] as const
 
@@ -114,7 +123,12 @@ export async function apply(ctx: Context, config: { backend?: string } = {}): Pr
     const domains: PlatformDomains = { workspaces, users, settings, credentials }
 
     ctx.provide('platformDomains', domains)
+    // The durable credentials provider (see credentials.ts). Constructed here,
+    // from the domains this apply opened, so the credential-records table and
+    // the service that owns it cannot drift apart.
+    const credentialStore = new CredentialStore(ctx, domains)
     ctx.effect(async () => {
+      await credentialStore.dispose()
       await Promise.all([workspaces.close(), users.close(), settings.close(), credentials.close()])
     }, '@visecy/dsh-platform-domain')
   })

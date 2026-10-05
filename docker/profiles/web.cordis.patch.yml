@@ -36,6 +36,33 @@
   disabled: true
 - id: directory-picker
   disabled: true
+# The model API key (and every other stored credential) is CONTROL-PLANE STATE,
+# not user content, and it must outlive the pod. The official row keeps its store
+# in `$DSH_HOME/.credentials.yaml`, which the chart mounts as an emptyDir and the
+# deployment restores from the image on every boot — so every pod replacement
+# wiped it and the operator re-typed the key after every upgrade. Its
+# replacement is `@visecy/dsh-platform-domain` (the `platform-domain` row in the
+# insert list below), which already opens the `platform_credentials` domain over
+# PostgreSQL and now registers the SAME service name (`credentials`): see
+# packages/platform-domain/src/credentials.ts for the seam it implements, the
+# official behaviours it reproduces, and where the model key actually lives
+# (`llm-deepseek-api-key` resolves `DEEPSEEK_API_KEY` through `ctx.credentials`,
+# and the Models page writes it through `dsh-api-settings-controller`).
+#
+# Exactly one provider may register a service name, so this disable is
+# load-bearing, not cosmetic: leaving the official row enabled fails the
+# composition loudly (two providers) instead of silently splitting the store
+# between a file and the database.
+#
+# What is deliberately NOT moved: 0.2 has no settings-PROVIDER seam at all.
+# `ctx.settings` is `SettingsForms`, the live-composition editor that persists
+# through `ctx.configEditor` into the profile patch document the Loader reads
+# from disk at boot; the old `settings.yaml` is a legacy file it imports once.
+# A durable replacement would have to reimplement that writer AND materialize
+# the document before the Loader reads it, which is not a supported seam. The
+# credential half is, and that is the half the operator was re-entering.
+- id: credentials
+  disabled: true
 # NEW IN 0.2, and disabled on purpose: this row records each top-level turn's
 # changed files by reading workspace BYTES with host `node:fs`
 # (`dsh-workspace-changes/lib/types/capture.js` opens the absolute host path;
