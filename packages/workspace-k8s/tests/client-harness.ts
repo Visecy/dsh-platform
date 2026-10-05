@@ -79,6 +79,33 @@ const reactStub = {
 
 let cached: { apply: (ctx: unknown) => void } | undefined
 
+/**
+ * One `<style>` the bundle appended to `document.head`.
+ *
+ * The stand-in document keeps these instead of dropping them, because the
+ * plugin's stylesheet is a runtime side effect, not a source file: a spec can
+ * only tell "the dialog is styled" from "the bundle happens to contain CSS
+ * text" by looking at what `apply()` actually appended. The element also
+ * answers `querySelector('style[data-dsh-workspace-ui]')`, so the plugin's
+ * once-per-document guard is exercised rather than bypassed.
+ */
+export interface InjectedStyle {
+  dataset: Record<string, string>
+  textContent: string
+}
+
+const injected: InjectedStyle[] = []
+
+/** Every stylesheet the bundle has appended in this spec file, in order. */
+export function injectedStyles(): readonly InjectedStyle[] {
+  return injected
+}
+
+/** Every className the plugin ships a rule for in the injected document. */
+function isWorkspaceStyle(element: InjectedStyle): boolean {
+  return element.dataset.dshWorkspaceUi !== undefined
+}
+
 /** Materialize the committed bundle once through a stand-in `__ModuleLoader__`. */
 export function loadClientBundle(): { apply: (ctx: unknown) => void } {
   if (cached !== undefined) return cached
@@ -93,9 +120,14 @@ export function loadClientBundle(): { apply: (ctx: unknown) => void } {
     },
   })
   vi.stubGlobal('document', {
-    querySelector: () => null,
+    // The guard's exact selector; anything else the plugin might ask for is
+    // absent, which is the state a real first mount sees.
+    querySelector: (selector: string) =>
+      selector === 'style[data-dsh-workspace-ui]' ? injected.find(isWorkspaceStyle) ?? null : null,
     createElement: () => ({ dataset: {}, textContent: '' }),
-    head: { appendChild: () => undefined },
+    head: {
+      appendChild: (element: InjectedStyle) => { injected.push(element) },
+    },
   })
   require(BUNDLE)
   if (exports === undefined || typeof exports.apply !== 'function') {

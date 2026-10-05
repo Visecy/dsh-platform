@@ -363,6 +363,19 @@ var WORKSPACE_UI_CSS = `
 .dsh-ws-modal input:focus { border-color: var(--dsw-alias-brand-primary, #111); }
 .dsh-ws-modal-error { color: var(--dsw-alias-state-error-primary, #ef4444); font-size: 12px; margin: 8px 0 0; }
 .dsh-ws-modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+/* The dialog's own buttons. The component renders the classes dsh-ws-btn and
+   dsh-ws-btn primary \u2014 the names it has carried since the first name-based
+   dialog \u2014 but their rules were lost when this stylesheet was rewritten for the
+   vendored browser (f9f3886), which restyled the DETAIL page's buttons as
+   dsh-wsd-btn and dropped the modal ones. The dialog was restored later
+   (9d70232) together with the mask and the card, so its two footer buttons
+   rendered as user-agent buttons beside a styled card: the exact shape of "the
+   dialog is unstyled". Same design tokens as the detail page's button so the
+   two surfaces cannot drift apart again. */
+.dsh-ws-btn { cursor: pointer; padding: 7px 16px; font-size: 14px; border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.1)); border-radius: 10px; background: var(--dsw-alias-button-elevated-fill, #fff); color: var(--dsw-alias-label-primary, #111); }
+.dsh-ws-btn:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.08)); }
+.dsh-ws-btn.primary { background: var(--dsw-alias-button-primary-fill, #111); border-color: transparent; color: var(--dsw-alias-label-primary-foreground, #fff); }
+.dsh-ws-btn:disabled { opacity: .5; cursor: default; }
 `;
 function injectPanelStyles() {
   if (typeof document === "undefined") return;
