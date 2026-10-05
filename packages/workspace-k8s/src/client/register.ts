@@ -101,3 +101,28 @@ export function registerNewWorkspaceDialog(
     slots.inject(name, () => slots.register({ name, priority: -100, inject: injected }, component))
   }
 }
+
+/** Id, order and tab label the session's workspace view has always carried. */
+export const WORKSPACE_VIEW_ID = 'workspace'
+export const WORKSPACE_VIEW_LABEL = '工作区'
+
+/**
+ * Register the session's "工作区" page in the conversation view ring.
+ *
+ * This is the session-scoped view of the workspace a session runs in (status,
+ * lifecycle, timeline, metrics, the k8s resource it executes on); the `main`
+ * status panel is workspace-scoped and knows no session, so it does not
+ * replace this. `conversation.view` is the official ui-conversation slot, not
+ * one of the seats the official ui-workspace browser owns.
+ * @param slots - client slot registry.
+ * @param component - the view component supplied by `index.tsx`.
+ * @returns nothing; slot registrations live as long as the caller's fiber.
+ */
+export function registerWorkspaceDetailView(slots: SlotRegistry, component: unknown): void {
+  slots.inject('conversation.view', () => slots.register({
+    name: 'conversation.view',
+    id: WORKSPACE_VIEW_ID,
+    order: 30,
+    label: () => WORKSPACE_VIEW_LABEL,
+  }, component))
+}

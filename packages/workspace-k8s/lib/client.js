@@ -146,6 +146,16 @@ function registerNewWorkspaceDialog(slots, component, injected) {
     slots.inject(name, () => slots.register({ name, priority: -100, inject: injected }, component));
   }
 }
+var WORKSPACE_VIEW_ID = "workspace";
+var WORKSPACE_VIEW_LABEL = "\u5DE5\u4F5C\u533A";
+function registerWorkspaceDetailView(slots, component) {
+  slots.inject("conversation.view", () => slots.register({
+    name: "conversation.view",
+    id: WORKSPACE_VIEW_ID,
+    order: 30,
+    label: () => WORKSPACE_VIEW_LABEL
+  }, component));
+}
 
 // packages/workspace-k8s/src/client/panel.tsx
 var import_react = require("react");
@@ -293,6 +303,49 @@ var WORKSPACE_UI_CSS = `
 .dsh-wsb-dot.orphan { background: var(--dsw-alias-state-error-primary, #ef4444); }
 .dsh-wsb-dot.deleted, .dsh-wsb-dot.unknown { background: var(--dsw-alias-label-tertiary, #888); }
 @keyframes dsh-wsb-blink { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.dsh-wsb-phase { color: var(--dsw-alias-label-secondary, #666); }
+.dsh-wsb-phase.provision, .dsh-wsb-phase.waking { color: var(--dsw-alias-state-warn-primary, #f59e0b); }
+.dsh-wsb-phase.orphan { color: var(--dsw-alias-state-error-primary, #ef4444); }
+
+/* \u2500\u2500 \u5DE5\u4F5C\u533A\u8BE6\u60C5\u9875\uFF08\u53CC\u5217\uFF0C\u53C2\u8003 dsh-context\uFF09\u2500\u2500 */
+.dsh-wsd { flex: 1 1 auto; box-sizing: border-box; width: 100%; min-width: 0; min-height: 0; overflow-y: auto; display: flex; }
+.dsh-wsd-inner { width: 100%; max-width: 1080px; margin: 0 auto; padding: 28px 40px 96px; display: flex; flex-direction: column; gap: 16px; align-items: stretch; }
+.dsh-wsd-head { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.dsh-wsd-name { font-size: 24px; font-weight: 600; color: var(--dsw-alias-label-primary, #111); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+.dsh-wsd-head .dsh-wsb-dot { width: 12px; height: 12px; }
+.dsh-wsd-head .dsh-wsb-phase { font-size: 16px; }
+.dsh-wsd-actions { display: flex; gap: 10px; }
+.dsh-wsd-cols { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+.dsh-wsd-col { flex: 1; min-width: 340px; display: flex; flex-direction: column; gap: 16px; }
+.dsh-wsd-card { background: var(--dsw-alias-bg-layer-2, #fff); border: 1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.06)); border-radius: 12px; padding: 18px 20px; }
+.dsh-wsd-card h4 { margin: 0 0 12px; font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-primary, #111); display: flex; align-items: baseline; gap: 8px; }
+.dsh-wsd-status { display: flex; flex-direction: column; gap: 12px; }
+.dsh-wsd-phase-line { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 600; color: var(--dsw-alias-label-primary, #111); }
+.dsh-wsd-phase-line .dsh-wsb-dot { width: 12px; height: 12px; }
+.dsh-wsd-countdown { font-size: 24px; font-weight: 600; color: var(--dsw-alias-state-warn-primary, #f59e0b); }
+.dsh-wsd-countdown.ok { color: var(--dsw-alias-state-success-primary, #22c55e); }
+.dsh-wsd-statgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px 16px; }
+.dsh-wsd-stat .k { font-size: 12px; color: var(--dsw-alias-label-tertiary, #888); }
+.dsh-wsd-stat .v { font-size: 16px; font-weight: 600; color: var(--dsw-alias-label-primary, #111); }
+.dsh-wsd-metrics { display: flex; flex-direction: column; gap: 12px; }
+.dsh-wsd-metric .mk { font-size: 12px; color: var(--dsw-alias-label-tertiary, #888); }
+.dsh-wsd-metric .mv { font-size: 14px; font-weight: 600; color: var(--dsw-alias-label-primary, #111); }
+.dsh-wsd-metric svg { display: block; width: 100%; height: 30px; color: var(--dsw-alias-state-business-primary, #4176e6); margin-top: 2px; }
+.dsh-wsd-metric.frozen svg { opacity: .45; }
+.dsh-wsd-metric-note { font-size: 12px; color: var(--dsw-alias-label-tertiary, #888); }
+.dsh-wsd-sm { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.dsh-wsd-sm .node { padding: 5px 12px; border-radius: 8px; font-size: 13px; border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.1)); color: var(--dsw-alias-label-secondary, #666); background: transparent; }
+.dsh-wsd-sm .node.current { border-color: var(--dsw-alias-brand-primary, #111); color: var(--dsw-alias-brand-primary, #111); background: color-mix(in srgb, var(--dsw-alias-brand-primary, #111) 10%, transparent); font-weight: 600; }
+.dsh-wsd-sm .node.waking { border-color: var(--dsw-alias-state-warn-primary, #f59e0b); color: var(--dsw-alias-state-warn-primary, #f59e0b); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #f59e0b) 10%, transparent); font-weight: 600; }
+.dsh-wsd-sm .arrow { color: var(--dsw-alias-label-tertiary, #888); font-size: 14px; }
+.dsh-wsd-tl { display: flex; flex-direction: column; gap: 0; max-height: 380px; overflow-y: auto; scrollbar-width: thin; }
+.dsh-wsd-tl .ev { display: flex; align-items: baseline; gap: 12px; padding: 6px 2px; font-size: 14px; color: var(--dsw-alias-label-primary, #111); border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.04)); }
+.dsh-wsd-tl .ev:last-child { border-bottom: none; }
+.dsh-wsd-tl .t { flex: none; font-size: 12px; color: var(--dsw-alias-label-tertiary, #888); min-width: 66px; }
+.dsh-wsd-k8s { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 20px; }
+.dsh-wsd-k8s .k { font-size: 12px; color: var(--dsw-alias-label-tertiary, #888); }
+.dsh-wsd-k8s .v { font-size: 14px; color: var(--dsw-alias-label-primary, #111); overflow-wrap: anywhere; }
+.dsh-wsd-empty { font-size: 14px; color: var(--dsw-alias-label-tertiary, #888); padding: 24px 0; text-align: center; }
 
 /* \u2500\u2500 \u6309\u94AE \u2500\u2500 */
 .dsh-wsd-btn { cursor: pointer; padding: 7px 16px; font-size: 14px; border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.1)); border-radius: 10px; background: var(--dsw-alias-button-elevated-fill, #fff); color: var(--dsw-alias-label-primary, #111); }
@@ -502,6 +555,184 @@ function NewWorkspaceDialog(props) {
   );
 }
 
+// packages/workspace-k8s/src/client/WorkspaceDetailView.tsx
+var import_react3 = require("react");
+var import_jsx_runtime = require("react/jsx-runtime");
+var fmtDur2 = (ms) => {
+  const s = Math.max(0, Math.floor(ms / 1e3));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor(s % 3600 / 60);
+  const ss = s % 60;
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}` : `${m}:${String(ss).padStart(2, "0")}`;
+};
+var fmtAgo2 = (ms) => {
+  const s = Math.floor(ms / 1e3);
+  if (s < 60) return "\u521A\u521A";
+  if (s < 3600) return `${Math.floor(s / 60)} \u5206\u949F\u524D`;
+  if (s < 86400) return `${Math.floor(s / 3600)} \u5C0F\u65F6\u524D`;
+  return `${Math.floor(s / 86400)} \u5929\u524D`;
+};
+var spark = (history, w, h) => {
+  if (history.length === 0) return "";
+  const max = Math.max(...history);
+  const min = Math.min(...history);
+  const range = max - min || 1;
+  return history.map((v, i) => {
+    const x = history.length === 1 ? 0 : i / (history.length - 1) * w;
+    const y = h - (v - min) / range * h;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+};
+function WorkspaceDetailView(props) {
+  const { sessionId, useWorkspaces } = props;
+  (0, import_react3.useEffect)(() => startPolling(WORKSPACE_POLL_MS), []);
+  const status = (0, import_react3.useSyncExternalStore)(subscribeStatus, getSnapshot);
+  const workspaces = useWorkspaces((s) => s.items) ?? [];
+  const [confirmDelete, setConfirmDelete] = (0, import_react3.useState)(false);
+  const [busy, setBusy] = (0, import_react3.useState)(false);
+  const ws = workspaces.find((w) => (w.sessionIds ?? []).includes(sessionId));
+  if (ws === void 0) {
+    return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-inner", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-empty", children: "\u8BE5\u4F1A\u8BDD\u672A\u5173\u8054\u5DE5\u4F5C\u533A" }) }) });
+  }
+  const row = status.rows.find((r) => r.nativeWorkspaceId === ws.workspaceId || r.workspaceId === ws.workspaceId);
+  const phase = row?.phase ?? "unknown";
+  const label = phaseText(phase);
+  let countdown = null;
+  let countdownOk = false;
+  if (row !== void 0) {
+    if (phase === "waking" || phase === "provision") countdown = "\u23F3 \u62C9\u8D77\u4E2D\u2026";
+    else if (phase === "running" && row.idleDeadlineAt !== void 0) countdown = `\u23F3 ${fmtDur2(row.idleDeadlineAt - status.at)} \u540E\u4F11\u7720`;
+    else if (phase === "running" && row.graceDeadlineAt !== void 0) countdown = `\u23F3 ${fmtDur2(row.graceDeadlineAt - status.at)} \u540E\u4F11\u7720\uFF08\u5BBD\u9650\uFF09`;
+    else if (phase === "running") {
+      countdown = "\u8FD0\u884C\u4E2D \xB7 \u4F1A\u8BDD\u6D3B\u8DC3";
+      countdownOk = true;
+    } else if (phase === "sleep") countdown = "\u4F11\u7720\u4E2D \xB7 PVC \u5DF2\u4FDD\u7559";
+    else if (phase === "orphan") countdown = "\u6B8B\u7559\u8D44\u6E90 \xB7 \u6709 Pod \u65E0 PVC";
+  }
+  const stats = [
+    ["\u4F1A\u8BDD", row?.activeSessions ?? 0],
+    ["turn", row?.openTurns ?? 0],
+    ["\u547D\u4EE4", row?.activeCommands ?? 0],
+    ["\u6267\u884C Pod", row === void 0 ? "\u2014" : row.hasPod ? "\u8FD0\u884C" : "\u505C\u6B62"],
+    ["PVC", row === void 0 ? "\u2014" : row.hasPvc ? "\u4FDD\u7559" : "\u65E0"],
+    ["\u8FD0\u884C\u65F6\u957F", row?.lastWakeAt !== void 0 ? fmtDur2(status.at - row.lastWakeAt) : "\u2014"],
+    ["\u4E0A\u6B21\u4F11\u7720", row?.lastSleepAt !== void 0 ? fmtAgo2(status.at - row.lastSleepAt) : "\u2014"],
+    ["\u5524\u9192 \xB7 \u4F11\u7720", `${row?.wakeCount ?? 0} \xB7 ${row?.sleepCount ?? 0}`],
+    ["\u521B\u5EFA\u65F6\u95F4", row?.createdAt !== void 0 ? fmtAgo2(status.at - row.createdAt) : "\u2014"]
+  ];
+  const smStates = [
+    { key: "provision", label: "\u521B\u5EFA\u4E2D" },
+    { key: "running", label: "\u8FD0\u884C\u4E2D" },
+    { key: "sleep", label: "\u4F11\u7720\u4E2D" },
+    { key: "deleted", label: "\u5DF2\u5220\u9664" }
+  ];
+  const doAction = async (action) => {
+    setBusy(true);
+    try {
+      await runStatusAction(row?.workspaceId ?? ws.workspaceId, action);
+      setConfirmDelete(false);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const metrics = row?.metrics ?? null;
+  const metricsFrozen = phase === "sleep" || phase === "deleted";
+  const k8s = row?.k8s ?? null;
+  const timeline = (row?.timeline ?? []).slice().reverse();
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd", children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-inner", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-head", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "dsh-wsd-name", children: ws.title || ws.workspaceId }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: `dsh-wsb-dot ${phase}` }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: `dsh-wsb-phase ${phase}`, children: label }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-actions", children: [
+        phase === "sleep" || phase === "unknown" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { className: "dsh-wsd-btn primary", disabled: busy, onClick: () => void doAction("ensure"), children: "\u5524\u9192" }) : null,
+        phase === "running" ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { className: "dsh-wsd-btn", disabled: busy, onClick: () => void doAction("sleep"), children: "\u4F11\u7720" }) : null,
+        confirmDelete ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { className: "dsh-wsd-btn danger", disabled: busy, onClick: () => void doAction("delete"), children: "\u786E\u8BA4\u5220\u9664" }),
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { className: "dsh-wsd-btn", disabled: busy, onClick: () => setConfirmDelete(false), children: "\u53D6\u6D88" })
+        ] }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", { className: "dsh-wsd-btn danger", onClick: () => setConfirmDelete(true), children: "\u5220\u9664" })
+      ] })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-cols", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-col", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-card", children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-status", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-phase-line", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: `dsh-wsb-dot ${phase}` }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: label })
+          ] }),
+          countdown !== null ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: `dsh-wsd-countdown${countdownOk ? " ok" : ""}`, children: countdown }) : null,
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-statgrid", children: stats.map(([k, v]) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-stat", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "k", children: k }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "v", children: String(v) })
+          ] }, k)) })
+        ] }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-card", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h4", { children: "\u751F\u547D\u5468\u671F" }),
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-sm", children: smStates.map((s, i) => {
+            const isWakingEdge = phase === "waking" && s.key === "sleep";
+            return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_react3.Fragment, { children: [
+              i === 0 ? null : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "arrow", children: isWakingEdge ? null : s.key === "sleep" ? "\u21C4" : "\u2192" }),
+              isWakingEdge ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "node waking", children: "\u5524\u9192\u4E2D\u2026" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: `node${phase === s.key ? " current" : ""}`, children: s.label })
+            ] }, s.key);
+          }) })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-card", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h4", { children: "\u65F6\u95F4\u7EBF" }),
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-tl", children: timeline.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-empty", children: "\u6682\u65E0\u4E8B\u4EF6" }) : timeline.map((e, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "ev", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { className: "t", children: fmtAgo2(status.at - e.at) }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: e.text })
+          ] }, i)) })
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-col", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-card", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h4", { children: "\u8D44\u6E90\u6307\u6807" }),
+          metrics === null ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-metric-note", children: "\u6307\u6807\u4E0D\u53EF\u7528\uFF08\u9700 metrics-server\uFF09" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-metrics", children: [
+            ["cpu", "mem"].map((key) => {
+              const m = metrics[key];
+              const name = key === "cpu" ? "CPU" : "\u5185\u5B58";
+              const value = key === "cpu" ? `${Math.round(m.value * 1e3) / 1e3} \u6838` : `${m.value} MB`;
+              return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: `dsh-wsd-metric${metricsFrozen ? " frozen" : ""}`, children: [
+                /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "mk", children: name }),
+                /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "mv", children: m.pct === null ? value : `${value} \xB7 ${m.pct}%` }),
+                m.history.length > 1 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("svg", { viewBox: "0 0 120 26", preserveAspectRatio: "none", children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                  "polyline",
+                  {
+                    points: spark(m.history, 120, 24),
+                    fill: "none",
+                    stroke: "currentColor",
+                    strokeWidth: "1.5",
+                    strokeLinejoin: "round"
+                  }
+                ) }) : null
+              ] }, key);
+            }),
+            !metrics.available ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-metric-note", children: "metrics-server \u65E0\u54CD\u5E94\uFF0C\u663E\u793A\u6700\u8FD1\u91C7\u6837" }) : null
+          ] })
+        ] }),
+        k8s !== null ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { className: "dsh-wsd-card", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("h4", { children: "k8s \u8D44\u6E90" }),
+          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "dsh-wsd-k8s", children: [
+            ["\u6267\u884C Pod", k8s.podName],
+            ["\u6570\u636E\u5377 PVC", k8s.pvcName],
+            ["\u547D\u540D\u7A7A\u95F4", k8s.namespace],
+            ["\u955C\u50CF", k8s.image],
+            ["RuntimeClass", k8s.runtimeClass ?? "\u2014"],
+            ["\u8D44\u6E90\u9650\u989D", `${k8s.cpuLimit ?? "\u2014"} / ${k8s.memLimit ?? "\u2014"}`],
+            ["\u5B58\u50A8\u7C7B", k8s.storageClass ?? "\u2014"],
+            ["\u5BB9\u91CF", `${k8s.capacityGB} GB`]
+          ].map(([k, v]) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "k", children: k }),
+            /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { className: "v", children: String(v) })
+          ] }, k)) })
+        ] }) : null
+      ] })
+    ] })
+  ] }) });
+}
+
 // packages/workspace-k8s/src/client/index.tsx
 var inject = ["slots", "locale", "layout"];
 function apply(ctx) {
@@ -517,5 +748,6 @@ function apply(ctx) {
     await poll();
   };
   registerNewWorkspaceDialog(ctx.slots, NewWorkspaceDialog, () => ({ createByName }));
+  registerWorkspaceDetailView(ctx.slots, WorkspaceDetailView);
 }
 return module.exports; } });

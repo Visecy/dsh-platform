@@ -130,21 +130,27 @@ describe('shipped client bundle', () => {
       'sidebar.panellist',
       'conversation.hero.workspace.directoryFlow',
       'sidebar.workspaces.directoryFlow',
+      'conversation.view',
     ])
     expect(registered.map((r) => r.slot)).toEqual([
       'main',
       'sidebar.panellist',
       'conversation.hero.workspace.directoryFlow',
       'sidebar.workspaces.directoryFlow',
+      'conversation.view',
     ])
     expect(registered.find((r) => r.slot === 'main')?.options.key).toBe('workspace-status')
     expect(registered.find((r) => r.slot === 'sidebar.panellist')?.options.id).toBe('workspace-status')
+    expect(registered.find((r) => r.slot === 'conversation.view')?.options.id).toBe('workspace')
     for (const call of registered) expect(call.component).toBeTruthy()
   })
 
   it('never claims the surfaces the official ui-workspace row owns', () => {
     const { registered } = applyBundle()
     const slots = registered.map((r) => r.slot)
+    // `conversation.view` is ui-conversation's ring, not a ui-workspace
+    // surface: the tab lives beside Chat, it does not take the browser's or
+    // the hero's seat.
     expect(slots).not.toContain('sidebar.workspaces')
     expect(slots).not.toContain('conversation.hero.workspace')
   })
@@ -168,7 +174,7 @@ describe('shipped client bundle', () => {
     // its own HTTP snapshot, and the dialog commits through its own injected
     // share.
     expect(requested).toEqual([])
-    // main + sidebar.panellist + the two directory-flow seats.
-    expect(registered).toHaveLength(4)
+    // main + sidebar.panellist + the two directory-flow seats + the 工作区 view.
+    expect(registered).toHaveLength(5)
   })
 })
