@@ -12,6 +12,7 @@ import { registerWorkspaceApi } from './api.ts'
 import { WorkspaceManagement } from './management.ts'
 import { WorkspaceMetricsSampler } from './metrics.ts'
 import { HostWorkspaceRegistry } from './registry.ts'
+import { WorkspaceRecordDeletions } from './record-deletions.ts'
 import { WorkspaceReconciler, type SessionHeaderSource } from './reconciler.ts'
 import { wireWorkspaceLifecycle } from './wire.ts'
 
@@ -254,6 +255,25 @@ export function apply(ctx: Context, config: Config | undefined): void {
       return await persistence.list()
     },
   }
+
+  /**
+   * The official sidebar's delete is record-only, so the deletion itself is
+   * the only signal that the workspace is gone. `domain/changed` is the
+   * documented event the official storage-domain facility emits per durable
+   * write, and the official workspace registry persists through it — which
+   * makes a `deleted` event for a mapped record the one supported statement of
+   * "an operator deleted this workspace". See `record-deletions.ts` for the
+   * discriminator this relies on and the ambiguity it refuses to guess at.
+   */
+  const recordDeletions = new WorkspaceRecordDeletions({
+    hostRoot,
+    // The k8s half only: the record is already gone (that is what fired the
+    // event), so this must not touch the registry.
+    destroy: (workspaceId) => deleteWorkspace(workspaceId),
+    logger: ctx.logger,
+  })
+  ctx.on('domain/changed', (change: unknown) => recordDeletions.handle(change))
+
   const reconciler = new WorkspaceReconciler({
     controller: runtime.podController,
     registry,
@@ -263,6 +283,9 @@ export function apply(ctx: Context, config: Config | undefined): void {
     // Every rebind failure used to return in silence, which is why the live
     // deployment's missing associations were undiagnosable from the pod logs.
     logger: ctx.logger,
+    // The pass is also the retry loop for a deletion whose PVC removal failed,
+    // and the guard that keeps such a workspace from being adopted back.
+    condemned: recordDeletions,
   })
   ctx.provide('workspaceReconciler', { reconcile: () => reconciler.reconcile() })
   /**

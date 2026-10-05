@@ -40,6 +40,32 @@ export interface ReconcilerOptions {
   hostRoot: string
   /** Where the pass reports the failures it used to swallow. */
   logger?: ReconcilerLogger
+  /**
+   * The workspaces whose RECORD was deleted while their volume survived (see
+   * `record-deletions.ts`). The pass is the platform's retry loop, so it:
+   *
+   *  - observes every registry projection it reads (the uuid → workspace join
+   *    a later deletion event needs),
+   *  - retries the destroys that failed, and
+   *  - treats a condemned workspace as NOT adoptable.
+   *
+   * The last point is what stops the resurrection: a condemned workspace has
+   * no record and does have a PVC, which is exactly the shape this pass was
+   * built to bridge back into the registry. Without the guard, a delete whose
+   * PVC removal failed would silently undo itself one pass later.
+   */
+  condemned?: CondemnedWitness
+}
+
+/**
+ * The slice of {@link WorkspaceRecordDeletions} the pass consumes. Declared
+ * structurally so the pass can be tested with a stub, and so the reconciler
+ * stays independent of the event plumbing.
+ */
+export interface CondemnedWitness {
+  observe(rows: readonly { workspaceId: string; path: string; internalId?: string }[]): void
+  isCondemned(workspaceId: string): boolean
+  retry(): Promise<readonly string[]>
 }
 
 /**
@@ -154,8 +180,17 @@ export class WorkspaceReconciler {
   }
 
   private async pass(): Promise<void> {
-    const { controller, registry, namespace, hostRoot } = this.opts
+    const { controller, registry, namespace, hostRoot, condemned } = this.opts
     if (controller.listPods === undefined || controller.listPvcs === undefined) return
+
+    // Finish (or retry) the deletions whose PVC removal failed BEFORE reading
+    // the cluster. The other order is a resurrection bug: the pass would
+    // snapshot the still-existing volume, the retry would then succeed, the
+    // condemnation would lift, and the very same pass would bridge the
+    // snapshot's volume back into a fresh record.
+    if (condemned !== undefined) {
+      for (const message of await condemned.retry()) this.report(message)
+    }
 
     const [known, pods, pvcs] = await Promise.all([
       registry.list().catch(() => []),
@@ -163,14 +198,19 @@ export class WorkspaceReconciler {
       controller.listPvcs(namespace).catch(() => []),
     ])
 
+    // The registry projection is also the uuid → workspace join the deletion
+    // signal resolves against. `known` is empty when the listing failed, which
+    // is why the witness merges instead of replacing.
+    condemned?.observe(known)
+
     const currentKnown = new Set(known.map((ws) => ws.workspaceId))
     // Only resources backed by a PVC are real workspaces. Pod-only resources
     // are stale prototypes/orphans and must NOT be auto-adopted; they are
     // surfaced for manual cleanup instead.
     const pvcIds = new Set(pvcs.map(pvcToWorkspaceId))
-    const resources = new Set(pvcIds)
+    const resources = new Set([...pvcIds].filter((id) => condemned?.isCondemned(id) !== true))
     for (const pod of pods) {
-      if (pvcIds.has(pod)) resources.add(pod)
+      if (pvcIds.has(pod) && condemned?.isCondemned(pod) !== true) resources.add(pod)
     }
 
     // Every resource needs its host-side anchor, whether or not the registry
