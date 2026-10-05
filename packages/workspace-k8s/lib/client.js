@@ -491,35 +491,50 @@ function WorkspacePanelIcon({ size = 16, active = false }) {
 var import_react2 = require("react");
 var import_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
 var FIELD_LABEL = "\u5DE5\u4F5C\u533A\u540D\u79F0";
+function composingKeydown(e) {
+  return e.nativeEvent?.isComposing === true || e.isComposing === true || e.keyCode === 229;
+}
 function NewWorkspaceDialog(props) {
   const { open, busy, onCancel, onError, createByName } = props;
   const [name, setName] = (0, import_react2.useState)("");
   const [error, setError] = (0, import_react2.useState)("");
+  const [creating, setCreating] = (0, import_react2.useState)(false);
+  const composingRef = (0, import_react2.useRef)(false);
   (0, import_react2.useEffect)(() => {
     if (open) {
       setName("");
       setError("");
+      setCreating(false);
+      composingRef.current = false;
     }
   }, [open]);
   if (!open) return null;
+  const trimmed = name.trim();
+  const blocked = busy || creating || trimmed === "";
   const submit = async () => {
-    const value = name.trim();
-    if (value === "") return;
+    if (blocked) return;
+    setCreating(true);
     setError("");
     try {
-      await createByName(value);
+      await createByName(trimmed);
       onCancel();
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       setError(message);
       onError?.(message);
+    } finally {
+      setCreating(false);
     }
+  };
+  const close = () => {
+    if (busy || creating) return;
+    onCancel();
   };
   return (0, import_react2.createElement)(
     import_dsh_client_ui_primitives.Modal,
     {
       open,
-      onClose: onCancel,
+      onClose: close,
       closeLabel: "\u5173\u95ED",
       title: "\u65B0\u5EFA\u5DE5\u4F5C\u533A",
       description: "\u8F93\u5165\u5DE5\u4F5C\u533A\u540D\u79F0\u3002\u521B\u5EFA\u540E\u4F1A\u51FA\u73B0\u5728\u4FA7\u8FB9\u680F\u5DE5\u4F5C\u533A\u7EC4\u4E2D\u3002",
@@ -527,13 +542,13 @@ function NewWorkspaceDialog(props) {
         (0, import_react2.createElement)(import_dsh_client_ui_primitives.Button, {
           key: "cancel",
           variant: "outline",
-          disabled: busy,
-          onClick: onCancel
+          disabled: busy || creating,
+          onClick: close
         }, "\u53D6\u6D88"),
         (0, import_react2.createElement)(import_dsh_client_ui_primitives.Button, {
           key: "create",
           variant: "primary",
-          disabled: busy,
+          disabled: blocked,
           onClick: () => void submit()
         }, "\u521B\u5EFA")
       ]
@@ -548,9 +563,25 @@ function NewWorkspaceDialog(props) {
       "data-modal-autofocus": true,
       value: name,
       disabled: busy,
-      onChange: (e) => setName(e.target.value),
+      onChange: (e) => {
+        setName(e.target.value);
+        setError("");
+      },
+      // The official forms select the field's content when it takes focus.
+      onFocus: (e) => {
+        e.target.select();
+      },
+      onCompositionStart: () => {
+        composingRef.current = true;
+      },
+      onCompositionEnd: () => {
+        composingRef.current = false;
+      },
       onKeyDown: (e) => {
-        if (e.key === "Enter") void submit();
+        if (e.key === "Enter" && !composingRef.current && !composingKeydown(e)) {
+          e.preventDefault?.();
+          void submit();
+        }
       }
     }),
     // The API's own message, verbatim, in the platform's danger tone. A failed

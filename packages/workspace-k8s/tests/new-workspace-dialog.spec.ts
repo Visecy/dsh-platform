@@ -237,6 +237,192 @@ describe('new-workspace dialog: what the operator sees', () => {
 })
 
 /**
+ * The FIELD's behaviour, matched to the official dialogs the plugin rebuilt
+ * this one from (`dsh-client-ui-workspace`'s workspace/session rename forms:
+ * `Modal` + one labelled field marked `data-modal-autofocus` + an
+ * outline/primary footer). Where the operator's ruling applies — "where our
+ * field differs from the official one, match the official one" — the official
+ * behaviour is the specification, and these are the differences that mattered:
+ *
+ *   1. an Enter that belongs to an IME COMPOSITION must not submit. A CJK
+ *      operator picks a candidate with Enter; the official forms track
+ *      `onCompositionStart/End` in a ref and guard the keydown
+ *      (`if (e.key === "Enter" && !composingRef.current)`), and the shared
+ *      primitives additionally treat a keydown that reports itself as composing
+ *      (`nativeEvent.isComposing`, `keyCode === 229`) as non-committing. Our
+ *      field submitted on any Enter, so selecting a candidate created the
+ *      workspace with a half-composed name;
+ *   2. the primary action is disabled while the name is blank — the official
+ *      rule is `blocked = busy || trimmed === ""`, not `busy` alone;
+ *   3. a second Enter while the request is in flight must not start a second
+ *      create (`confirm()` returns early on `blocked`);
+ *   4. Escape / mask click must not dismiss the dialog mid-create (the
+ *      official `close()` is `if (renaming) return;`);
+ *   5. editing the name clears the previous failure (`onChange` →
+ *      `setError(null)`), so a corrected name does not sit under a stale error;
+ *   6. the field takes focus on open through `data-modal-autofocus` (already
+ *      aligned) and selects its content when focused (`onFocus` →
+ *      `e.target.select()`).
+ */
+describe('new-workspace dialog: the official field behaviour', () => {
+  const openDialog = (over: Record<string, unknown> = {}): Rendered => {
+    const entry = registeredIn(applyBundle(), 'sidebar.workspaces.directoryFlow')
+    return renderComponent(entry.component, {
+      open: true,
+      busy: false,
+      createByName: vi.fn(async () => undefined),
+      onCancel: vi.fn(),
+      onPicked: vi.fn(),
+      onError: vi.fn(),
+      ...over,
+    })
+  }
+
+  /** The native input the operator types into. */
+  const field = (rendered: Rendered): { props: Record<string, unknown> } => {
+    const input = rendered.find((element) => element.props.id === 'dsh-ws-name')
+    if (input === undefined) throw new Error('no name field in the dialog')
+    return input
+  }
+
+  /** Type `value` and re-render, as the frame does on a state update. */
+  const type = (rendered: Rendered, value: string): void => {
+    ;(field(rendered).props.onChange as (event: unknown) => void)({ target: { value } })
+    rendered.rerender()
+  }
+
+  /** One Enter keydown, as React delivers it (nativeEvent included). */
+  const pressEnter = async (rendered: Rendered, over: Record<string, unknown> = {}): Promise<void> => {
+    await (field(rendered).props.onKeyDown as (event: unknown) => unknown)({ key: 'Enter', nativeEvent: {}, ...over })
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+
+  const settle = async (): Promise<void> => {
+    await new Promise((resolve) => setImmediate(resolve))
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+
+  it('does NOT submit on the Enter that selects an IME candidate', async () => {
+    const createByName = vi.fn(async () => undefined)
+    const onCancel = vi.fn()
+    const rendered = openDialog({ createByName, onCancel })
+    type(rendered, 'にほんご')
+
+    // The composition is open: the operator is choosing a candidate.
+    ;(field(rendered).props.onCompositionStart as () => void)()
+    await pressEnter(rendered)
+    await settle()
+
+    expect(createByName).not.toHaveBeenCalled()
+    expect(onCancel).not.toHaveBeenCalled()
+    // The half-composed draft is still in the field: nothing was committed.
+    expect(field(rendered).props.value).toBe('にほんご')
+  })
+
+  it('submits the very next Enter once the composition has ended', async () => {
+    const createByName = vi.fn(async () => undefined)
+    const onCancel = vi.fn()
+    const rendered = openDialog({ createByName, onCancel })
+    type(rendered, '日本語プロジェクト')
+
+    ;(field(rendered).props.onCompositionStart as () => void)()
+    await pressEnter(rendered)
+    expect(createByName).not.toHaveBeenCalled()
+
+    // The candidate is committed; the guard must release, not wedge the field.
+    ;(field(rendered).props.onCompositionEnd as () => void)()
+    await pressEnter(rendered)
+    await settle()
+
+    expect(createByName).toHaveBeenCalledTimes(1)
+    expect(createByName).toHaveBeenCalledWith('日本語プロジェクト')
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not submit for a keydown that reports itself as composing', async () => {
+    // Browsers that deliver only the keydown flag (no composition events), and
+    // the shared primitives' `event.isComposing || keyCode === 229` rule.
+    for (const event of [{ nativeEvent: { isComposing: true } }, { keyCode: 229 }]) {
+      const createByName = vi.fn(async () => undefined)
+      const rendered = openDialog({ createByName })
+      type(rendered, 'alpha')
+      await pressEnter(rendered, event)
+      await settle()
+      expect(createByName, JSON.stringify(event)).not.toHaveBeenCalled()
+    }
+  })
+
+  it('disables the primary action until a name is typed', () => {
+    const rendered = openDialog()
+
+    expect(button(rendered, '创建').props.disabled).toBe(true)
+
+    type(rendered, 'alpha')
+    expect(button(rendered, '创建').props.disabled).toBe(false)
+
+    type(rendered, '   ')
+    expect(button(rendered, '创建').props.disabled).toBe(true)
+  })
+
+  it('does not start a second create while the request is in flight', async () => {
+    const createByName = vi.fn(() => new Promise<void>(() => undefined))
+    const rendered = openDialog({ createByName })
+    type(rendered, 'alpha')
+
+    await pressEnter(rendered)
+    // React re-renders between two keystrokes, which is what makes the
+    // in-flight state visible to the second handler (the official dialogs use
+    // the same local `creating` state, not the owner's `busy`, for this).
+    rendered.rerender()
+    await pressEnter(rendered)
+    await settle()
+
+    expect(createByName).toHaveBeenCalledTimes(1)
+    expect(button(rendered, '创建').props.disabled).toBe(true)
+  })
+
+  it('refuses to close — Escape, mask or 取消 — while the request is in flight', async () => {
+    const onCancel = vi.fn()
+    const rendered = openDialog({ busy: true, onCancel })
+
+    const modal = rendered.root()
+    ;(modal?.props.onClose as () => void)()
+    expect(onCancel).not.toHaveBeenCalled()
+    expect(button(rendered, '取消').props.disabled).toBe(true)
+    expect(button(rendered, '创建').props.disabled).toBe(true)
+
+    // Once the owner is idle again the same path closes the flow.
+    const idle = openDialog({ busy: false, onCancel })
+    ;(idle.root()?.props.onClose as () => void)()
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears a previous failure as soon as the name is edited', async () => {
+    const createByName = vi.fn(async () => { throw new Error('"a b" is not a valid workspace name') })
+    const rendered = openDialog({ createByName })
+    type(rendered, 'a b')
+    await click(rendered, '创建')
+    rendered.rerender()
+    expect(rendered.text()).toContain('"a b" is not a valid workspace name')
+
+    type(rendered, 'a-b')
+
+    expect(rendered.text()).not.toContain('is not a valid workspace name')
+    expect(rendered.find((element) => element.props['data-tone'] === 'danger')).toBeUndefined()
+  })
+
+  it('selects the field content when focused, like the official forms', () => {
+    const rendered = openDialog()
+    type(rendered, 'alpha')
+    const select = vi.fn()
+
+    ;(field(rendered).props.onFocus as (event: unknown) => void)({ target: { select } })
+
+    expect(select).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
  * The dialog is the OFFICIAL one, not a lookalike.
  *
  * The operator's instruction was to reuse the official page styles instead of

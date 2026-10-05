@@ -12,9 +12,10 @@
  * `react/jsx-runtime` as externals and receives them through the module
  * loader's `require`, exactly as the browser module table hands them over. The
  * stand-in produces plain `{ type, props }` elements and keeps `useState`
- * values in a per-render scope, so a spec can drive a component (type into an
- * input, click a button, re-render) without a DOM. Effects are deliberately
- * inert: nothing these specs pin is produced by an effect.
+ * values and `useRef` identities in a per-render scope, so a spec can drive a
+ * component (type into an input, click a button, re-render) without a DOM.
+ * Effects are deliberately inert: nothing these specs pin is produced by an
+ * effect.
  *
  * The bundle is materialized exactly once per spec file (Node caches it), then
  * applied per case against a fresh fake registry.
@@ -71,6 +72,20 @@ const reactStub = {
     return [current.states[index] as T, (next: T | ((prev: T) => T)): void => {
       current.states[index] = typeof next === 'function' ? (next as (prev: T) => T)(current.states[index] as T) : next
     }]
+  },
+  /**
+   * `useRef`, with the identity React guarantees: the same object for every
+   * render of one component instance, mutated in place with no re-render. The
+   * new-workspace dialog's IME guard needs exactly that — the keydown that ends
+   * a composition is dispatched before React could re-render, so a state value
+   * would be read stale (which is why the official forms use a ref too).
+   */
+  useRef<T>(initial: T): { current: T } {
+    if (scope === undefined) throw new Error('useRef outside a renderComponent() call')
+    const index = scope.cursor++
+    const current = scope
+    if (!(index in current.states)) current.states[index] = { current: initial }
+    return current.states[index] as { current: T }
   },
   useEffect: (): void => undefined,
   useLayoutEffect: (): void => undefined,
