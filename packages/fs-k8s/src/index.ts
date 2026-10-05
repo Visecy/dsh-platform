@@ -98,6 +98,56 @@ export class FsK8s extends FileSystem {
     return seg === '' ? undefined : seg
   }
 
+  /**
+   * The pod-side path of the workspace directory a target belongs to
+   * (`<podRoot>/<workspaceId>` — the PVC mount, which is also the daemon's
+   * root), or undefined when the target is not inside a platform workspace
+   * (a static-endpoint composition, or a path outside hostRoot).
+   */
+  private podWorkspaceRoot(target: FsTarget): string | undefined {
+    const workspaceId = this.workspaceOf(target.displayPath)
+    if (workspaceId === undefined) return undefined
+    const base = this.translate.podRoot.endsWith('/')
+      ? this.translate.podRoot.slice(0, -1)
+      : this.translate.podRoot
+    return `${base}/${workspaceId}`
+  }
+
+  /**
+   * The path the DAEMON's file API expects, which is NOT the pod path.
+   *
+   * A workspace pod mounts its PVC at `/workspaces/<id>` and runs the daemon
+   * with `DAEMON_ROOT=/workspaces/<id>`, so the daemon's file root IS the
+   * workspace directory: `FilesService.confine()` resolves `join(root, path)`,
+   * making `/` the daemon's own root and `/name` a direct child. Handing it the
+   * pod path (`/workspaces/<id>/name`) would address
+   * `<root>/workspaces/<id>/name` — a path that does not exist — which is how
+   * every stat/read/list in the file view turned into "not found" while the
+   * pod's own shell saw a full directory.
+   *
+   * `processPath`/`fileUrl` deliberately keep reporting the POD path: that one
+   * is a real path in the pod and is what the subprocess provider uses as a
+   * cwd.
+   */
+  private daemonPathOf(target: FsTarget): string {
+    const podPath = this.podPathOf(target)
+    const root = this.podWorkspaceRoot(target)
+    if (root === undefined || root === '/') return podPath
+    if (podPath === root) return '/'
+    if (podPath.startsWith(root + '/')) return podPath.slice(root.length)
+    // Not the deployed layout (a caller-built target, a static endpoint): pass
+    // the path through unchanged rather than inventing a root it does not have.
+    return podPath
+  }
+
+  /** The inverse of {@link daemonPathOf}: a daemon-reported path -> pod path. */
+  private podPathForDaemon(daemonPath: string, target: FsTarget): string {
+    const root = this.podWorkspaceRoot(target)
+    if (root === undefined || root === '/') return daemonPath
+    if (daemonPath === '' || daemonPath === '/') return root
+    return daemonPath.startsWith('/') ? root + daemonPath : `${root}/${daemonPath}`
+  }
+
   private async endpointFor(target: FsTarget): Promise<string> {
     const resolver = this.resolver
       ?? (this.ctx.get('workspaceEndpointResolver') as { resolve?: (id: string) => Promise<string> | string } | undefined)?.resolve
@@ -178,7 +228,7 @@ export class FsK8s extends FileSystem {
    */
   override async stat(target: FsTarget, signal?: AbortSignal): Promise<FsInfo | undefined> {
     try {
-      const info = await this.client.info(this.podPathOf(target), await this.endpointFor(target), { follow: true })
+      const info = await this.client.info(this.daemonPathOf(target), await this.endpointFor(target), { follow: true })
       if (info === undefined) return undefined
       return {
         version: FsVersion(info.version ?? `v-${info.modifiedTime ?? 0}-${info.size ?? 0}`),
@@ -199,7 +249,7 @@ export class FsK8s extends FileSystem {
   override async lstat(path: string, opts?: { cwd?: string }, signal?: AbortSignal): Promise<FsPathInfo | undefined> {
     const target = await this.resolve(path, opts)
     try {
-      const info = await this.client.info(this.podPathOf(target), await this.endpointFor(target))
+      const info = await this.client.info(this.daemonPathOf(target), await this.endpointFor(target))
       if (info === undefined) return undefined
       return {
         version: FsVersion(info.version ?? `v-${info.modifiedTime ?? 0}-${info.size ?? 0}`),
@@ -213,7 +263,7 @@ export class FsK8s extends FileSystem {
 
   override async readText(target: FsTarget, signal?: AbortSignal): Promise<string> {
     try {
-      const bytes = await this.client.read(this.podPathOf(target), undefined, await this.endpointFor(target))
+      const bytes = await this.client.read(this.daemonPathOf(target), undefined, await this.endpointFor(target))
       if (!isText(bytes)) throw new FsError('binary or invalid UTF-8', 'FS_NOT_TEXT')
       return new TextDecoder('utf-8').decode(bytes)
     } catch (e) {
@@ -255,7 +305,7 @@ export class FsK8s extends FileSystem {
   override async readByteRange(target: FsTarget, range: { offset: number; length: number }, signal?: AbortSignal): Promise<Uint8Array> {
     try {
       const endpoint = await this.endpointFor(target)
-      return await this.client.read(this.podPathOf(target), { offset: range.offset, maxBytes: range.length }, endpoint)
+      return await this.client.read(this.daemonPathOf(target), { offset: range.offset, maxBytes: range.length }, endpoint)
     } catch (e) {
       this.mapError(e)
     }
@@ -264,10 +314,11 @@ export class FsK8s extends FileSystem {
   override async listDir(target: FsTarget, signal?: AbortSignal): Promise<FsDirEntry[]> {
     try {
       const endpoint = await this.endpointFor(target)
-      const entries = await this.client.list(this.podPathOf(target), endpoint)
+      const entries = await this.client.list(this.daemonPathOf(target), endpoint)
       const out: FsDirEntry[] = []
       for (const e of entries) {
-        const podPath = e.path.startsWith('/') ? e.path : this.podPathOf(target) + '/' + e.path
+        const daemonPath = e.path.startsWith('/') ? e.path : this.daemonPathOf(target) + '/' + e.path
+        const podPath = this.podPathForDaemon(daemonPath, target)
         const childTarget: FsTarget = { targetKey: FsTargetKey(`dsh-k8s:${podPath}`), displayPath: this.translate.toHost(podPath) }
         out.push({
           name: e.name,
@@ -289,10 +340,33 @@ export class FsK8s extends FileSystem {
    * signature is type + size + mtime (a directory has no size, and its mtime
    * moves when a direct entry is added, removed or renamed).
    */
-  private async sample(podPath: string, endpoint: string): Promise<string | undefined> {
-    const info = await this.client.info(podPath, endpoint, { follow: true })
+  private async sample(daemonPath: string, endpoint: string): Promise<string | undefined> {
+    const info = await this.client.info(daemonPath, endpoint, { follow: true })
     if (info === undefined) return undefined
     return `${info.type}:${info.size ?? ''}:${info.modifiedTime ?? ''}`
+  }
+
+  /**
+   * The degradations already reported, keyed by target. The file view opens a
+   * watcher per visible directory and re-opens them as the user navigates, so
+   * "the daemon cannot report changes" is one condition per path per process,
+   * not one line per attempt — and it must never repeat per poll either.
+   */
+  private degradedWatches = new Set<string>()
+
+  /** Report one inert watcher, once per target, through the platform logger. */
+  private reportWatchDegraded(target: FsTarget, error: unknown): void {
+    if (this.degradedWatches.has(target.targetKey)) return
+    this.degradedWatches.add(target.targetKey)
+    const detail = error instanceof Error ? error.message : String(error)
+    try {
+      this.ctx.logger?.warn?.(
+        `fs-k8s: live refresh unavailable for ${target.displayPath}: the sandbox daemon cannot report file changes (${detail}); listing and reading still work`,
+      )
+    } catch {
+      // A broken log sink must not turn degradation into a file-view failure —
+      // that is the very outcome this path exists to prevent.
+    }
   }
 
   /**
@@ -311,23 +385,44 @@ export class FsK8s extends FileSystem {
    *   - after `close()` resolves, no callback ever runs again and no timer is
    *     left behind (the timer is unref'd so a watcher never holds the process
    *     open either);
-   *   - a signal aborted before initialization rejects instead of resolving.
+   *   - a signal aborted before initialization rejects instead of resolving;
+   *   - a daemon that cannot answer the initial poll produces an INERT watcher,
+   *     not a rejection (see below).
    *
-   * Poll failures back off exponentially (base `watchIntervalMs`, ceiling
-   * `watchMaxIntervalMs`) and are reported on every failed poll, so the caller
-   * learns the watcher is blind rather than sitting on a dead subscription.
-   * Once a poll succeeds again the interval resets to the base.
+   * Poll failures after initialization back off exponentially (base
+   * `watchIntervalMs`, ceiling `watchMaxIntervalMs`) and are reported on every
+   * failed poll, so the caller learns the watcher is blind rather than sitting
+   * on a dead subscription. Once a poll succeeds again the interval resets to
+   * the base.
+   *
+   * Initialization failure is deliberately NOT a rejection. The official
+   * caller (`dsh-api-workspace-files`' change feed) wraps this call in a
+   * try/catch and turns any throw into `workspace-file/watch-unsupported`,
+   * which fails the file view's mount — so rejecting here costs the user the
+   * WHOLE file view (listing, reading, everything) over what is only lost live
+   * refresh. A daemon that cannot report change (an older sandbox-daemon image
+   * whose `files/info` contract differs, a pod that is still starting up)
+   * therefore degrades: the promise resolves with a watcher that never fires,
+   * and the degradation is reported once through the platform logger, which
+   * the stdout sink (`@visecy/dsh-logging-stdout`) puts in the pod log.
+   * Genuinely invalid input — an aborted signal — still rejects.
    */
   override async watch(target: FsTarget, changed: (error?: Error) => void, signal: AbortSignal): Promise<() => Promise<void>> {
     signal.throwIfAborted()
-    const podPath = this.podPathOf(target)
+    const daemonPath = this.daemonPathOf(target)
     let endpoint: string
     let last: string | undefined
     try {
       endpoint = await this.endpointFor(target)
-      last = await this.sample(podPath, endpoint)
+      last = await this.sample(daemonPath, endpoint)
     } catch (e) {
-      this.mapError(e)
+      // An abort during initialization is the caller withdrawing the request,
+      // not a daemon fault: that stays a rejection.
+      signal.throwIfAborted()
+      this.reportWatchDegraded(target, e)
+      // Nothing was scheduled and nothing was handed to `changed`, so closing
+      // an inert watcher is a no-op.
+      return async (): Promise<void> => {}
     }
     // Initialization ends here: from this point on the watcher owns a timer and
     // the caller owns the returned close.
@@ -371,7 +466,7 @@ export class FsK8s extends FileSystem {
       if (closed) return
       let next: string | undefined
       try {
-        next = await this.sample(podPath, endpoint)
+        next = await this.sample(daemonPath, endpoint)
       } catch (e) {
         if (closed) return
         interval = Math.min(interval * 2, max)
@@ -396,13 +491,13 @@ export class FsK8s extends FileSystem {
 
   override async writeText(target: FsTarget, content: string, expected?: FsWriteIntent, signal?: AbortSignal, sandboxPolicy?: unknown): Promise<FsWriteOutcome> {
     try {
-      const podPath = this.podPathOf(target)
+      const daemonPath = this.daemonPathOf(target)
       const endpoint = await this.endpointFor(target)
       let before: string | null = null
       try {
-        const info = await this.client.info(podPath, endpoint)
+        const info = await this.client.info(daemonPath, endpoint)
         if (info !== undefined && info.type === 'file') {
-          const bytes = await this.client.read(podPath, undefined, endpoint)
+          const bytes = await this.client.read(daemonPath, undefined, endpoint)
           if (isText(bytes)) before = new TextDecoder('utf-8').decode(bytes).replace(/\r\n/g, '\
 ')
         }
@@ -414,7 +509,7 @@ export class FsK8s extends FileSystem {
         : expected.kind === 'createIfAbsent'
           ? { kind: 'createIfAbsent' as const }
           : { kind: 'replaceIfVersion' as const, version: expected.version }
-      const outcome = await this.client.write(podPath, new TextEncoder().encode(content), intent, endpoint)
+      const outcome = await this.client.write(daemonPath, new TextEncoder().encode(content), intent, endpoint)
       return {
         operation: outcome.operation === 'create' ? 'create' : 'update',
         version: FsVersion(outcome.version),
@@ -429,9 +524,9 @@ export class FsK8s extends FileSystem {
 
   override async editText(target: FsTarget, edit: FsEditRequest, expected?: { version: FsVersion }, signal?: AbortSignal, sandboxPolicy?: unknown): Promise<FsEditOutcome> {
     try {
-      const podPath = this.podPathOf(target)
+      const daemonPath = this.daemonPathOf(target)
       const endpoint = await this.endpointFor(target)
-      const info = await this.client.info(podPath, endpoint)
+      const info = await this.client.info(daemonPath, endpoint)
       if (info === undefined) throw new FsError('no such file', 'FS_EDIT_NOT_FOUND')
       let currentVersion: FsVersion | undefined
       if (expected !== undefined) {
@@ -441,7 +536,7 @@ export class FsK8s extends FileSystem {
           throw new FsError('stale version', 'FS_STALE_VERSION')
         }
       }
-      const bytes = await this.client.read(podPath, undefined, endpoint)
+      const bytes = await this.client.read(daemonPath, undefined, endpoint)
       if (!isText(bytes)) throw new FsError('binary file', 'FS_NOT_TEXT')
       const current = new TextDecoder('utf-8').decode(bytes)
       let next: string
@@ -456,7 +551,7 @@ export class FsK8s extends FileSystem {
         next = current.slice(0, idx) + edit.newString + current.slice(idx + edit.oldString.length)
       }
       const st2 = await this.stat(target)
-      const outcome = await this.client.write(podPath, new TextEncoder().encode(next), { kind: 'replaceIfVersion', version: st2?.version ?? '' }, endpoint)
+      const outcome = await this.client.write(daemonPath, new TextEncoder().encode(next), { kind: 'replaceIfVersion', version: st2?.version ?? '' }, endpoint)
       return { version: FsVersion(outcome.version), before: current.replace(/\r\n/g, '\
 '), after: next.replace(/\r\n/g, '\
 ') }
