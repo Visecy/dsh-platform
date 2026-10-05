@@ -16,6 +16,7 @@
 | R2 | **工作区 pod 插件与登录解耦**，不含任何身份概念 | "工作区pod应当作为一个独立不与用户登录耦合的插件" |
 | R3 | **状态展示不能丢**；pod 工作区与文件夹的差异必须被正面处理 | "状态展示不能丢…最好先调研一下怎么兼容" |
 | R4 | **不能只考虑 visecy 集群**（开源项目，别人要能部署） | "这是一个开源项目，不要只考虑visecy集群的兼容性" |
+| R5 | **工作区 pod 插件层必须在任意 DSH profile 下可用，完整部署不必**：`packages/fs-k8s`、`packages/subprocess-k8s`、`packages/sandbox-daemon`（以及工作区 pod 内与它们并列挂载的任何东西）不得假定自己是被我们的 `web`/`headless` profile 组合加载的——它们不认识的 profile、缺失的 session/workspace 上下文、别的调用者组合，都必须得到确定性的答案而不是硬失败。**chart、profile patch 文件与部署自身的接线不在约束内**（它们本来就只服务本部署） | 操作者 2026-10-05 裁定："The workspace-pod plugin layer must work under any DSH profile. The complete deployment does NOT have to." |
 
 派生的设计目标：
 - **跟 DSH 最新版**（当前 `latest` = `0.2.0-rc.2`），不依赖只支持某条补丁线的第三方
