@@ -172,7 +172,12 @@ export class HostWorkspaceRegistry implements WorkspaceRegistry {
     // path segment, so resolve the record before deleting. When the row is
     // gone or foreign, fall back to a direct delete (unknown ids are an
     // idempotent no-op on the official side).
-    const rows = await this.list().catch(() => [])
+    //
+    // A registry that cannot be LISTED is not "no such record": the fallback
+    // delete would be a no-op on the official side, the record would survive
+    // the deletion, and the reconciler would re-register the workspace from the
+    // volume — so the listing failure propagates instead of being swallowed.
+    const rows = await this.list()
     const row = rows.find((r) => r.workspaceId === workspaceId || r.path.endsWith('/' + workspaceId))
     await registry.delete(row?.internalId ?? workspaceId)
   }

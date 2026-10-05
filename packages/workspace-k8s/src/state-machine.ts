@@ -50,6 +50,13 @@ export interface WorkspaceState {
   createdAt: number
   /** Bounded lifecycle event log (newest last; capped). */
   events: WorkspaceEventLogEntry[]
+  /**
+   * A running pod was observed on an image the deployment no longer
+   * configures, and the workspace was not idle at that moment. The pod is
+   * recycled at the first transition that ends the work in flight, so a busy
+   * workspace is never killed to converge an image.
+   */
+  recyclePending?: boolean
 }
 
 export type WorkspaceEvent =
@@ -67,6 +74,8 @@ export type WorkspaceEvent =
   | { type: 'pod-ready' }
   | { type: 'pod-lost' }
   | { type: 'dispose-requested' }
+  /** The running pod's image differs from the configured one. */
+  | { type: 'pod-image-drift' }
 
 export type WorkspaceAction =
   | { kind: 'none' }
@@ -75,6 +84,8 @@ export type WorkspaceAction =
   | { kind: 'dispose' }
   /** Workspace deletion: delete the pod AND the PVC. */
   | { kind: 'delete' }
+  /** Image drift: delete the pod (KEEP the PVC); the next wake recreates it. */
+  | { kind: 'recycle' }
   /** Schedule the 5-minute idle timer (clears any grace timer). */
   | { kind: 'start-idle' }
   /** Schedule the 3-hour lingering-command grace timer (clears any idle timer). */
@@ -109,6 +120,23 @@ export function initialState(workspaceId: string): WorkspaceState {
   }
 }
 
+/**
+ * Pod recycle (image drift): the pod goes away, the PVC — the workspace's data
+ * and the reason the workspace exists at all — stays. The workspace reads as
+ * sleeping, so the next attach wakes it through the normal ensure path and the
+ * pod is created from the configured image.
+ */
+function recycle(state: WorkspaceState, at: number): WorkspaceState {
+  state.phase = 'sleep'
+  state.idleSince = undefined
+  state.activeCommands = 0
+  state.recyclePending = false
+  state.lastSleepAt = at
+  state.sleepCount += 1
+  log(state, 'pod-recycled', at)
+  return state
+}
+
 /** Append a lifecycle event, keeping the log bounded. */
 function log(state: WorkspaceState, type: string, at: number): void {
   state.events.push({ at, type })
@@ -140,6 +168,20 @@ export function transition(state: WorkspaceState, event: WorkspaceEvent): Transi
     s.idleSince = undefined
     log(s, 'deleted', at)
     return { state: s, action: { kind: 'delete' } }
+  }
+
+  // A drifted pod is recycled at the first moment the workspace is provably
+  // idle. The drift event itself could not act while work was in flight, and
+  // these are the transitions that end it (a session, a turn, a command), so
+  // this is where the pending recycle runs. Any other event leaves the pod
+  // alone: an attach or a new turn means the work is not over.
+  if (
+    s.recyclePending === true &&
+    s.phase === 'running' &&
+    idle && !hasCommands &&
+    (event.type === 'session-disposed' || event.type === 'turn-ended' || event.type === 'command-ended')
+  ) {
+    return { state: recycle(s, at), action: { kind: 'recycle' } }
   }
 
   switch (s.phase) {
@@ -181,6 +223,19 @@ export function transition(state: WorkspaceState, event: WorkspaceEvent): Transi
     }
 
     case 'running': {
+      if (event.type === 'pod-image-drift') {
+        if (s.recyclePending === true) {
+          // The same condition, already recorded: the reconcile pass runs on a
+          // timer and must not append an event per tick.
+          return { state: s, action: { kind: 'none' } }
+        }
+        log(s, 'image-drift', at)
+        if (idle && !hasCommands) {
+          return { state: recycle(s, at), action: { kind: 'recycle' } }
+        }
+        s.recyclePending = true
+        return { state: s, action: { kind: 'none' } }
+      }
       if (event.type === 'pod-lost') {
         log(s, 'pod-lost', at)
         return { state: s, action: { kind: 'ensure' } }

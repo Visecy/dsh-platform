@@ -7,7 +7,7 @@
  */
 import { Context } from '@deepseek-ai/cordis'
 import { SessionTracker } from './session-tracker.ts'
-import { WorkspaceLifecycleManager, type LifecycleOptions } from './lifecycle-manager.ts'
+import { WorkspaceLifecycleManager, type ImageReconcileResult, type LifecycleOptions } from './lifecycle-manager.ts'
 import type { WorkspaceState } from './state-machine.ts'
 import type { WorkspaceRuntime } from './index.ts'
 
@@ -55,9 +55,10 @@ export interface WorkspaceStatusService {
 export function wireWorkspaceLifecycle(ctx: Context & EventBus, opts: WireOptions): {
   resolveEndpoint: (workspaceId: string) => Promise<string>
   commandTracker: CommandActivityTracker
-  deleteWorkspace: (workspaceId: string) => void
+  deleteWorkspace: (workspaceId: string) => Promise<void>
   attach: (workspaceId: string) => void
-  sleepWorkspace: (workspaceId: string) => void
+  sleepWorkspace: (workspaceId: string) => Promise<void>
+  reconcileImages: () => Promise<ImageReconcileResult>
   status: WorkspaceStatusService
 } {
   const manager = new WorkspaceLifecycleManager(opts.lifecycle)
@@ -101,6 +102,7 @@ export function wireWorkspaceLifecycle(ctx: Context & EventBus, opts: WireOption
     deleteWorkspace: (workspaceId) => manager.delete(workspaceId),
     attach: (workspaceId) => manager.attach(workspaceId),
     sleepWorkspace: (workspaceId) => manager.sleep(workspaceId),
+    reconcileImages: () => manager.reconcileImages(),
     status: {
       get: (workspaceId) => manager.snapshot(workspaceId),
       list: () => manager.allStates(),

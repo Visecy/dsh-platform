@@ -280,6 +280,19 @@ describe('HostWorkspaceRegistry (ctx.workspaceRegistry bridge, DSH 0.1.2)', () =
     expect(deleted).toEqual(['opaque-uuid'])
   })
 
+  it('surfaces a listing failure instead of deleting the wrong record', async () => {
+    // The official registry is present but its durable store cannot be read.
+    // Falling back to a delete by platform id would be a no-op there: the
+    // record would survive, and the reconciler would put the workspace back.
+    const deletions: string[] = []
+    const reg = new HostWorkspaceRegistry(channel({
+      list: () => { throw new Error('storage fault') },
+      delete: async (id: string) => { deletions.push(id); return true },
+    }), '/workspaces')
+    await expect(reg.delete('ws-x')).rejects.toThrow('workspace registry unavailable')
+    expect(deletions).toEqual([])
+  })
+
   it('is a no-op when the official workspace registry is absent (headless profiles)', async () => {
     const reg = new HostWorkspaceRegistry({ get: () => undefined }, '/workspaces')
     expect(await reg.list()).toEqual([])

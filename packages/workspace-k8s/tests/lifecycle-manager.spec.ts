@@ -33,16 +33,22 @@ class MockController implements PodController {
   pods = new Set<string>()
   ensureCalls = 0
   deleteCalls: string[] = []
+  /** The image each running pod carries, as a real cluster read would report. */
+  images = new Map<string, string>()
+  /** Deferred image reads, to model a pod listing that is still in flight. */
+  imageGate: (() => Promise<void>) | undefined
 
   async ensurePod(spec: WorkspacePodSpec): Promise<string> {
     this.ensureCalls++
     const name = `${spec.workspaceId}`
     this.pods.add(name)
+    this.images.set(name, spec.image)
     return name
   }
   async deletePod(namespace: string, workspaceId: string): Promise<void> {
     this.deleteCalls.push(workspaceId)
     this.pods.delete(`${workspaceId}`)
+    this.images.delete(workspaceId)
   }
   async waitReady(): Promise<void> { /* instant */ }
   pvcs = new Set<string>()
@@ -55,6 +61,11 @@ class MockController implements PodController {
     this.pvcs.delete(`${workspaceId}-data`)
   }
   endpoint(): string { return 'http://daemon' }
+  async listPods(): Promise<string[]> { return [...this.pods] }
+  async getPodImage(_namespace: string, name: string): Promise<string | undefined> {
+    if (this.imageGate !== undefined) await this.imageGate()
+    return this.images.get(name)
+  }
 }
 
 describe('WorkspaceLifecycleManager', () => {
@@ -188,5 +199,125 @@ describe('WorkspaceLifecycleManager', () => {
     mgr.attach('ws-untracked2')
     expect(mgr.stateOf('ws-untracked2')?.phase).toBe('waking')
     expect(mgr.stateOf('ws-untracked2')?.provisioned).toBe(true)
+  })
+
+  // ── pod image drift ──────────────────────────────────────────────────────
+  // A deployment that changes WS_IMAGE keeps every existing pod on the old
+  // daemon forever: the pod spec is only applied when a pod is CREATED, and a
+  // running workspace never needs creating. The lifecycle manager is the owner
+  // of pod lifetime, so it converges the fleet — without killing work.
+
+  it('recycles an idle pod whose image differs from the configured one', async () => {
+    mgr.attach('ws-drift')
+    await new Promise((r) => setTimeout(r, 10))
+    ctrl.images.set('ws-drift', 'old-daemon:v0.1.54')
+    ctrl.deleteCalls.length = 0
+
+    await mgr.reconcileImages()
+
+    expect(ctrl.deleteCalls).toEqual(['ws-drift'])
+    expect(mgr.stateOf('ws-drift')?.phase).toBe('sleep')
+    // The PVC is the workspace's data: a recycle is not a delete.
+    expect(ctrl.pvcs.has('ws-drift-data')).toBe(true)
+    const events = mgr.stateOf('ws-drift')?.events.map((e) => e.type) ?? []
+    expect(events).toContain('image-drift')
+    expect(events).toContain('pod-recycled')
+  })
+
+  it('leaves a pod that already runs the configured image alone', async () => {
+    mgr.attach('ws-current')
+    await new Promise((r) => setTimeout(r, 10))
+    ctrl.deleteCalls.length = 0
+
+    await mgr.reconcileImages()
+
+    expect(ctrl.deleteCalls).toEqual([])
+    expect(mgr.stateOf('ws-current')?.phase).toBe('running')
+  })
+
+  it('marks a busy drifted pod and recycles it when it goes idle', async () => {
+    mgr.attach('ws-busy')
+    await new Promise((r) => setTimeout(r, 10))
+    mgr.handleSessionEvent('ws-busy', { type: 'session-created' })
+    ctrl.images.set('ws-busy', 'old-daemon:v0.1.54')
+    ctrl.deleteCalls.length = 0
+
+    await mgr.reconcileImages()
+    // A live session means work may be in flight: never kill it.
+    expect(ctrl.deleteCalls).toEqual([])
+    expect(ctrl.pods.has('ws-busy')).toBe(true)
+    expect(mgr.stateOf('ws-busy')?.recyclePending).toBe(true)
+    expect(mgr.stateOf('ws-busy')?.phase).toBe('running')
+
+    // The session ends: the workspace is idle now, so the pending recycle runs.
+    mgr.handleSessionEvent('ws-busy', { type: 'session-disposed' })
+    await new Promise((r) => setTimeout(r, 10))
+    expect(ctrl.deleteCalls).toEqual(['ws-busy'])
+    expect(mgr.stateOf('ws-busy')?.phase).toBe('sleep')
+    expect(mgr.stateOf('ws-busy')?.recyclePending).toBe(false)
+  })
+
+  it('does not repeat the drift event while the condition persists', async () => {
+    mgr.attach('ws-repeat')
+    await new Promise((r) => setTimeout(r, 10))
+    mgr.handleSessionEvent('ws-repeat', { type: 'session-created' })
+    ctrl.images.set('ws-repeat', 'old-daemon:v0.1.54')
+
+    await mgr.reconcileImages()
+    await mgr.reconcileImages()
+    await mgr.reconcileImages()
+
+    const drifts = (mgr.stateOf('ws-repeat')?.events ?? []).filter((e) => e.type === 'image-drift')
+    expect(drifts).toHaveLength(1)
+  })
+
+  it('does not recycle while an ensure for the same workspace is in flight', async () => {
+    mgr.attach('ws-ensuring')
+    await new Promise((r) => setTimeout(r, 10))
+    ctrl.images.set('ws-ensuring', 'old-daemon:v0.1.54')
+    ctrl.deleteCalls.length = 0
+
+    const busy = new WorkspaceLifecycleManager({
+      controller: ctrl,
+      namespace: 'dsh',
+      image: 'img',
+      now: () => clock.now(),
+      timer: clock,
+      isEnsuring: (id) => id === 'ws-ensuring',
+    })
+    await busy.reconcileImages()
+    expect(ctrl.deleteCalls).toEqual([])
+    expect(ctrl.pods.has('ws-ensuring')).toBe(true)
+  })
+
+  it('runs one image pass at a time', async () => {
+    mgr.attach('ws-once')
+    await new Promise((r) => setTimeout(r, 10))
+    ctrl.images.set('ws-once', 'old-daemon:v0.1.54')
+    ctrl.deleteCalls.length = 0
+    let release = (): void => {}
+    ctrl.imageGate = () => new Promise<void>((resolve) => { release = resolve })
+
+    const first = mgr.reconcileImages()
+    const second = mgr.reconcileImages()
+    // Let the first pass reach the (gated) image read before releasing it.
+    await new Promise((r) => setTimeout(r, 5))
+    release()
+    await Promise.all([first, second])
+
+    expect(ctrl.deleteCalls).toEqual(['ws-once'])
+  })
+
+  it('a wake after a recycle provisions the configured image', async () => {
+    mgr.attach('ws-rewake')
+    await new Promise((r) => setTimeout(r, 10))
+    ctrl.images.set('ws-rewake', 'old-daemon:v0.1.54')
+    await mgr.reconcileImages()
+    expect(mgr.stateOf('ws-rewake')?.phase).toBe('sleep')
+
+    mgr.attach('ws-rewake')
+    await new Promise((r) => setTimeout(r, 10))
+    expect(mgr.stateOf('ws-rewake')?.phase).toBe('running')
+    expect(ctrl.images.get('ws-rewake')).toBe('img')
   })
 })

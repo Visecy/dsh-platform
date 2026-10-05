@@ -39,6 +39,12 @@ export interface PodController {
   pvcName(workspaceId: string): string
   /** Optional reconciliation support. */
   listPods?(namespace: string): Promise<string[]>
+  /**
+   * The image a running workspace pod carries, for the lifecycle's image-drift
+   * pass. Optional like the other reconciliation members: a controller that
+   * cannot report it simply never converges, rather than guessing.
+   */
+  getPodImage?(namespace: string, name: string): Promise<string | undefined>
   listPvcs?(namespace: string): Promise<string[]>
   /** Optional direct pod-IP lookup (used to avoid flaky cluster DNS). */
   getPodIp?(namespace: string, name: string): Promise<string>
@@ -72,6 +78,32 @@ export function parseMemoryQuantity(value: string | undefined): number {
 
 export const MANAGED_ANNOTATION = 'dsh-platform/managed'
 export const WORKSPACE_LABEL = 'app=dsh-workspace'
+
+/**
+ * The HTTP status of a failed k8s API call, however the client surfaced it
+ * (v2 throws `ApiException` with a numeric `code`; some paths carry the status
+ * on `response`, and an older shape only leaves it in the message).
+ */
+function statusOf(error: unknown): number | undefined {
+  const candidate = error as { code?: unknown; statusCode?: unknown; response?: { statusCode?: unknown } } | undefined
+  for (const value of [candidate?.code, candidate?.statusCode, candidate?.response?.statusCode]) {
+    if (typeof value === 'number') return value
+    if (typeof value === 'string' && /^[0-9]+$/.test(value)) return Number(value)
+  }
+  const message = (error as { body?: { message?: string }; message?: string } | undefined)
+  const text = message?.body?.message ?? message?.message
+  return typeof text === 'string' && /not\s*found/i.test(text) ? 404 : undefined
+}
+
+/**
+ * Whether a delete failed because the object was already gone. Only that is
+ * "done": any other failure (RBAC, API server, validation) is a real one the
+ * caller must hear about — a swallowed 403 is how a delete that did nothing
+ * looked exactly like a delete that worked.
+ */
+function isAlreadyGone(error: unknown): boolean {
+  return statusOf(error) === 404
+}
 
 export class K8sPodController implements PodController {
   constructor(
@@ -232,19 +264,37 @@ export class K8sPodController implements PodController {
     return { cpuCores, memoryBytes }
   }
 
+  /**
+   * Delete the workspace's pod and its headless service.
+   *
+   * Only "already gone" is tolerated: the platform treats a workspace's pod as
+   * the disposable half of it, and every caller of this method assumes the pod
+   * is really gone afterwards. Any other failure propagates so the caller (and
+   * the operator) learns the pod is still there.
+   */
   async deletePod(namespace: string, workspaceId: string): Promise<void> {
     const core = this.kc.makeApiClient(k8s.CoreV1Api)
     const name = this.podName(workspaceId)
     try {
       await core.deleteNamespacedPod({ name, namespace })
-    } catch {
-      // already gone
+    } catch (error) {
+      if (!isAlreadyGone(error)) throw error
     }
     try {
       await core.deleteNamespacedService({ name: this.svcName(workspaceId), namespace })
-    } catch {
-      // already gone
+    } catch (error) {
+      if (!isAlreadyGone(error)) throw error
     }
+  }
+
+  /** The sandbox-daemon container's image, or undefined when unreadable. */
+  async getPodImage(namespace: string, name: string): Promise<string | undefined> {
+    const core = this.kc.makeApiClient(k8s.CoreV1Api)
+    const raw = await core.readNamespacedPod({ name, namespace }) as unknown as { body?: k8s.V1Pod; spec?: k8s.V1PodSpec }
+    const pod = raw.body ?? (raw as unknown as k8s.V1Pod)
+    const containers = pod.spec?.containers ?? []
+    const daemon = containers.find((container) => container.name === 'sandbox-daemon') ?? containers[0]
+    return daemon?.image
   }
 
   async waitReady(namespace: string, name: string, timeoutMs = 180_000): Promise<void> {
@@ -301,13 +351,19 @@ export class K8sPodController implements PodController {
     throw new Error('workspace PVC namespace not configured')
   }
 
+  /**
+   * Delete the workspace's PVC — its durable data. Only "already gone" is
+   * tolerated; a real failure propagates, because a delete that leaves the
+   * volume behind is a delete the reconciler will undo (a PVC is what makes a
+   * workspace real) and the caller must not be told it succeeded.
+   */
   async deletePvc(workspaceId: string): Promise<void> {
     const ns = this.pvc.namespace ?? this.requireNamespace()
     const core = this.kc.makeApiClient(k8s.CoreV1Api)
     try {
       await core.deleteNamespacedPersistentVolumeClaim({ name: this.pvcName(workspaceId), namespace: ns })
-    } catch {
-      // already gone
+    } catch (error) {
+      if (!isAlreadyGone(error)) throw error
     }
   }
 }

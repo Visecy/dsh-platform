@@ -112,10 +112,31 @@ export class WorkspaceRuntimeService extends Service implements WorkspaceRuntime
     return this.getEndpoint(workspaceId)
   }
 
+  /**
+   * Tear the workspace's execution world down completely: its pod, its
+   * headless service and its PVC.
+   *
+   * This is the runtime's DISPOSE, not its sleep: `WorkspaceLifecycleManager`
+   * owns the sleep path (pod gone, PVC kept) and is the only caller that should
+   * ever want to keep a workspace's data. Removing only the pod here left the
+   * volume behind, and a surviving PVC is exactly what the reconciler treats as
+   * a real workspace — so the next pass re-registered the workspace the caller
+   * had just disposed of.
+   */
   async dispose(workspaceId: string): Promise<void> {
     await this.controller.deletePod(this.config.namespace, workspaceId)
+    await this.controller.deletePvc(workspaceId)
     this.running.delete(workspaceId)
     this.podIps.delete(workspaceId)
+  }
+
+  /**
+   * Whether an ensure for this workspace is in flight right now. The
+   * image-drift pass must not recycle a pod that is being created (it would
+   * undo the create or race its delete).
+   */
+  isEnsuring(workspaceId: string): boolean {
+    return this.inflight.has(workspaceId)
   }
 
   getEndpoint(workspaceId: string): string {
@@ -143,19 +164,29 @@ export function apply(ctx: Context, config: Config | undefined): void {
   // endpoint resolution for the fs/subprocess providers.
   // Sleep drain: stop accepting new work in the pod and force-terminate any
   // lingering commands. The daemon route already exists (commands.killAll).
+  /**
+   * Graceful drain before a pod goes away: stop accepting work, then force
+   * any lingering command to terminate.
+   *
+   * Bounded on purpose. The drain is politeness, the pod deletion behind it is
+   * the actual operation, and an unreachable daemon (DNS that never answers, a
+   * pod that is already half-dead) must not delay a sleep — or, with the grace
+   * timer expired, block the lifecycle action forever.
+   */
   const onBeforeSleep = async (endpoint: string): Promise<void> => {
     try {
       await fetch(`${endpoint}/commands/terminate-all`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ graceMs: 300 }),
+        signal: AbortSignal.timeout(2_000),
       })
     } catch {
       // The pod may already be gone; the delete path is idempotent.
     }
   }
 
-  const { resolveEndpoint, commandTracker, deleteWorkspace, attach, sleepWorkspace, status: workspaceStatus } = wireWorkspaceLifecycle(ctx, {
+  const { resolveEndpoint, commandTracker, deleteWorkspace, attach, sleepWorkspace, reconcileImages, status: workspaceStatus } = wireWorkspaceLifecycle(ctx, {
     lifecycle: {
       controller: runtime.podController,
       namespace: config.namespace,
@@ -166,6 +197,11 @@ export function apply(ctx: Context, config: Config | undefined): void {
       idleTimeoutMs: config.idleTimeoutMs,
       graceMs: config.graceMs,
       onBeforeSleep,
+      // Detached lifecycle actions (an idle sleep, a drift recycle, a lost pod)
+      // have no caller left to reject to; without a sink their failures were
+      // invisible, and the sink only exists since DSH 0.2 removed the last one.
+      logger: ctx.logger,
+      isEnsuring: (workspaceId) => runtime.isEnsuring(workspaceId),
     },
     runtime,
   })
@@ -229,9 +265,21 @@ export function apply(ctx: Context, config: Config | undefined): void {
     logger: ctx.logger,
   })
   ctx.provide('workspaceReconciler', { reconcile: () => reconciler.reconcile() })
+  /**
+   * Delete a workspace for real: the durable backing first (pod, service,
+   * PVC), the registry record only after it is gone.
+   *
+   * The order is the whole point. The reconciler re-registers every workspace
+   * a surviving PVC describes, so dropping the record first opens a window in
+   * which the next pass re-creates the workspace out of the volume that has
+   * not been deleted yet — "delete does nothing". With the volume gone there is
+   * nothing left to re-register, and a failure to delete it rejects instead of
+   * being swallowed, so the caller never reports a deletion that did not
+   * happen.
+   */
   const deleteWorkspaceAsync = async (workspaceId: string): Promise<void> => {
-    await registry.delete(workspaceId).catch(() => undefined)
-    deleteWorkspace(workspaceId)
+    await deleteWorkspace(workspaceId)
+    await registry.delete(workspaceId)
   }
   ctx.provide('workspaceDeleter', {
     delete: deleteWorkspaceAsync,
@@ -294,6 +342,13 @@ export function apply(ctx: Context, config: Config | undefined): void {
     // retries, and every step of the pass is idempotent.
     void reconciler.reconcile().catch((error: unknown) => {
       ctx.logger?.warn?.(`workspace reconcile pass failed: ${String(error)}`)
+    })
+    // Same cadence, same reason: converge running pods onto the configured
+    // daemon image. It is a separate pass because it must NOT share the
+    // registry pass's failure (a registry that cannot be listed must not stop
+    // the fleet from converging, and vice versa).
+    void reconcileImages().catch((error: unknown) => {
+      ctx.logger?.warn?.(`workspace image reconcile pass failed: ${String(error)}`)
     })
   }
   runReconcile()

@@ -56,6 +56,12 @@ export interface WorkspaceCatalogEntry {
   createdAt?: number
   wakeCount: number
   sleepCount: number
+  /**
+   * A running pod was observed on a daemon image the deployment no longer
+   * configures (see the lifecycle's image pass). Nothing is killed for it: the
+   * recycler waits until the workspace is idle.
+   */
+  recyclePending: boolean
   /** Absolute idle/grace deadlines for countdown display (null while active). */
   idleDeadlineAt?: number
   graceDeadlineAt?: number
@@ -83,7 +89,7 @@ export interface WorkspaceManagementOptions {
   /** Ensure the execution pod is running (wake a sleeping workspace). */
   ensureWorkspace: (workspaceId: string) => Promise<string>
   /** Manual sleep (user request): drain and delete the pod, keep the PVC. */
-  sleepWorkspace: (workspaceId: string) => void
+  sleepWorkspace: (workspaceId: string) => Promise<void>
 }
 
 export interface WorkspaceManagementService {
@@ -120,6 +126,8 @@ function eventText(type: string, idleMs: number, graceMs: number): string {
     case 'idle-started': return `空闲计时启动 · ${idleMin} 分钟后休眠`
     case 'grace-started': return `${graceH} 小时宽限开始 · 等待遗留命令`
     case 'sleep': return '工作区已休眠 · Pod 已回收'
+    case 'image-drift': return '执行 Pod 镜像漂移 · 空闲后回收'
+    case 'pod-recycled': return '执行 Pod 已回收 · 下次唤醒使用新镜像'
     case 'deleted': return '工作区已删除'
     default: return type
   }
@@ -202,18 +210,31 @@ export class WorkspaceManagement implements WorkspaceManagementService {
   }
 
   async sleep(workspaceId: string): Promise<void> {
-    this.opts.sleepWorkspace(workspaceId)
+    await this.opts.sleepWorkspace(workspaceId)
   }
 
+  /**
+   * Delete the workspace: its durable backing (pod, service, PVC) and then its
+   * registry record.
+   *
+   * The option owns both the order and the failure surface, because the order
+   * is what stops the reconciler from re-creating the workspace out of a
+   * surviving PVC, and a swallowed failure is what made a delete that did
+   * nothing indistinguishable from one that worked.
+   */
   async delete(workspaceId: string): Promise<void> {
-    await this.opts.registry.delete(workspaceId).catch(() => undefined)
     await this.opts.deleteWorkspace(workspaceId)
   }
 
+  /**
+   * Clean up a POD-ONLY resource: an orphan (a pod whose PVC never existed or
+   * is already gone) has no durable state to lose, so this deliberately does
+   * not touch a PVC. When one exists the workspace is real and the caller
+   * wants delete() — removing its data is the point of that call, not a side
+   * effect of tidying up.
+   */
   async cleanupOrphan(workspaceId: string): Promise<void> {
     const { controller, namespace } = this.opts
-    // Only pod-only resources are considered "orphans". If a PVC exists,
-    // the caller should use delete() so data is intentionally removed.
     await controller.deletePod(namespace, workspaceId)
   }
 
@@ -288,6 +309,7 @@ export class WorkspaceManagement implements WorkspaceManagementService {
       createdAt: state?.createdAt,
       wakeCount: state?.wakeCount ?? 0,
       sleepCount: state?.sleepCount ?? 0,
+      recyclePending: state?.recyclePending === true,
       idleDeadlineAt: state?.phase === 'running' && state.idleSince !== undefined && state.activeCommands === 0
         ? state.idleSince + this.idleMs
         : undefined,

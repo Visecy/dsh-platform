@@ -181,4 +181,57 @@ describe('state machine', () => {
     }
     expect(st.events.length).toBeLessThanOrEqual(50)
   })
+
+  // ── image drift ──────────────────────────────────────────────────────────
+  // A pod's image is applied when the pod is CREATED, so a running pod can be
+  // older than the configured WS_IMAGE. Recycling it is a pod replacement (the
+  // PVC stays), and it may only happen while nothing is running.
+
+  it('pod-image-drift on an idle running workspace recycles the pod', () => {
+    const t = transition(ws({ phase: 'running', provisioned: true }), { type: 'pod-image-drift' })
+    expect(t.action).toEqual({ kind: 'recycle' })
+    expect(t.state.phase).toBe('sleep')
+    expect(t.state.recyclePending).toBe(false)
+    expect(t.state.events.map((e) => e.type)).toEqual(['image-drift', 'pod-recycled'])
+  })
+
+  it('pod-image-drift while a session is live marks it pending instead', () => {
+    const t = transition(ws({ phase: 'running', provisioned: true, activeSessions: 1 }), { type: 'pod-image-drift' })
+    expect(t.action).toEqual({ kind: 'none' })
+    expect(t.state.phase).toBe('running')
+    expect(t.state.recyclePending).toBe(true)
+    expect(t.state.events.map((e) => e.type)).toEqual(['image-drift'])
+  })
+
+  it('pod-image-drift with a lingering command marks it pending instead', () => {
+    const t = transition(ws({ phase: 'running', provisioned: true, activeCommands: 1 }), { type: 'pod-image-drift' })
+    expect(t.action).toEqual({ kind: 'none' })
+    expect(t.state.recyclePending).toBe(true)
+  })
+
+  it('a pending recycle runs on the transition that ends the work', () => {
+    const pending = ws({ phase: 'running', provisioned: true, activeSessions: 1, recyclePending: true })
+    const stillBusy = transition(pending, { type: 'turn-ended' })
+    expect(stillBusy.action).toEqual({ kind: 'none' })
+    expect(stillBusy.state.recyclePending).toBe(true)
+
+    const done = transition({ ...pending, activeSessions: 0 }, { type: 'session-disposed' })
+    expect(done.action).toEqual({ kind: 'recycle' })
+    expect(done.state.phase).toBe('sleep')
+    expect(done.state.recyclePending).toBe(false)
+    expect(done.state.events.at(-1)?.type).toBe('pod-recycled')
+  })
+
+  it('a pending recycle is not triggered by the user coming back', () => {
+    const pending = ws({ phase: 'running', provisioned: true, recyclePending: true, idleSince: 1 })
+    const t = transition(pending, { type: 'user-attach' })
+    expect(t.action).toEqual({ kind: 'cancel-timers' })
+    expect(t.state.recyclePending).toBe(true)
+  })
+
+  it('workspace deletion wins over a pending recycle', () => {
+    const t = transition(ws({ phase: 'running', provisioned: true, recyclePending: true }), { type: 'dispose-requested' })
+    expect(t.action).toEqual({ kind: 'delete' })
+    expect(t.state.phase).toBe('deleted')
+  })
 })

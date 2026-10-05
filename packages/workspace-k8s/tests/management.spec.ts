@@ -12,6 +12,8 @@ class FakeController implements PodController {
   pods = new Set<string>()
   pvcs = new Set<string>()
   deletedPods: string[] = []
+  /** Every deletion, in order. */
+  order: string[] = []
   async ensurePod(spec: WorkspacePodSpec): Promise<string> { return spec.workspaceId }
   async deletePod(_ns: string, workspaceId: string): Promise<void> { this.deletedPods.push(workspaceId); this.pods.delete(workspaceId) }
   async waitReady(): Promise<void> {}
@@ -69,8 +71,18 @@ describe('WorkspaceManagement', () => {
       storageClassName: 'standard',
       storageSize: '10Gi',
       resources: { cpu: '2', memory: '4Gi' },
-      deleteWorkspace: async (id) => { await ctrl.deletePod('dsh', id) },
+      // Mirrors the wiring in src/index.ts: durable backing first, registry
+      // record last (see tests/workspace-delete.spec.ts for the end-to-end
+      // version over the real plugin).
+      deleteWorkspace: async (id) => {
+        ctrl.order.push(`pod:${id}`)
+        await ctrl.deletePod('dsh', id)
+        ctrl.order.push(`pvc:${id}`)
+        await ctrl.deletePvc(id)
+        await reg.delete(id)
+      },
       ensureWorkspace: async (id) => { ctrl.pods.add(id); ctrl.pvcs.add(id + '-data'); return 'endpoint' },
+      sleepWorkspace: async (id) => { await ctrl.deletePod('dsh', id) },
     })
   })
 
@@ -114,12 +126,33 @@ describe('WorkspaceManagement', () => {
     expect(rows.find((r) => r.workspaceId === 'ws-stale')?.phase).toBe('orphan')
   })
 
-  it('delete removes registry entry and pod', async () => {
+  it('delete removes the durable backing before the registry entry', async () => {
     reg.rows.push({ workspaceId: 'ws-del', path: `${root}/ws-del` })
     ctrl.pods.add('ws-del')
+    ctrl.pvcs.add('ws-del-data')
     await mgr.delete('ws-del')
-    expect(reg.deleted).toContain('ws-del')
     expect(ctrl.deletedPods).toContain('ws-del')
+    expect(ctrl.order).toEqual(['pod:ws-del', 'pvc:ws-del'])
+    expect(reg.deleted).toContain('ws-del')
+  })
+
+  it('delete surfaces a failure instead of reporting success', async () => {
+    reg.rows.push({ workspaceId: 'ws-stuck', path: `${root}/ws-stuck` })
+    ctrl.pods.add('ws-stuck')
+    ctrl.deletePvc = async () => { throw new Error('pvc is still in use') }
+    await expect(mgr.delete('ws-stuck')).rejects.toThrow('pvc is still in use')
+    // The record survives with the volume: dropping it here would only let the
+    // reconciler read the volume back and re-register the workspace.
+    expect(reg.deleted).toEqual([])
+  })
+
+  it('sleep keeps the PVC', async () => {
+    reg.rows.push({ workspaceId: 'ws-sleep3', path: `${root}/ws-sleep3` })
+    ctrl.pods.add('ws-sleep3')
+    ctrl.pvcs.add('ws-sleep3-data')
+    await mgr.sleep('ws-sleep3')
+    expect(ctrl.deletedPods).toContain('ws-sleep3')
+    expect(ctrl.pvcs.has('ws-sleep3-data')).toBe(true)
   })
 
   it('ensure wakes a sleeping workspace and populates pod/PVC state', async () => {
