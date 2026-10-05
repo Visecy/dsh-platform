@@ -8,6 +8,10 @@
  * - THIS plugin adds a keyed `main` panel plus its `sidebar.panellist` entry,
  *   showing the k8s side of a workspace: pod phase, metrics, and the
  *   wake/sleep/cleanup lifecycle actions.
+ * - THIS plugin also fills the two `directoryFlow` seats with the platform's
+ *   name-based "新建工作区" dialog. The official flow is driven by a directory
+ *   picker; here a workspace is created by NAME (`workspaceApi.create`), so the
+ *   seats render that dialog instead of a browser (see register.ts).
  *
  * Nothing here patches an official bundle, and nothing here has a user or a
  * permission concept: the panel reads `/workspaces/api/list` and dispatches
@@ -19,8 +23,11 @@
  * did not declare throws "cannot get property ... without inject", which once
  * aborted this whole apply and left every dependent client entry pending.
  */
-import { registerWorkspacePanel } from './register.ts'
+import { registerNewWorkspaceDialog, registerWorkspacePanel } from './register.ts'
 import { WorkspacePanelIcon, WorkspaceStatusPanel } from './panel.tsx'
+import { NewWorkspaceDialog } from './NewWorkspaceDialog.tsx'
+import { workspaceApi } from './api.ts'
+import { poll } from './store.ts'
 import { injectPanelStyles } from './styles.ts'
 
 /**
@@ -48,4 +55,12 @@ export function apply(ctx: ClientContext): void {
     Panel: WorkspaceStatusPanel,
     Icon: WorkspacePanelIcon,
   })
+
+  // Workspace creation is name-based: the record is created by NAME and the
+  // catalog is re-read so the new row is on screen when the dialog closes.
+  const createByName = async (name: string): Promise<void> => {
+    await workspaceApi.create(name)
+    await poll()
+  }
+  registerNewWorkspaceDialog(ctx.slots, NewWorkspaceDialog, () => ({ createByName }))
 }

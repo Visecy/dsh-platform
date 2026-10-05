@@ -137,6 +137,15 @@ function registerWorkspacePanel(slots, components) {
     label: () => WORKSPACE_PANEL_LABEL
   }, components.Icon));
 }
+var DIRECTORY_FLOW_SLOTS = [
+  "conversation.hero.workspace.directoryFlow",
+  "sidebar.workspaces.directoryFlow"
+];
+function registerNewWorkspaceDialog(slots, component, injected) {
+  for (const name of DIRECTORY_FLOW_SLOTS) {
+    slots.inject(name, () => slots.register({ name, priority: -100, inject: injected }, component));
+  }
+}
 
 // packages/workspace-k8s/src/client/panel.tsx
 var import_react = require("react");
@@ -291,6 +300,16 @@ var WORKSPACE_UI_CSS = `
 .dsh-wsd-btn.primary { background: var(--dsw-alias-button-primary-fill, #111); border-color: transparent; color: var(--dsw-alias-label-primary-foreground, #fff); }
 .dsh-wsd-btn.danger { color: var(--dsw-alias-state-error-primary, #ef4444); }
 .dsh-wsd-btn:disabled { opacity: .5; cursor: default; }
+
+/* \u2500\u2500 \u65B0\u5EFA\u5DE5\u4F5C\u533A Modal \u2500\u2500 */
+.dsh-ws-modal-overlay { position: fixed; inset: 0; background: var(--dsw-alias-bg-mask-1, rgba(0,0,0,.24)); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.dsh-ws-modal { width: 380px; background: var(--dsw-alias-bg-layer-3, #fff); border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.1)); border-radius: 12px; box-shadow: 0 16px 48px rgba(0,0,0,.2); padding: 20px; }
+.dsh-ws-modal h3 { margin: 0 0 8px; font-size: 15px; color: var(--dsw-alias-label-primary, #111); }
+.dsh-ws-modal-desc { margin: 0 0 14px; color: var(--dsw-alias-label-secondary, #666); font-size: 13px; }
+.dsh-ws-modal input { width: 100%; padding: 7px 9px; border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.1)); border-radius: 8px; font-size: 14px; background: var(--dsw-alias-button-elevated-fill, #fff); color: var(--dsw-alias-label-primary, #111); outline: none; }
+.dsh-ws-modal input:focus { border-color: var(--dsw-alias-brand-primary, #111); }
+.dsh-ws-modal-error { color: var(--dsw-alias-state-error-primary, #ef4444); font-size: 12px; margin: 8px 0 0; }
+.dsh-ws-modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 `;
 function injectPanelStyles() {
   if (typeof document === "undefined") return;
@@ -424,6 +443,65 @@ function WorkspacePanelIcon({ size = 16, active = false }) {
   }, (0, import_react.createElement)("span", { className: `dsh-wsb-dot ${phase}`, style: dot }));
 }
 
+// packages/workspace-k8s/src/client/NewWorkspaceDialog.tsx
+var import_react2 = require("react");
+function NewWorkspaceDialog(props) {
+  const { open, busy, onCancel, onError, createByName } = props;
+  const [name, setName] = (0, import_react2.useState)("");
+  const [error, setError] = (0, import_react2.useState)("");
+  (0, import_react2.useEffect)(() => {
+    if (open) {
+      setName("");
+      setError("");
+    }
+  }, [open]);
+  if (!open) return null;
+  const submit = async () => {
+    const value = name.trim();
+    if (value === "") return;
+    setError("");
+    try {
+      await createByName(value);
+      onCancel();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      onError?.(message);
+    }
+  };
+  return (0, import_react2.createElement)(
+    "div",
+    { className: "dsh-ws-modal-overlay", onClick: (e) => {
+      if (e.target === e.currentTarget) onCancel();
+    } },
+    (0, import_react2.createElement)(
+      "div",
+      { className: "dsh-ws-modal" },
+      (0, import_react2.createElement)("h3", null, "\u65B0\u5EFA\u5DE5\u4F5C\u533A"),
+      (0, import_react2.createElement)("p", { className: "dsh-ws-modal-desc" }, "\u8F93\u5165\u5DE5\u4F5C\u533A\u540D\u79F0\u3002\u521B\u5EFA\u540E\u4F1A\u51FA\u73B0\u5728\u4FA7\u8FB9\u680F\u5DE5\u4F5C\u533A\u7EC4\u4E2D\u3002"),
+      (0, import_react2.createElement)("label", { htmlFor: "dsh-ws-name" }, "\u5DE5\u4F5C\u533A\u540D\u79F0"),
+      (0, import_react2.createElement)("input", {
+        id: "dsh-ws-name",
+        placeholder: "\u4F8B\u5982\uFF1Amy-project",
+        autoFocus: true,
+        value: name,
+        disabled: busy,
+        onChange: (e) => setName(e.target.value),
+        onKeyDown: (e) => {
+          if (e.key === "Enter") void submit();
+        }
+      }),
+      error === "" ? null : (0, import_react2.createElement)("div", { className: "dsh-ws-modal-error" }, error),
+      (0, import_react2.createElement)(
+        "div",
+        { className: "dsh-ws-modal-footer" },
+        (0, import_react2.createElement)("button", { className: "dsh-ws-btn", onClick: onCancel, disabled: busy }, "\u53D6\u6D88"),
+        (0, import_react2.createElement)("button", { className: "dsh-ws-btn primary", onClick: () => void submit(), disabled: busy }, "\u521B\u5EFA")
+      )
+    )
+  );
+}
+
 // packages/workspace-k8s/src/client/index.tsx
 var inject = ["slots", "locale", "layout"];
 function apply(ctx) {
@@ -434,5 +512,10 @@ function apply(ctx) {
     Panel: WorkspaceStatusPanel,
     Icon: WorkspacePanelIcon
   });
+  const createByName = async (name) => {
+    await workspaceApi.create(name);
+    await poll();
+  };
+  registerNewWorkspaceDialog(ctx.slots, NewWorkspaceDialog, () => ({ createByName }));
 }
 return module.exports; } });

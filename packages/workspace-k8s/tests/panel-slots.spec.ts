@@ -115,9 +115,14 @@ describe('registerWorkspacePanel', () => {
   })
 
   it('ships no always-on floating pill rule that could overlap the brand mark', () => {
-    // The removed pill was the only fixed/absolute overlay this plugin ever
+    // The removed pill was the only ALWAYS-ON overlay this plugin ever
     // rendered; the panel and the sidebar glyph are laid out by their owners.
+    // The one fixed-position rule allowed from here on is the new-workspace
+    // dialog's mask, which exists only while its owner has the flow open (the
+    // dialog renders null while closed) and covers the frame on purpose.
     expect(WORKSPACE_UI_CSS).not.toContain('dsh-wsp-pill')
-    expect(WORKSPACE_UI_CSS).not.toMatch(/position:\s*fixed/)
+    const fixed = WORKSPACE_UI_CSS.split('\n').filter((line) => /position:\s*fixed/.test(line))
+    expect(fixed).toHaveLength(1)
+    expect(fixed[0]).toContain('.dsh-ws-modal-overlay')
   })
 })

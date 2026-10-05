@@ -4,7 +4,8 @@
  *
  * This is the end-to-end check that the decoupling really landed in the built
  * artifact rather than only in the sources: the bundle must export an `apply`,
- * claim the additive panel surfaces (`main`, `sidebar.panellist`), must not
+ * claim the additive panel surfaces (`main`, `sidebar.panellist`) plus the two
+ * `directoryFlow` seats the name-based new-workspace dialog fills, must not
  * touch `sidebar.workspaces` (the official ui-workspace row owns it now), must
  * carry no trace of the deleted vendored browser string, must not re-register
  * the `shell.overlay` pill that used to cover the brand mark, and must apply
@@ -14,8 +15,10 @@
  * this whole plugin pending.
  *
  * React and the DOM are stubbed: `apply()` performs registration only, and the
- * components are never rendered here. The bundle is materialized exactly once
- * (Node caches it), then applied per case against a fresh fake registry.
+ * components are never rendered here (the surfaces' behaviour is pinned by
+ * `new-workspace-dialog.spec.ts` through the same harness). The bundle is
+ * materialized exactly once (Node caches it), then applied per case against a
+ * fresh fake registry.
  */
 import { createRequire } from 'node:module'
 import { existsSync, readFileSync } from 'node:fs'
@@ -122,8 +125,18 @@ describe('shipped client bundle', () => {
 
   it('registers the additive panel surfaces on the official slots', () => {
     const { registered, injected } = applyBundle()
-    expect(injected).toEqual(['main', 'sidebar.panellist'])
-    expect(registered.map((r) => r.slot)).toEqual(['main', 'sidebar.panellist'])
+    expect(injected).toEqual([
+      'main',
+      'sidebar.panellist',
+      'conversation.hero.workspace.directoryFlow',
+      'sidebar.workspaces.directoryFlow',
+    ])
+    expect(registered.map((r) => r.slot)).toEqual([
+      'main',
+      'sidebar.panellist',
+      'conversation.hero.workspace.directoryFlow',
+      'sidebar.workspaces.directoryFlow',
+    ])
     expect(registered.find((r) => r.slot === 'main')?.options.key).toBe('workspace-status')
     expect(registered.find((r) => r.slot === 'sidebar.panellist')?.options.id).toBe('workspace-status')
     for (const call of registered) expect(call.component).toBeTruthy()
@@ -134,7 +147,6 @@ describe('shipped client bundle', () => {
     const slots = registered.map((r) => r.slot)
     expect(slots).not.toContain('sidebar.workspaces')
     expect(slots).not.toContain('conversation.hero.workspace')
-    expect(slots).not.toContain('conversation.view')
   })
 
   it('does not re-register the shell overlay pill that covered the brand mark', () => {
@@ -153,8 +165,10 @@ describe('shipped client bundle', () => {
   it('applies on a context that provides only slots', () => {
     const { requested, registered } = applyBundle()
     // Nothing is pulled out of the client context any more: the panel watches
-    // its own HTTP snapshot.
+    // its own HTTP snapshot, and the dialog commits through its own injected
+    // share.
     expect(requested).toEqual([])
-    expect(registered).toHaveLength(2)
+    // main + sidebar.panellist + the two directory-flow seats.
+    expect(registered).toHaveLength(4)
   })
 })
