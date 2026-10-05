@@ -37,17 +37,31 @@ class FakeController implements PodController {
   async listPvcs(): Promise<string[]> { this.listPvcsCalls += 1; return [...this.pvcs] }
 }
 
-/** A duck-typed official `ctx.workspaceRegistry` that records creation calls. */
+/**
+ * A duck-typed official `ctx.workspaceRegistry` that records creation calls.
+ *
+ * `create` is idempotent per canonical path and `list` returns what it
+ * committed, exactly like the official registry ("Repeated calls for the same
+ * canonical path return the existing entity"). A fake that always answered
+ * `list() === []` made this suite order-dependent: the load-time pass and the
+ * registry-appears retry are two racing passes, and which of them wins the
+ * bridge race is a filesystem-timing coin flip.
+ */
 class FakeRegistry extends Service {
   readonly created: string[] = []
+  private readonly rows: Array<{ id: string; path: string; title: string }> = []
   constructor(ctx: Context) {
     super(ctx, 'workspaceRegistry')
   }
   async create(path: string, title?: string) {
+    const existing = this.rows.find((row) => row.path === path)
+    if (existing !== undefined) return existing
     this.created.push(path)
-    return { id: `uuid-${path}`, path, title: title ?? path }
+    const row = { id: `uuid-${path}`, path, title: title ?? path }
+    this.rows.push(row)
+    return row
   }
-  list() { return [] }
+  list() { return [...this.rows] }
   async delete() { return true }
   async resolveByPath() { return undefined }
   async rebind() { return [] }
@@ -102,6 +116,9 @@ describe('workspace-k8s plugin load', () => {
 
     const registry = new FakeRegistry(ctx)
     await until(() => registry.created.length > 0)
+    // Registered exactly once: the idempotent fake turns "which pass won the
+    // bridge race" into a non-question, while a bridge that never ran still
+    // leaves this empty.
     expect(registry.created).toEqual([`${hostRoot}/ws-late`])
   })
 
