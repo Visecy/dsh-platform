@@ -149,4 +149,59 @@ describe('workspace endpoint resolution', () => {
       expect(ensured).toEqual(['ws-unknown'])
     })
   })
+
+  /**
+   * The same question, asked WITHOUT provisioning — the half the fs provider
+   * needs to answer a path that names no workspace.
+   *
+   * `resolveEndpoint` can only answer for a workspace: a path whose first
+   * segment is not one (`.git` under the workspace root, an ordinary directory
+   * someone created) has no pod, and refusing it at the resolver makes the
+   * refusal a platform failure that reaches the conversation. So the service
+   * also answers membership on its own, and the fs provider turns a positive
+   * "no such record" into its own precise, per-operation answer.
+   *
+   * The rule is the fence's rule, unchanged: only a POSITIVE "no such record"
+   * answers false; a listing that cannot be read is not an answer.
+   */
+  describe('membership, asked without provisioning', () => {
+    it('answers false only for a positive "no such record"', async () => {
+      const { wired } = harness(async (id) => id === 'ws-known')
+
+      expect(await wired.isWorkspace('ws-known')).toBe(true)
+      expect(await wired.isWorkspace('.git')).toBe(false)
+    })
+
+    it('creates nothing and reaches no lifecycle state while answering', async () => {
+      const { ensured, wired, status } = harness(async (id) => id === 'ws-known')
+
+      expect(await wired.isWorkspace('.git')).toBe(false)
+
+      expect(ensured).toEqual([])
+      expect(status.get('.git')).toBeUndefined()
+    })
+
+    it('answers true when the registry cannot be listed', async () => {
+      const { wired } = harness(async () => { throw new Error('registry unavailable') })
+
+      expect(await wired.isWorkspace('.git')).toBe(true)
+    })
+
+    it('answers true when the composition installs no registry bridge', async () => {
+      // No bridge means no notion of "registered": the old behaviour, and the
+      // provider must not invent a refusal the composition never asked for.
+      const { wired } = harness(undefined)
+
+      expect(await wired.isWorkspace('.git')).toBe(true)
+    })
+
+    it('agrees with the resolver, which is the same question asked for an id alone', async () => {
+      const { wired } = harness(async (id) => id === 'ws-known')
+
+      expect(await wired.isWorkspace('agents-local-md')).toBe(false)
+      await expect(wired.resolveEndpoint('agents-local-md')).rejects.toThrow(/agents-local-md/)
+      expect(await wired.isWorkspace('ws-known')).toBe(true)
+      await expect(wired.resolveEndpoint('ws-known')).resolves.toBe('http://pod')
+    })
+  })
 })

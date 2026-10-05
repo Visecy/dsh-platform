@@ -51,6 +51,22 @@ export interface Config {
   watchMaxIntervalMs?: number
 }
 
+/**
+ * The `workspaceEndpointResolver` service this provider consumes, read
+ * structurally (this package depends on no other platform package, and a
+ * static-endpoint composition supplies neither member).
+ *
+ * `WorkspaceEndpointResolver` in `@visecy/dsh-workspace-k8s` is the contract's
+ * home: `resolve` wakes a registered workspace (and refuses to materialize one
+ * that no record describes), `isWorkspace` answers membership alone, without
+ * provisioning and without throwing.
+ */
+interface WorkspaceEndpointService {
+  resolve?: (workspaceId: string) => Promise<string> | string
+  /** Fail-open membership test for a first path segment under the host root. */
+  isWorkspace?: (workspaceId: string) => Promise<boolean> | boolean
+}
+
 const BINARY_SAMPLE = 8192
 
 function isText(bytes: Uint8Array): boolean {
@@ -69,6 +85,12 @@ export class FsK8s extends FileSystem {
   private resolver: ((workspaceId: string) => Promise<string> | string) | undefined
   private watchIntervalMs: number
   private watchMaxIntervalMs: number
+  /**
+   * Paths already reported as outside every workspace. One line per path per
+   * process: a file view probing several such paths is one condition, not one
+   * line per operation (the same rule `degradedWatches` applies).
+   */
+  private reportedOutside = new Set<string>()
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
@@ -148,13 +170,73 @@ export class FsK8s extends FileSystem {
     return daemonPath.startsWith('/') ? root + daemonPath : `${root}/${daemonPath}`
   }
 
+  /**
+   * Resolve the daemon endpoint for one target.
+   *
+   * The workspace id is the first path segment under the host root, so this is
+   * also where "is this path even a workspace?" is decided — see the fence in
+   * the body.
+   */
   private async endpointFor(target: FsTarget): Promise<string> {
-    const resolver = this.resolver
-      ?? (this.ctx.get('workspaceEndpointResolver') as { resolve?: (id: string) => Promise<string> | string } | undefined)?.resolve
+    const service = this.ctx.get('workspaceEndpointResolver') as WorkspaceEndpointService | undefined
+    const resolver = this.resolver ?? service?.resolve
     if (resolver === undefined) return this.client.defaultEndpoint
     const ws = this.workspaceOf(target.displayPath)
     if (ws === undefined) return this.client.defaultEndpoint
+    // A workspace id is just the FIRST path segment under the host root, so a
+    // path that names no workspace — `.git` beside the anchors, a directory an
+    // agent created, anything under a session whose cwd is the root — must not
+    // be routed to a pod, and resolving it must never create one. The resolver
+    // refuses that creation case (correctly: `ensure` would raise a PVC and a
+    // pod for an id nobody registered), but its refusal is a platform-level
+    // failure, and a path beside the anchors is not an error the caller can act
+    // on. So the provider asks the membership question first and answers in its
+    // own terms: one precise line, no ensure, no pod, and the session goes on.
+    //
+    // Fail-open, exactly like the fence: only a POSITIVE "no such workspace"
+    // degrades, and a question that cannot be answered (an implementation that
+    // throws, a composition with no bridge at all) proceeds as it did before
+    // the fence existed.
+    if (service?.isWorkspace !== undefined) {
+      const known = await Promise.resolve(service.isWorkspace(ws)).catch(() => true)
+      if (!known) throw this.outsideEveryWorkspace(target.displayPath, ws)
+    }
     return resolver(ws)
+  }
+
+  /**
+   * The degradation for a path whose first segment is not a registered
+   * workspace.
+   *
+   * Why the operation is refused rather than served locally: the control plane
+   * is not a file world. Its `/workspaces` is an emptyDir of realpath anchors
+   * (`management.create` and the reconciler `mkdir` them), no workspace PVC is
+   * ever mounted on it, and with `WS_DAEMON_ENDPOINT` unset the static
+   * fallback (`http://127.0.0.1:4390`) has no listener — so serving these paths
+   * from here would present an empty, disconnected tree as if it were the
+   * user's files and swallow writes into a volume no pod can read. One precise
+   * line is the honest answer, and it costs the session nothing.
+   */
+  private outsideEveryWorkspace(displayPath: string, workspaceId: string): FsError {
+    const root = this.translate.hostRoot
+    if (!this.reportedOutside.has(displayPath)) {
+      this.reportedOutside.add(displayPath)
+      try {
+        this.ctx.logger?.warn?.(
+          `fs-k8s: ${displayPath} is outside every workspace of this platform `
+          + `('${workspaceId}' is not registered under ${root}); no pod or volume was created for it`,
+        )
+      } catch {
+        // A broken log sink must not replace the caller's precise answer with a
+        // logging failure.
+      }
+    }
+    return new FsError(
+      `${displayPath} is not inside a workspace of this platform: no workspace named '${workspaceId}' is registered under ${root}, `
+      + `so no pod or volume was created for it and the control plane keeps no copy of that path; `
+      + `use a path under ${root}/<workspace-id>`,
+      'FS_NOT_FOUND',
+    )
   }
 
   private asFsError(e: unknown): FsError {

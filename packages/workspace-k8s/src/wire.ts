@@ -4,8 +4,7 @@
  * boundaries), feeds the SessionTracker -> LifecycleManager state machine,
  * and exposes the per-workspace endpoint resolver that the fs-k8s /
  * subprocess-k8s providers call on every operation.
- */
-import { Context } from '@deepseek-ai/cordis'
+ */import { Context } from '@deepseek-ai/cordis'
 import { SessionTracker } from './session-tracker.ts'
 import { WorkspaceLifecycleManager, type ImageReconcileResult, type LifecycleOptions } from './lifecycle-manager.ts'
 import type { WorkspaceState } from './state-machine.ts'
@@ -25,6 +24,11 @@ export interface WireOptions {
    * record the operator never asked for. That is how a workspace appears out of
    * nowhere.
    *
+   * It is read by BOTH halves of that rule: the membership question the fs
+   * provider asks before routing a path (`isWorkspace` below), and the
+   * resolver's own refusal of the creation case for callers that hold nothing
+   * but an id (subprocess-k8s).
+   *
    * Only a POSITIVE "no such record" refuses the operation. A checker that
    * cannot answer — the registry is briefly unlistable — must not take the file
    * view down with it, so the caller's rejection is treated as unknown and the
@@ -40,6 +44,27 @@ export interface WireOptions {
 export interface CommandActivityTracker {
   commandStarted(workspaceId: string): void
   commandEnded(workspaceId: string): void
+}
+
+/**
+ * The `workspaceEndpointResolver` service this wiring provides, as its
+ * consumers see it (`@visecy/dsh-fs-k8s`, `@visecy/dsh-subprocess-k8s`; both
+ * read it structurally, with no dependency on this package).
+ *
+ * Two questions, deliberately separate:
+ *  - `isWorkspace(id)` — membership alone. Non-throwing (fail-open), no
+ *    provisioning, cheap. The fs provider asks it before routing a path, so a
+ *    path that names no workspace is answered in the provider's own terms
+ *    instead of surfacing as a resolver failure.
+ *  - `resolve(id)` — the endpoint of a workspace, waking it if needed. Refuses
+ *    an id no record describes: that is the creation case, and it is the only
+ *    thing the fence refuses. A caller holding nothing but an id
+ *    (subprocess-k8s) has no other way to ask, which is why the refusal lives
+ *    here as well as in the membership answer.
+ */
+export interface WorkspaceEndpointResolver {
+  resolve(workspaceId: string): Promise<string>
+  isWorkspace(workspaceId: string): Promise<boolean>
 }
 
 type EventBus = {
@@ -74,6 +99,7 @@ export interface WorkspaceStatusService {
 
 export function wireWorkspaceLifecycle(ctx: Context & EventBus, opts: WireOptions): {
   resolveEndpoint: (workspaceId: string) => Promise<string>
+  isWorkspace: (workspaceId: string) => Promise<boolean>
   commandTracker: CommandActivityTracker
   deleteWorkspace: (workspaceId: string) => Promise<void>
   attach: (workspaceId: string) => void
@@ -109,18 +135,42 @@ export function wireWorkspaceLifecycle(ctx: Context & EventBus, opts: WireOption
   )
   void tracker
 
+  /**
+   * "Is this id a workspace of this platform?" — the fence's question, asked
+   * WITHOUT provisioning anything.
+   *
+   * The providers need it as a question of its own, not as a failure of
+   * `resolveEndpoint`. A workspace id is just the first path segment under the
+   * host root, so every ordinary path beside the workspace anchors — `.git`, a
+   * directory an agent created, any file in a session whose cwd is the root —
+   * produces an id that names no workspace. Those paths are not errors and
+   * must not surface as platform failures; what must not happen is that
+   * resolving one CREATES a workspace. Answering membership separately lets
+   * fs-k8s refuse the creation while answering the operation in its own terms
+   * (`see FsK8s.endpointFor`), and leaves `resolveEndpoint` — the only entry
+   * point a caller with nothing but an id has, i.e. `@visecy/dsh-subprocess-k8s`
+   * — refusing exactly the creation case.
+   *
+   * Fail-open, like the fence: only a POSITIVE "no such record" answers false.
+   * A composition with no registry bridge has no notion of "registered" and
+   * answers true; a listing that fails is not an answer either, so it answers
+   * true and the caller proceeds as it did before the fence existed.
+   */
+  const isWorkspace = async (workspaceId: string): Promise<boolean> => {
+    if (opts.knownWorkspace === undefined) return true
+    return opts.knownWorkspace(workspaceId).catch(() => true)
+  }
+
   return {
+    isWorkspace,
     resolveEndpoint: async (workspaceId: string): Promise<string> => {
       // A path is not a workspace. Refuse to materialize one that no record
       // describes, before anything creates a PVC or a pod for it.
-      if (opts.knownWorkspace !== undefined) {
-        const known = await opts.knownWorkspace(workspaceId).catch(() => true)
-        if (!known) {
-          throw new Error(
-            `workspaceEndpointResolver: '${workspaceId}' is not a registered workspace of this platform, `
-            + 'so no pod or volume will be created for it; the path names an ordinary directory under the workspace root',
-          )
-        }
+      if (!(await isWorkspace(workspaceId))) {
+        throw new Error(
+          `workspaceEndpointResolver: '${workspaceId}' is not a registered workspace of this platform, `
+          + 'so no pod or volume will be created for it; the path names an ordinary directory under the workspace root',
+        )
       }
       // ensure creates the pod if absent; getEndpoint returns the stable DNS.
       await opts.runtime.ensure(workspaceId)

@@ -14,7 +14,7 @@ import { WorkspaceMetricsSampler } from './metrics.ts'
 import { HostWorkspaceRegistry } from './registry.ts'
 import { WorkspaceRecordDeletions } from './record-deletions.ts'
 import { WorkspaceReconciler, type SessionHeaderSource } from './reconciler.ts'
-import { wireWorkspaceLifecycle } from './wire.ts'
+import { wireWorkspaceLifecycle, type WorkspaceEndpointResolver } from './wire.ts'
 
 export const name = '@visecy/dsh-workspace-k8s'
 
@@ -203,7 +203,7 @@ export function apply(ctx: Context, config: Config | undefined): void {
     hostRoot,
   )
 
-  const { resolveEndpoint, commandTracker, deleteWorkspace, attach, sleepWorkspace, reconcileImages, status: workspaceStatus } = wireWorkspaceLifecycle(ctx, {
+  const { resolveEndpoint, isWorkspace, commandTracker, deleteWorkspace, attach, sleepWorkspace, reconcileImages, status: workspaceStatus } = wireWorkspaceLifecycle(ctx, {
     lifecycle: {
       controller: runtime.podController,
       namespace: config.namespace,
@@ -227,7 +227,10 @@ export function apply(ctx: Context, config: Config | undefined): void {
     // not gate the file view on the registry being up.
     knownWorkspace: async (workspaceId) => (await registry.list()).some((ws) => ws.workspaceId === workspaceId),
   })
-  ctx.provide('workspaceEndpointResolver', { resolve: resolveEndpoint })
+  // Both halves of the fence are published: `resolve` refuses the creation
+  // case, `isWorkspace` lets fs-k8s answer a path that names no workspace in
+  // its own terms instead of letting that refusal reach the conversation.
+  ctx.provide('workspaceEndpointResolver', { resolve: resolveEndpoint, isWorkspace } satisfies WorkspaceEndpointResolver)
   ctx.provide('workspaceCommandTracker', commandTracker)
   ctx.provide('workspaceStatus', workspaceStatus)
 

@@ -25,6 +25,7 @@ import { mkdtemp, rm, writeFile, readFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { startDaemon } from '@visecy/dsh-sandbox-daemon'
 import { Context } from '@deepseek-ai/cordis'
+import { FsError } from '@deepseek-ai/dsh-fs'
 import { FsK8s } from '../src/index.ts'
 
 /** The host root AND the pod root the deployment configures. */
@@ -110,5 +111,65 @@ describe('deployment path layout (daemon root == /workspaces/<id>)', () => {
     expect(calls.length).toBeGreaterThan(0)
     expect(calls[0]).toBeUndefined()
     await close()
+  })
+})
+
+/**
+ * The same deployment layout, now with the per-workspace resolver the profile
+ * mounts (`workspaceEndpointResolver`) — i.e. the routing a live fs operation
+ * actually takes, and the fence that routing has to keep.
+ *
+ * Two paths sit one directory apart and must be answered in completely
+ * different ways:
+ *
+ *   - `.git/HEAD` resolved from the WORKSPACE (`/workspaces/ws-a`) is inside a
+ *     registered workspace: the resolver is asked, the workspace's pod serves
+ *     it, and a dotfile in a nested directory is an ordinary file.
+ *   - `.git/HEAD` resolved from the ROOT (`/workspaces`) has `.git` as its
+ *     first segment, which names no workspace: the resolver must NOT be asked
+ *     (that is the call that would create a PVC and a pod), and the operation
+ *     answers with one line instead of a platform failure.
+ */
+describe('deployment routing with the platform resolver mounted', () => {
+  let fenced: FsK8s
+  const resolved: string[] = []
+
+  beforeAll(() => {
+    const ctx = new Context()
+    ctx.provide('workspaceEndpointResolver', {
+      resolve: (workspaceId: string): string => {
+        resolved.push(workspaceId)
+        return daemonUrl
+      },
+      isWorkspace: async (workspaceId: string): Promise<boolean> => workspaceId === WORKSPACE,
+    })
+    fenced = new FsK8s(ctx, { daemonEndpoint: daemonUrl, hostRoot: ROOT, podRoot: ROOT })
+  })
+
+  it('serves a dotfile nested inside the registered workspace', async () => {
+    await mkdir(join(workspaceDir, '.git'), { recursive: true })
+    await writeFile(join(workspaceDir, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+
+    const target = await fenced.resolve('.git/HEAD', { cwd: WS_ROOT })
+
+    expect(await fenced.readText(target)).toBe('ref: refs/heads/main\n')
+    expect((await fenced.stat(target))?.size).toBe(21)
+    // Every routing decision went to the workspace that owns the path — never
+    // to '.git', which is not a workspace and must not be ensured as one.
+    expect(resolved).toEqual([WORKSPACE, WORKSPACE])
+  })
+
+  it("degrades '.git' from the workspace root without asking the resolver", async () => {
+    const target = await fenced.resolve('.git/HEAD', { cwd: ROOT })
+
+    const error = await fenced.readText(target).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(FsError)
+    expect((error as FsError).message).toContain(`${ROOT}/.git/HEAD`)
+    expect((error as FsError).message).not.toContain('\n')
+    // The resolver was not asked again: resolving the root-relative `.git`
+    // would have been the ensure that materializes it.
+    expect(resolved).not.toContain('.git')
+    expect(resolved).toEqual([WORKSPACE, WORKSPACE])
   })
 })
