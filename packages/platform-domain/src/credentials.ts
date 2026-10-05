@@ -69,6 +69,7 @@
  * @module @visecy/dsh-platform-domain/credentials
  */
 import { Context, Service } from '@deepseek-ai/cordis'
+import { DomainError } from '@deepseek-ai/dsh-storage-domain'
 
 /** The launcher's environment snapshot slot (`@deepseek-ai/dsh-launch-environment`). */
 interface LaunchEnvironmentEntry {
@@ -212,19 +213,36 @@ function referenceOf(key: string): string | undefined {
  * with another writer in this process — which is what makes `modifyRecord`'s
  * rotation safe. (The deployment runs one control-plane replica; the row itself
  * is written through the domain's own durable write chain.)
+ *
+ * # Serving contract
+ *
+ * A caller is never handed a domain this store cannot use. Every table access
+ * goes through {@link read} / {@link write}, which refuse — with the store's own
+ * error, logged once — as soon as the store is disposed or a closed domain is
+ * observed, instead of letting the domain layer's
+ * `DomainError: domain 'platform_credentials' is closed` escape. That message
+ * names no operation and describes the provider's internals; in v0.1.83 it was
+ * what a consumer logged at boot, and the composition could not become ready.
+ * A failure the medium itself reports (an unreachable database, a rejected
+ * durable write) is logged and passed through unchanged, so the caller's request
+ * fails with the real cause rather than a wrapper that hides it.
  */
 export class CredentialStore extends Service {
   /** Tail of the write queue; see the class doc. */
   private tail: Promise<unknown> = Promise.resolve()
-  /** Set at disposal: refuse new writes instead of writing into a closed domain. */
+  /**
+   * Set at disposal, and when a closed domain is observed: the store refuses
+   * from here on instead of writing into a domain that is gone.
+   */
   private closed = false
+  /**
+   * Set once a serving failure has been reported. The refused state is terminal
+   * for this store, so a caller that retries cannot flood the pod log.
+   */
+  private reported = false
 
   constructor(ctx: Context, private readonly domains: CredentialDomains) {
     super(ctx, 'credentials')
-  }
-
-  private table(): CredentialTable {
-    return this.domains.credentials.table('credentials')
   }
 
   /** Queue one exclusive write behind every earlier one. */
@@ -234,8 +252,67 @@ export class CredentialStore extends Service {
     return task
   }
 
-  private assertWritable(what: string): void {
-    if (this.closed) throw new Error(`credentials: the platform credential store is disposed; cannot write ${what}`)
+  /**
+   * The store's own refusal, naming the operation that could not be served.
+   * @param what - the reference, record or read being served.
+   * @param cause - the underlying failure, kept for the log and for debugging.
+   * @returns the error to throw at the caller.
+   */
+  private refuse(what: string, cause?: unknown): Error {
+    return new Error(
+      `credentials: the platform credential store is disposed; cannot serve ${what}`,
+      cause === undefined ? undefined : { cause },
+    )
+  }
+
+  /** Report, once per store, that a request could not be served. */
+  private report(what: string, error: unknown): void {
+    if (this.reported) return
+    this.reported = true
+    this.ctx.logger.error(`credentials: the platform credential store could not serve ${what}; this request fails: ${String(error)}`)
+  }
+
+  /** Refuse before touching the medium once this store has stopped serving. */
+  private assertServeable(what: string): void {
+    if (!this.closed) return
+    this.report(what, 'the store is disposed')
+    throw this.refuse(what)
+  }
+
+  /**
+   * Translate a failure raised while serving.
+   * @param what - the operation being served.
+   * @param error - what the domain layer or the medium raised.
+   * @returns the error to throw: the store's refusal for a closed domain (which
+   * also stops the store), the original error otherwise.
+   */
+  private failed(what: string, error: unknown): Error {
+    this.report(what, error)
+    const closed = error instanceof DomainError
+      || (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'closed')
+    if (!closed) return error instanceof Error ? error : new Error(String(error))
+    this.closed = true
+    return this.refuse(what, error)
+  }
+
+  /** One read from the declared table; see the class doc for the contract. */
+  private read<T>(what: string, operation: (table: CredentialTable) => T): T {
+    this.assertServeable(what)
+    try {
+      return operation(this.domains.credentials.table('credentials'))
+    } catch (error) {
+      throw this.failed(what, error)
+    }
+  }
+
+  /** One durable write, under the same contract as {@link read}. */
+  private async write<T>(what: string, operation: (table: CredentialTable) => Promise<T>): Promise<T> {
+    this.assertServeable(what)
+    try {
+      return await operation(this.domains.credentials.table('credentials'))
+    } catch (error) {
+      throw this.failed(what, error)
+    }
   }
 
   /** The launcher's environment snapshot, when this composition has one. */
@@ -265,7 +342,7 @@ export class CredentialStore extends Service {
 
   /** The stored value of one reference, or undefined while absent. */
   private stored(ref: string): string | undefined {
-    const row = this.table().get(REFERENCE_PREFIX + ref)
+    const row = this.read(`"${ref}"`, (table) => table.get(REFERENCE_PREFIX + ref))
     const value = row?.payload.value
     // An empty stored value is absent everywhere: a blank must never read as a
     // configured secret (the seam's one rule for this half).
@@ -292,20 +369,20 @@ export class CredentialStore extends Service {
   async set(ref: string, value: string): Promise<void> {
     assertReferenceName(ref)
     if (value.length === 0) throw new Error(`credentials: an empty value cannot be stored for "${ref}"; use unset`)
-    this.assertWritable(`"${ref}"`)
+    this.assertServeable(`"${ref}"`)
     // A write the inherited environment would shadow must refuse, not appear to
     // succeed while resolution keeps returning the environment's value.
     if (this.inherited(ref) !== undefined) {
       throw new Error(`credentials: "${ref}" is supplied read-only by the launching environment, so a write would be shadowed; unset it in the environment this process was started with instead`)
     }
     await this.enqueue(async () => {
-      await this.table().put(REFERENCE_PREFIX + ref, {
+      await this.write(`"${ref}"`, (table) => table.put(REFERENCE_PREFIX + ref, {
         userId: PLATFORM_CREDENTIAL_OWNER,
         scope: REFERENCE_SCOPE,
         id: ref,
         kind: 'api-key',
         payload: { value },
-      })
+      }))
       this.notifyUpdated(ref)
     })
   }
@@ -313,15 +390,15 @@ export class CredentialStore extends Service {
   /** Remove one reference from the store; removing an absent one writes nothing. */
   async unset(ref: string): Promise<void> {
     assertReferenceName(ref)
-    this.assertWritable(`"${ref}"`)
+    this.assertServeable(`"${ref}"`)
     if (this.inherited(ref) !== undefined) {
       throw new Error(`credentials: "${ref}" is supplied read-only by the launching environment, so removing the stored value would be shadowed; unset it in the environment this process was started with instead`)
     }
     await this.enqueue(async () => {
       // Absence is checked before the write so an unset of something never
       // stored costs no durable operation and emits nothing at all.
-      if (this.table().get(REFERENCE_PREFIX + ref) === undefined) return
-      await this.table().delete(REFERENCE_PREFIX + ref)
+      if (this.read(`"${ref}"`, (table) => table.get(REFERENCE_PREFIX + ref)) === undefined) return
+      await this.write(`"${ref}"`, (table) => table.delete(REFERENCE_PREFIX + ref))
       this.notifyUpdated(ref)
     })
   }
@@ -343,7 +420,7 @@ export class CredentialStore extends Service {
   /** Every stored record's address and tag. */
   async listRecords(): Promise<readonly CredentialRecordEntry[]> {
     const entries: CredentialRecordEntry[] = []
-    for (const [key, row] of this.table().entries()) {
+    for (const [key, row] of this.read('the stored records', (table) => [...table.entries()])) {
       if (referenceOf(key) !== undefined) continue
       entries.push({ key, kind: row.kind })
     }
@@ -360,19 +437,19 @@ export class CredentialStore extends Service {
     mutate: (current: CredentialRecord | undefined) => Promise<CredentialRecord | undefined>,
   ): Promise<CredentialRecord | undefined> {
     splitKey(key)
-    this.assertWritable(`record "${key}"`)
+    this.assertServeable(`record "${key}"`)
     return this.enqueue(async () => {
       const current = this.recordRow(key)?.payload.record as CredentialRecord | undefined
       const next = await mutate(current)
       if (next === undefined) return current
       this.assertStorable(key, next)
-      await this.table().put(key, {
+      await this.write(`record "${key}"`, (table) => table.put(key, {
         userId: PLATFORM_CREDENTIAL_OWNER,
         scope: splitKey(key).scope,
         id: splitKey(key).id,
         kind: next.kind,
         payload: { record: next },
-      })
+      }))
       this.notifyRecordUpdated(key)
       return next
     })
@@ -381,9 +458,9 @@ export class CredentialStore extends Service {
   /** Remove one record; removing an absent one is a no-op. */
   async deleteRecord(key: string): Promise<void> {
     splitKey(key)
-    this.assertWritable(`record "${key}"`)
+    this.assertServeable(`record "${key}"`)
     await this.enqueue(async () => {
-      const removed = await this.table().delete(key)
+      const removed = await this.write(`record "${key}"`, (table) => table.delete(key))
       if (removed) this.notifyRecordUpdated(key)
     })
   }
@@ -391,7 +468,7 @@ export class CredentialStore extends Service {
   /** The stored row of one record, or undefined. */
   private recordRow(key: string): CredentialRow | undefined {
     splitKey(key)
-    return this.table().get(key)
+    return this.read(`record "${key}"`, (table) => table.get(key))
   }
 
   /**

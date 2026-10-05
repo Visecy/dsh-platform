@@ -5,6 +5,7 @@ import { z } from "zod";
 
 // src/credentials.ts
 import { Service } from "@deepseek-ai/cordis";
+import { DomainError } from "@deepseek-ai/dsh-storage-domain";
 var PLATFORM_CREDENTIAL_OWNER = "platform";
 var REFERENCE_SCOPE = "ref";
 var REFERENCE_PREFIX = "ref:";
@@ -49,19 +50,77 @@ var CredentialStore = class extends Service {
   domains;
   /** Tail of the write queue; see the class doc. */
   tail = Promise.resolve();
-  /** Set at disposal: refuse new writes instead of writing into a closed domain. */
+  /**
+   * Set at disposal, and when a closed domain is observed: the store refuses
+   * from here on instead of writing into a domain that is gone.
+   */
   closed = false;
-  table() {
-    return this.domains.credentials.table("credentials");
-  }
+  /**
+   * Set once a serving failure has been reported. The refused state is terminal
+   * for this store, so a caller that retries cannot flood the pod log.
+   */
+  reported = false;
   /** Queue one exclusive write behind every earlier one. */
   enqueue(operation) {
     const task = this.tail.then(operation);
     this.tail = task.then(() => void 0, () => void 0);
     return task;
   }
-  assertWritable(what) {
-    if (this.closed) throw new Error(`credentials: the platform credential store is disposed; cannot write ${what}`);
+  /**
+   * The store's own refusal, naming the operation that could not be served.
+   * @param what - the reference, record or read being served.
+   * @param cause - the underlying failure, kept for the log and for debugging.
+   * @returns the error to throw at the caller.
+   */
+  refuse(what, cause) {
+    return new Error(
+      `credentials: the platform credential store is disposed; cannot serve ${what}`,
+      cause === void 0 ? void 0 : { cause }
+    );
+  }
+  /** Report, once per store, that a request could not be served. */
+  report(what, error) {
+    if (this.reported) return;
+    this.reported = true;
+    this.ctx.logger.error(`credentials: the platform credential store could not serve ${what}; this request fails: ${String(error)}`);
+  }
+  /** Refuse before touching the medium once this store has stopped serving. */
+  assertServeable(what) {
+    if (!this.closed) return;
+    this.report(what, "the store is disposed");
+    throw this.refuse(what);
+  }
+  /**
+   * Translate a failure raised while serving.
+   * @param what - the operation being served.
+   * @param error - what the domain layer or the medium raised.
+   * @returns the error to throw: the store's refusal for a closed domain (which
+   * also stops the store), the original error otherwise.
+   */
+  failed(what, error) {
+    this.report(what, error);
+    const closed = error instanceof DomainError || typeof error === "object" && error !== null && error.code === "closed";
+    if (!closed) return error instanceof Error ? error : new Error(String(error));
+    this.closed = true;
+    return this.refuse(what, error);
+  }
+  /** One read from the declared table; see the class doc for the contract. */
+  read(what, operation) {
+    this.assertServeable(what);
+    try {
+      return operation(this.domains.credentials.table("credentials"));
+    } catch (error) {
+      throw this.failed(what, error);
+    }
+  }
+  /** One durable write, under the same contract as {@link read}. */
+  async write(what, operation) {
+    this.assertServeable(what);
+    try {
+      return await operation(this.domains.credentials.table("credentials"));
+    } catch (error) {
+      throw this.failed(what, error);
+    }
   }
   /** The launcher's environment snapshot, when this composition has one. */
   environment() {
@@ -84,7 +143,7 @@ var CredentialStore = class extends Service {
   }
   /** The stored value of one reference, or undefined while absent. */
   stored(ref) {
-    const row = this.table().get(REFERENCE_PREFIX + ref);
+    const row = this.read(`"${ref}"`, (table) => table.get(REFERENCE_PREFIX + ref));
     const value = row?.payload.value;
     return typeof value === "string" && value.length > 0 ? value : void 0;
   }
@@ -104,31 +163,31 @@ var CredentialStore = class extends Service {
   async set(ref, value) {
     assertReferenceName(ref);
     if (value.length === 0) throw new Error(`credentials: an empty value cannot be stored for "${ref}"; use unset`);
-    this.assertWritable(`"${ref}"`);
+    this.assertServeable(`"${ref}"`);
     if (this.inherited(ref) !== void 0) {
       throw new Error(`credentials: "${ref}" is supplied read-only by the launching environment, so a write would be shadowed; unset it in the environment this process was started with instead`);
     }
     await this.enqueue(async () => {
-      await this.table().put(REFERENCE_PREFIX + ref, {
+      await this.write(`"${ref}"`, (table) => table.put(REFERENCE_PREFIX + ref, {
         userId: PLATFORM_CREDENTIAL_OWNER,
         scope: REFERENCE_SCOPE,
         id: ref,
         kind: "api-key",
         payload: { value }
-      });
+      }));
       this.notifyUpdated(ref);
     });
   }
   /** Remove one reference from the store; removing an absent one writes nothing. */
   async unset(ref) {
     assertReferenceName(ref);
-    this.assertWritable(`"${ref}"`);
+    this.assertServeable(`"${ref}"`);
     if (this.inherited(ref) !== void 0) {
       throw new Error(`credentials: "${ref}" is supplied read-only by the launching environment, so removing the stored value would be shadowed; unset it in the environment this process was started with instead`);
     }
     await this.enqueue(async () => {
-      if (this.table().get(REFERENCE_PREFIX + ref) === void 0) return;
-      await this.table().delete(REFERENCE_PREFIX + ref);
+      if (this.read(`"${ref}"`, (table) => table.get(REFERENCE_PREFIX + ref)) === void 0) return;
+      await this.write(`"${ref}"`, (table) => table.delete(REFERENCE_PREFIX + ref));
       this.notifyUpdated(ref);
     });
   }
@@ -147,7 +206,7 @@ var CredentialStore = class extends Service {
   /** Every stored record's address and tag. */
   async listRecords() {
     const entries = [];
-    for (const [key, row] of this.table().entries()) {
+    for (const [key, row] of this.read("the stored records", (table) => [...table.entries()])) {
       if (referenceOf(key) !== void 0) continue;
       entries.push({ key, kind: row.kind });
     }
@@ -160,19 +219,19 @@ var CredentialStore = class extends Service {
    */
   async modifyRecord(key, mutate) {
     splitKey(key);
-    this.assertWritable(`record "${key}"`);
+    this.assertServeable(`record "${key}"`);
     return this.enqueue(async () => {
       const current = this.recordRow(key)?.payload.record;
       const next = await mutate(current);
       if (next === void 0) return current;
       this.assertStorable(key, next);
-      await this.table().put(key, {
+      await this.write(`record "${key}"`, (table) => table.put(key, {
         userId: PLATFORM_CREDENTIAL_OWNER,
         scope: splitKey(key).scope,
         id: splitKey(key).id,
         kind: next.kind,
         payload: { record: next }
-      });
+      }));
       this.notifyRecordUpdated(key);
       return next;
     });
@@ -180,16 +239,16 @@ var CredentialStore = class extends Service {
   /** Remove one record; removing an absent one is a no-op. */
   async deleteRecord(key) {
     splitKey(key);
-    this.assertWritable(`record "${key}"`);
+    this.assertServeable(`record "${key}"`);
     await this.enqueue(async () => {
-      const removed = await this.table().delete(key);
+      const removed = await this.write(`record "${key}"`, (table) => table.delete(key));
       if (removed) this.notifyRecordUpdated(key);
     });
   }
   /** The stored row of one record, or undefined. */
   recordRow(key) {
     splitKey(key);
-    return this.table().get(key);
+    return this.read(`record "${key}"`, (table) => table.get(key));
   }
   /**
    * Refuse a record the read path could not admit, before it is written: an
@@ -283,16 +342,16 @@ var credentialsDomain = defineDomain({
 });
 async function apply(ctx, config = {}) {
   const backendName = config.backend ?? "sqlite";
-  await ctx.inject([storageBackendServiceKey(backendName)], async () => {
-    const facility = new DomainFacility(ctx, { backend: backendName });
+  await ctx.inject([storageBackendServiceKey(backendName)], async (ready) => {
+    const facility = new DomainFacility(ready, { backend: backendName });
     const workspaces = await facility.open(workspacesDomain);
     const users = await facility.open(usersDomain);
     const settings = await facility.open(settingsDomain);
     const credentials = await facility.open(credentialsDomain);
     const domains = { workspaces, users, settings, credentials };
-    ctx.provide("platformDomains", domains);
-    const credentialStore = new CredentialStore(ctx, domains);
-    ctx.effect(async () => {
+    ready.provide("platformDomains", domains);
+    const credentialStore = new CredentialStore(ready, domains);
+    ready.effect(() => async () => {
       await credentialStore.dispose();
       await Promise.all([workspaces.close(), users.close(), settings.close(), credentials.close()]);
     }, "@visecy/dsh-platform-domain");

@@ -114,20 +114,42 @@ export interface PlatformDomains {
 
 export async function apply(ctx: Context, config: { backend?: string } = {}): Promise<void> {
   const backendName = config.backend ?? 'sqlite'
-  await ctx.inject([storageBackendServiceKey(backendName)], async () => {
-    const facility = new DomainFacility(ctx, { backend: backendName })
+  // On a cold boot the backend service does not exist yet, so the domains are
+  // opened inside `ctx.inject`. Two things about that are load-bearing:
+  //
+  //  - the callback receives its OWN context (`ready`), and every resource this
+  //    run creates — the domains, the `platformDomains` provide, the credential
+  //    store and its disposer — is registered on THAT fiber, not on this
+  //    plugin's. `ctx.inject` unloads and re-runs its callback whenever the
+  //    backend service changes, so resources owned by the outer fiber would be
+  //    left behind on a re-run and collide with the next one (`service
+  //    "platformDomains" has been registered at …`). Owned this way, a close is
+  //    followed by a clean re-open of the same medium.
+  //  - the disposer is RETURNED by the effect body. An effect body's return
+  //    value IS its disposer, so `ctx.effect(async () => {…})` runs the close at
+  //    apply time — disposing the store and closing all four domains right after
+  //    opening them, while the services stay registered for the process
+  //    lifetime — and registers nothing for unload. That is the defect v0.1.83
+  //    shipped: `client-connection`'s boot write reached a disposed store over a
+  //    closed `platform_credentials` domain, the readiness probe never passed,
+  //    and the pod restarted.
+  await ctx.inject([storageBackendServiceKey(backendName)], async (ready: Context) => {
+    const facility = new DomainFacility(ready, { backend: backendName })
     const workspaces = await facility.open(workspacesDomain)
     const users = await facility.open(usersDomain)
     const settings = await facility.open(settingsDomain)
     const credentials = await facility.open(credentialsDomain)
     const domains: PlatformDomains = { workspaces, users, settings, credentials }
 
-    ctx.provide('platformDomains', domains)
+    ready.provide('platformDomains', domains)
     // The durable credentials provider (see credentials.ts). Constructed here,
-    // from the domains this apply opened, so the credential-records table and
-    // the service that owns it cannot drift apart.
-    const credentialStore = new CredentialStore(ctx, domains)
-    ctx.effect(async () => {
+    // from the domains this run opened, so the credential-records table and the
+    // service that owns it share one lifetime and cannot drift apart.
+    const credentialStore = new CredentialStore(ready, domains)
+    ready.effect(() => async () => {
+      // Disposal first: from here the store refuses with its own error, so the
+      // close below can never be observed as a closed domain by a caller that
+      // still holds the store.
       await credentialStore.dispose()
       await Promise.all([workspaces.close(), users.close(), settings.close(), credentials.close()])
     }, '@visecy/dsh-platform-domain')
