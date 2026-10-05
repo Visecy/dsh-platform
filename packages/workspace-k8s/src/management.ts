@@ -133,6 +133,44 @@ function eventText(type: string, idleMs: number, graceMs: number): string {
   }
 }
 
+/**
+ * The phase the panel reports, from what the CLUSTER shows and what the
+ * in-memory lifecycle claims.
+ *
+ * The observation wins, because it is the only one of the two that is true of
+ * the workspace right now: the tracked phase is this process's memory of a
+ * lifecycle it drives, and a workspace woken by an on-demand `ensure` — an fs
+ * or subprocess operation calling the endpoint resolver — gets a pod without
+ * the state machine ever being told. Reading the tracked phase first made such
+ * a workspace report 休眠 while it was serving requests, which is what the
+ * operator saw; the same inversion showed a running phase for a pod that had
+ * already gone.
+ *
+ * The two IN-FLIGHT phases are the exception, and they are not an exception to
+ * "observed wins" but a case where the observation is simply younger than the
+ * claim: while a pod is being created the cluster legitimately shows no pod (or
+ * a pod that is not ready), so reporting the observation would flash 休眠 over a
+ * workspace that is being woken. Both self-correct on the transition that ends
+ * them (`pod-ready` -> running, `pod-lost` -> ensure), so they can never be a
+ * stale phase in the sense above — unlike `sleep`, which is exactly what a
+ * stale lifecycle claim looks like.
+ *
+ * @param tracked - the phase the lifecycle manager holds, when it tracks this workspace at all.
+ * @param hasPod - a pod for this workspace exists in the cluster.
+ * @param hasPvc - a PVC for this workspace exists in the cluster.
+ * @returns the phase to show.
+ */
+function phaseFor(tracked: CatalogPhase | undefined, hasPod: boolean, hasPvc: boolean): CatalogPhase {
+  if (tracked === 'provision' || tracked === 'waking') return tracked
+  if (hasPod && hasPvc) return 'running'
+  if (hasPod) return 'orphan'
+  if (hasPvc) return 'sleep'
+  // Nothing exists in the cluster. `deleted` is the lifecycle's terminal intent
+  // and cannot contradict an empty observation; every other tracked phase is a
+  // claim its own resources just disproved.
+  return tracked === 'deleted' ? 'deleted' : 'sleep'
+}
+
 function storageGiB(size: string | undefined): number {
   if (size === undefined) return 0
   const m = /^([0-9]+)([KMGTPE]i?)?$/.exec(size.trim())
@@ -245,18 +283,7 @@ export class WorkspaceManagement implements WorkspaceManagementService {
   ): WorkspaceCatalogEntry {
     const { controller, status, metrics, namespace, image } = this.opts
     const state = status.get(reg.workspaceId)
-    let phase: CatalogPhase
-    if (state !== undefined) {
-      phase = state.phase
-    } else if (hasPod && !hasPvc) {
-      phase = 'orphan'
-    } else if (hasPvc && !hasPod) {
-      phase = 'sleep'
-    } else if (hasPod && hasPvc) {
-      phase = 'running'
-    } else {
-      phase = 'sleep'
-    }
+    const phase = phaseFor(state?.phase, hasPod, hasPvc)
 
     const timeline: CatalogTimelineEntry[] = (state?.events ?? [])
       .slice(-40)

@@ -14,6 +14,26 @@ import type { WorkspaceRuntime } from './index.ts'
 export interface WireOptions {
   lifecycle: LifecycleOptions
   runtime: WorkspaceRuntime
+  /**
+   * Whether a workspace id is one this platform REGISTERED.
+   *
+   * The resolver exists to wake a workspace, and a workspace id is just the
+   * first path segment under the host root — so without this check any absolute
+   * path `/workspaces/<name>/...` would `ensure` `<name>` into existence: an
+   * ordinary directory (one a shell command or an agent created) would get a
+   * PVC and a pod, and the reconcile pass would adopt that PVC into a sidebar
+   * record the operator never asked for. That is how a workspace appears out of
+   * nowhere.
+   *
+   * Only a POSITIVE "no such record" refuses the operation. A checker that
+   * cannot answer — the registry is briefly unlistable — must not take the file
+   * view down with it, so the caller's rejection is treated as unknown and the
+   * operation proceeds (see {@link wireWorkspaceLifecycle}).
+   *
+   * Optional: a composition that installs no registry bridge keeps the old
+   * behaviour, because it has no notion of "registered" to check against.
+   */
+  knownWorkspace?: (workspaceId: string) => Promise<boolean>
 }
 
 /** Service subprocess-k8s can use to report live background command counts. */
@@ -91,8 +111,29 @@ export function wireWorkspaceLifecycle(ctx: Context & EventBus, opts: WireOption
 
   return {
     resolveEndpoint: async (workspaceId: string): Promise<string> => {
-      // ensure creates the pod if absent; getEndpoint returns the stable DNS
+      // A path is not a workspace. Refuse to materialize one that no record
+      // describes, before anything creates a PVC or a pod for it.
+      if (opts.knownWorkspace !== undefined) {
+        const known = await opts.knownWorkspace(workspaceId).catch(() => true)
+        if (!known) {
+          throw new Error(
+            `workspaceEndpointResolver: '${workspaceId}' is not a registered workspace of this platform, `
+            + 'so no pod or volume will be created for it; the path names an ordinary directory under the workspace root',
+          )
+        }
+      }
+      // ensure creates the pod if absent; getEndpoint returns the stable DNS.
       await opts.runtime.ensure(workspaceId)
+      // …and that is a WAKE, so the lifecycle has to hear about it. This path
+      // is reached from every fs and subprocess operation and never passes
+      // through `management.ensure`, so a workspace woken here used to keep the
+      // `sleep` phase its state machine was left in: the panel reported a
+      // workspace that was serving requests as asleep, and — because the
+      // transition that starts the idle timer never ran — nothing would ever
+      // have put that pod back to sleep either. `attach` dispatches
+      // `user-attach`, which is exactly the fact being reported: the workspace
+      // is in use. It is a no-op for a workspace already running.
+      manager.attach(workspaceId)
       return opts.runtime.getEndpoint(workspaceId)
     },
     commandTracker: {

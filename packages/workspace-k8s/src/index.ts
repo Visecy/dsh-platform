@@ -187,6 +187,22 @@ export function apply(ctx: Context, config: Config | undefined): void {
     }
   }
 
+  // Official dsh workspace registry bridge + reconciler: k8s resources are
+  // authoritative; the registry is only what the frontend/session.create
+  // consume. DSH 0.1.2 removed apiProxy.workspace.*; the bridge now writes
+  // host-to-host through ctx.workspaceRegistry (dsh-workspace) and the
+  // official workspace controller serves the browser from the same records.
+  //
+  // Built BEFORE the lifecycle wiring because the endpoint resolver needs it:
+  // the resolver refuses to provision a workspace id no record describes, which
+  // is what keeps an ordinary directory under the host root from becoming a
+  // workspace (see WireOptions.knownWorkspace).
+  const hostRoot = config.hostRoot ?? '/workspaces'
+  const registry = new HostWorkspaceRegistry(
+    { get: (name) => ctx.get(name) },
+    hostRoot,
+  )
+
   const { resolveEndpoint, commandTracker, deleteWorkspace, attach, sleepWorkspace, reconcileImages, status: workspaceStatus } = wireWorkspaceLifecycle(ctx, {
     lifecycle: {
       controller: runtime.podController,
@@ -205,21 +221,16 @@ export function apply(ctx: Context, config: Config | undefined): void {
       isEnsuring: (workspaceId) => runtime.isEnsuring(workspaceId),
     },
     runtime,
+    // "Registered" means the official registry lists a record for it. A listing
+    // that FAILS is not an answer, so the rejection propagates to the resolver's
+    // own `catch`, which proceeds: the fence stops a phantom workspace, it does
+    // not gate the file view on the registry being up.
+    knownWorkspace: async (workspaceId) => (await registry.list()).some((ws) => ws.workspaceId === workspaceId),
   })
   ctx.provide('workspaceEndpointResolver', { resolve: resolveEndpoint })
   ctx.provide('workspaceCommandTracker', commandTracker)
   ctx.provide('workspaceStatus', workspaceStatus)
 
-  // Official dsh workspace registry bridge + reconciler: k8s resources are
-  // authoritative; the registry is only what the frontend/session.create
-  // consume. DSH 0.1.2 removed apiProxy.workspace.*; the bridge now writes
-  // host-to-host through ctx.workspaceRegistry (dsh-workspace) and the
-  // official workspace controller serves the browser from the same records.
-  const hostRoot = config.hostRoot ?? '/workspaces'
-  const registry = new HostWorkspaceRegistry(
-    { get: (name) => ctx.get(name) },
-    hostRoot,
-  )
   // The session store is the join key for the association repair: durable
   // session headers carry the `cwd` each stored session was created in.
   //

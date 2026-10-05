@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { WorkspaceManagement } from '../src/management.ts'
 import type { PodController, WorkspacePodSpec } from '../src/k8s-client.ts'
 import type { WorkspaceRegistry } from '../src/registry.ts'
-import type { WorkspaceStatusService } from '../src/wire.ts'
+import { initialState, type WorkspaceState } from '../src/state-machine.ts'
 import { WorkspaceMetricsSampler } from '../src/metrics.ts'
 
 class FakeController implements PodController {
@@ -39,21 +39,32 @@ class FakeRegistry implements WorkspaceRegistry {
   async delete(workspaceId: string) { this.deleted.push(workspaceId); this.rows = this.rows.filter((r) => r.workspaceId !== workspaceId) }
 }
 
-const makeStatus = (): WorkspaceStatusService => ({
-  get: () => undefined,
-  list: () => [],
-})
+/**
+ * A status stub whose snapshot the spec can set, so a case can put the
+ * in-memory lifecycle in ANY phase and assert what the catalog reports for the
+ * k8s state observed beside it.
+ */
+const makeStatus = () => {
+  const stub = {
+    state: undefined as WorkspaceState | undefined,
+    get(): WorkspaceState | undefined { return stub.state },
+    list(): WorkspaceState[] { return stub.state === undefined ? [] : [stub.state] },
+  }
+  return stub
+}
 
 describe('WorkspaceManagement', () => {
   let root: string
   let ctrl: FakeController
   let reg: FakeRegistry
   let mgr: WorkspaceManagement
+  let status: ReturnType<typeof makeStatus>
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-ws-mgmt-'))
     ctrl = new FakeController()
     reg = new FakeRegistry()
+    status = makeStatus()
     const metrics = new WorkspaceMetricsSampler({
       controller: ctrl,
       namespace: 'dsh',
@@ -63,7 +74,7 @@ describe('WorkspaceManagement', () => {
     mgr = new WorkspaceManagement({
       controller: ctrl,
       registry: reg,
-      status: makeStatus(),
+      status,
       metrics,
       namespace: 'dsh',
       hostRoot: root,
@@ -169,5 +180,69 @@ describe('WorkspaceManagement', () => {
     await mgr.cleanupOrphan('ws-orphan')
     expect(ctrl.deletedPods).toContain('ws-orphan')
     expect(reg.deleted).toEqual([])
+  })
+
+  /**
+   * The panel reads the catalog, and the catalog is the only place the
+   * in-memory lifecycle and the observed cluster meet. The operator's report —
+   * a workspace shown as 休眠 while it is usable — is exactly a disagreement
+   * between those two, so these cases fix which one wins.
+   */
+  describe('phase against the observed cluster', () => {
+    const state = (workspaceId: string, patch: Partial<WorkspaceState>): WorkspaceState =>
+      ({ ...initialState(workspaceId), ...patch })
+    const phaseOf = async (workspaceId: string): Promise<string | undefined> =>
+      (await mgr.list()).find((row) => row.workspaceId === workspaceId)?.phase
+
+    it('reports running while a pod exists, even if the tracked phase says sleep', async () => {
+      // Woken by an on-demand `ensure` (an fs or subprocess operation), which
+      // reaches the runtime directly and never told the state machine.
+      status.state = state('ws-woken', { phase: 'sleep', provisioned: true })
+      reg.rows.push({ workspaceId: 'ws-woken', path: `${root}/ws-woken` })
+      ctrl.pods.add('ws-woken')
+      ctrl.pvcs.add('ws-woken-data')
+
+      expect(await phaseOf('ws-woken')).toBe('running')
+    })
+
+    it('reports sleep when the pod is gone, even if the tracked phase says running', async () => {
+      status.state = state('ws-nopod', { phase: 'running', provisioned: true })
+      reg.rows.push({ workspaceId: 'ws-nopod', path: `${root}/ws-nopod` })
+      ctrl.pvcs.add('ws-nopod-data')
+
+      expect(await phaseOf('ws-nopod')).toBe('sleep')
+    })
+
+    it('reports orphan when only a pod survived, whatever the tracked phase says', async () => {
+      status.state = state('ws-orph', { phase: 'running', provisioned: true })
+      reg.rows.push({ workspaceId: 'ws-orph', path: `${root}/ws-orph` })
+      ctrl.pods.add('ws-orph')
+
+      expect(await phaseOf('ws-orph')).toBe('orphan')
+    })
+
+    it('keeps an in-flight provision visible before its volume exists', async () => {
+      // The k8s view LAGS an in-flight create (the PVC is being created right
+      // now), so "no resources yet" must not overwrite it with sleep.
+      status.state = state('ws-prov', { phase: 'provision' })
+      reg.rows.push({ workspaceId: 'ws-prov', path: `${root}/ws-prov` })
+
+      expect(await phaseOf('ws-prov')).toBe('provision')
+    })
+
+    it('keeps waking visible while the pod is still coming up', async () => {
+      status.state = state('ws-waking', { phase: 'waking', provisioned: true })
+      reg.rows.push({ workspaceId: 'ws-waking', path: `${root}/ws-waking` })
+      ctrl.pvcs.add('ws-waking-data')
+
+      expect(await phaseOf('ws-waking')).toBe('waking')
+    })
+
+    it('reports a deleted workspace as deleted once its resources are gone', async () => {
+      status.state = state('ws-deleted', { phase: 'deleted', provisioned: true })
+      reg.rows.push({ workspaceId: 'ws-deleted', path: `${root}/ws-deleted` })
+
+      expect(await phaseOf('ws-deleted')).toBe('deleted')
+    })
   })
 })
