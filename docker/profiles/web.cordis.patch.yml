@@ -94,6 +94,49 @@
 # `ctx.fs`; at that point this disable and the one above are deleted.
 - id: ui-deliverables
   disabled: true
+# The OTHER half of the same shape of defect, and the one the operator hit: the
+# settings page answered every load with
+#   gateway/internal: client api: permissionPresets/catalog failed:
+#     transport failure for /api/permissionPresets/catalog: HTTP 404
+#
+# The pairing, read off the installed 0.2.0-rc.2 composition rather than
+# guessed: the HOST row `permission` (disabled above) is
+# `@deepseek-ai/dsh-permission-presets`, whose `lib/typert.host.js` registers
+# the `permissionPresets` service and the `Remote("catalog")` method — that is
+# exactly the `/api/permissionPresets/catalog` route. The CLIENT row
+# `ui-permission` is `@deepseek-ai/dsh-client-ui-permission-presets`, whose
+# `lib/client.js` calls `ctx.remote.permissionPresets.catalog()` from the
+# Permissions row it registers on the settings page. Disabling the host and
+# leaving the client mounted is what produced the 404.
+#
+# Which side is right to drop is decided by what the presets ARE, not by which
+# edit is smaller. `permission` bundles a sandbox MODE
+# (`read-only`/`workspace-write`/`danger-full-access`) with an approval policy,
+# and the sandbox half is enforced by the host-local confinement chain
+# (`@deepseek-ai/dsh-sandbox-local`: bwrap / Landlock / Seatbelt, with
+# `workspaceRoot` on the CONTROL PLANE). This platform routes execution through
+# `@visecy/dsh-subprocess-k8s` into a per-workspace Kubernetes pod: the pod is
+# the isolation boundary, the control plane holds no workspace bytes and no
+# sandbox runner, and the row cannot even activate here — its constructor
+# throws `the mounted bash executor does not confine (no sandboxMode)` unless
+# the equally disabled `bash-sandbox` row is restored too. Restoring the host
+# half would therefore mean wrapping pod commands in a control-plane sandbox
+# that cannot see them, and offering the operator three modes that would not do
+# what they say. Dropping the client half is the honest repair: the settings
+# page loads, and no surface advertises a preset this deployment cannot
+# enforce.
+#
+# Cost of the disable, read off 0.2.0-rc.2's `dsh-client-ui-permission-presets`:
+# the Permissions row on the settings page (the new-session default preset) and
+# the `/permission` command with its current-session popup both disappear. The
+# deployment's approval policy is unaffected — it is the `approval` row's own
+# config (`DSH_PERMISSION_MODE`), which stays enabled.
+#
+# It comes back the day execution stops being pod-routed (or upstream exposes a
+# sandbox-provider seam this platform can implement over the pod), and then it
+# comes back together with the `permission` disable above.
+- id: ui-permission
+  disabled: true
 # The web app announces this process's launch-token URL on stdout
 # (`dsh web: http://…/?token=<launchToken>`) and tries to hand the URL to a
 # desktop browser. In a container that means (a) a process-wide authentication
