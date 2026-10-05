@@ -12,9 +12,9 @@ import {
   actionLabel,
   actionsFor,
   confirmLabel,
-  overlayVisible,
   phaseText,
   statusDetail,
+  statusSummary,
   timelineHead,
   type StatusAction,
 } from '../src/client/panel-model.ts'
@@ -159,17 +159,30 @@ describe('timelineHead', () => {
   })
 })
 
-describe('overlayVisible', () => {
-  it('shows the pill while a workspace is waking up or asleep', () => {
-    expect(overlayVisible([row({ phase: 'sleep', hasPod: false })])).toBe(true)
-    expect(overlayVisible([row({ phase: 'waking' })])).toBe(true)
-    expect(overlayVisible([row({ phase: 'provision' })])).toBe(true)
+/**
+ * The status SUMMARY copy. It used to drive the frame-wide `shell.overlay`
+ * pill; that pill was removed for covering the brand mark, so today the only
+ * consumer is the `sidebar.panellist` row's tooltip — which is why the copy
+ * has to name the thing it counts.
+ */
+describe('statusSummary', () => {
+  it('counts the workspaces the operator is waiting on', () => {
+    expect(statusSummary([row({ phase: 'sleep', hasPod: false })])).toBe('工作区状态：1 个休眠中')
+    expect(statusSummary([row({ phase: 'waking' })])).toBe('工作区状态：1 个拉起中')
+    expect(statusSummary([row({ phase: 'provision' })])).toBe('工作区状态：1 个拉起中')
   })
 
-  it('stays out of the way when everything is simply running', () => {
-    expect(overlayVisible([row({ phase: 'running' }), row({ workspaceId: 'b', phase: 'waking' })])).toBe(true)
-    expect(overlayVisible([row({ phase: 'running' })])).toBe(false)
-    expect(overlayVisible([])).toBe(false)
+  it('names both halves when they are both in flight', () => {
+    expect(statusSummary([
+      row({ workspaceId: 'a', phase: 'waking' }),
+      row({ workspaceId: 'b', phase: 'sleep', hasPod: false }),
+      row({ workspaceId: 'c', phase: 'sleep', hasPod: false }),
+    ])).toBe('工作区状态：1 个拉起中 · 2 个休眠中')
+  })
+
+  it('says only what it knows when everything is simply running, or there is nothing', () => {
+    expect(statusSummary([row({ phase: 'running' })])).toBe('工作区状态：运行中')
+    expect(statusSummary([])).toBe('工作区状态：暂无工作区')
   })
 })
 

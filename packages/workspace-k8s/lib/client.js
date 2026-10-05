@@ -28,7 +28,6 @@ module.exports = __toCommonJS(index_exports);
 
 // packages/workspace-k8s/src/client/panel-model.ts
 var WORKSPACE_PANEL_ID = "workspace-status";
-var WORKSPACE_PILL_ID = "workspace-status-pill";
 var WORKSPACE_PANEL_LABEL = "\u5DE5\u4F5C\u533A\u72B6\u6001";
 var WORKSPACE_POLL_MS = 2e3;
 var PHASE_TEXT = {
@@ -107,16 +106,14 @@ function timelineHead(row, now) {
   if (newest === void 0) return void 0;
   return { text: newest.text, ago: fmtAgo(now - newest.at) };
 }
-function overlayVisible(rows) {
-  return rows.some((row) => row.phase === "provision" || row.phase === "waking" || row.phase === "sleep");
-}
-function overlayText(rows) {
+function statusSummary(rows) {
   const sleeping = rows.filter((row) => row.phase === "sleep").length;
   const starting = rows.filter((row) => row.phase === "provision" || row.phase === "waking").length;
   const parts = [];
   if (starting > 0) parts.push(`${starting} \u4E2A\u62C9\u8D77\u4E2D`);
   if (sleeping > 0) parts.push(`${sleeping} \u4E2A\u4F11\u7720\u4E2D`);
-  return parts.length === 0 ? "" : `\u5DE5\u4F5C\u533A\uFF1A${parts.join(" \xB7 ")}`;
+  if (parts.length > 0) return `\u5DE5\u4F5C\u533A\u72B6\u6001\uFF1A${parts.join(" \xB7 ")}`;
+  return rows.length === 0 ? "\u5DE5\u4F5C\u533A\u72B6\u6001\uFF1A\u6682\u65E0\u5DE5\u4F5C\u533A" : "\u5DE5\u4F5C\u533A\u72B6\u6001\uFF1A\u8FD0\u884C\u4E2D";
 }
 function metricsText(row) {
   const metrics = row.metrics;
@@ -139,11 +136,6 @@ function registerWorkspacePanel(slots, components) {
     order: 20,
     label: () => WORKSPACE_PANEL_LABEL
   }, components.Icon));
-  slots.inject("shell.overlay", () => slots.register({
-    name: "shell.overlay",
-    id: WORKSPACE_PILL_ID,
-    order: 30
-  }, components.Pill));
 }
 
 // packages/workspace-k8s/src/client/panel.tsx
@@ -251,7 +243,7 @@ function runStatusAction(workspaceId, action) {
 
 // packages/workspace-k8s/src/client/styles.ts
 var WORKSPACE_UI_CSS = `
-/* \u2500\u2500 \u5DE5\u4F5C\u533A\u72B6\u6001\u9762\u677F\uFF08main \u9762\u677F + sidebar.panellist + shell.overlay\uFF09\u2500\u2500 */
+/* \u2500\u2500 \u5DE5\u4F5C\u533A\u72B6\u6001\u9762\u677F\uFF08main \u9762\u677F + sidebar.panellist\uFF09\u2500\u2500 */
 .dsh-wsp { flex: 1 1 auto; box-sizing: border-box; width: 100%; min-width: 0; min-height: 0; overflow-y: auto; padding: 24px 32px 96px; }
 .dsh-wsp-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
 .dsh-wsp-title { margin: 0; font-size: 20px; font-weight: 600; color: var(--dsw-alias-label-primary, #111); }
@@ -283,12 +275,8 @@ var WORKSPACE_UI_CSS = `
 .dsh-wsp-timeline .t { flex: none; color: var(--dsw-alias-label-tertiary, #888); }
 .dsh-wsp-icon { display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; }
 .dsh-wsp-icon.active { background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.08)); }
-.dsh-wsp-pill { pointer-events: auto; display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px; font-size: 13px; border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.1)); background: var(--dsw-alias-bg-layer-2, #fff); color: var(--dsw-alias-label-secondary, #666); box-shadow: 0 2px 10px rgba(0,0,0,.08); }
-.dsh-wsp-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dsw-alias-state-success-primary, #22c55e); }
-.dsh-wsp-pill.busy .dot { background: var(--dsw-alias-state-warn-primary, #f59e0b); animation: dsh-wsb-blink 1.2s ease-in-out infinite; }
-.dsh-wsp-pill.busy .text { color: var(--dsw-alias-state-warn-primary, #f59e0b); }
 
-/* \u2500\u2500 \u5DE5\u4F5C\u533A\u76F8\u4F4D\u6307\u793A\u70B9\uFF08\u9762\u677F\u884C / \u4FA7\u680F\u56FE\u6807 / \u836F\u4E38\u5171\u7528\uFF09\u2500\u2500 */
+/* \u2500\u2500 \u5DE5\u4F5C\u533A\u76F8\u4F4D\u6307\u793A\u70B9\uFF08\u9762\u677F\u884C / \u4FA7\u680F\u56FE\u6807\u5171\u7528\uFF09\u2500\u2500 */
 .dsh-wsb-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--dsw-alias-label-tertiary, #888); }
 .dsh-wsb-dot.running { background: var(--dsw-alias-state-success-primary, #22c55e); }
 .dsh-wsb-dot.sleep { background: var(--dsw-alias-label-tertiary, #888); }
@@ -430,20 +418,10 @@ function WorkspacePanelIcon({ size = 16, active = false }) {
   return (0, import_react.createElement)("span", {
     className: `dsh-wsp-icon${active ? " active" : ""}`,
     style: { width: size, height: size },
-    title: overlayVisible(status.rows) ? overlayText(status.rows) : "\u5DE5\u4F5C\u533A\u72B6\u6001"
+    // The aggregate the removed pill used to show lives here: a tooltip on the
+    // row that opens the same status, where it cannot cover anything.
+    title: statusSummary(status.rows)
   }, (0, import_react.createElement)("span", { className: `dsh-wsb-dot ${phase}`, style: dot }));
-}
-function WorkspaceStatusPill() {
-  const status = useStatus();
-  if (!overlayVisible(status.rows)) return null;
-  const text = overlayText(status.rows);
-  const busy = status.rows.some((row) => row.phase === "waking" || row.phase === "provision");
-  return (0, import_react.createElement)(
-    "div",
-    { className: `dsh-wsp-pill${busy ? " busy" : ""}`, role: "status" },
-    (0, import_react.createElement)("span", { className: "dot" }),
-    (0, import_react.createElement)("span", { className: "text" }, text)
-  );
 }
 
 // packages/workspace-k8s/src/client/index.tsx
@@ -454,8 +432,7 @@ function apply(ctx) {
   injectPanelStyles();
   registerWorkspacePanel(ctx.slots, {
     Panel: WorkspaceStatusPanel,
-    Icon: WorkspacePanelIcon,
-    Pill: WorkspaceStatusPill
+    Icon: WorkspacePanelIcon
   });
 }
 return module.exports; } });

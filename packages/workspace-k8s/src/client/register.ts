@@ -5,12 +5,18 @@
  * itself (which slots, which ids, when the poller starts and stops) stays
  * testable without a browser. The official `ui-workspace` row owns the sidebar
  * workspace/session list, the hero and the `sidebar.workspaces` contract; this
- * module must only ever ADD to `main`, `sidebar.panellist` and `shell.overlay`.
+ * module must only ever ADD to `main` and `sidebar.panellist`.
+ *
+ * The `shell.overlay` pill this module used to register is REMOVED. It was
+ * placed top-left, over the brand mark, and its aggregate copy ("工作区：3 个
+ * 休眠中") was unreadable in place and duplicated by the `main` panel and the
+ * sidebar row below it. A frame-wide overlay that covers chrome to repeat
+ * information already on screen is not worth the pixels; the aggregate now
+ * lives in the sidebar row's tooltip (`statusSummary`).
  */
 import {
   WORKSPACE_PANEL_ID,
   WORKSPACE_PANEL_LABEL,
-  WORKSPACE_PILL_ID,
 } from './panel-model.ts'
 
 /** The slot registry face this module consumes (a subset of the client one). */
@@ -19,14 +25,12 @@ export interface SlotRegistry {
   register(options: Record<string, unknown>, component: unknown): unknown
 }
 
-/** The three components the registration needs, supplied by `index.tsx`. */
+/** The two components the registration needs, supplied by `index.tsx`. */
 export interface PanelComponents {
   /** Occupant of the keyed `main` panel. */
   Panel: unknown
   /** Occupant of the `sidebar.panellist` row. */
   Icon: unknown
-  /** Occupant of the frame-wide `shell.overlay` list. */
-  Pill: unknown
 }
 
 /**
@@ -36,7 +40,7 @@ export interface PanelComponents {
  * plugin's snapshot is a module-level observable, so the components need no
  * injected share — they subscribe through React's `useSyncExternalStore`.
  * @param slots - client slot registry.
- * @param components - panel/icon/pill components.
+ * @param components - panel/icon components.
  * @returns nothing; slot registrations live as long as the caller's fiber.
  */
 export function registerWorkspacePanel(slots: SlotRegistry, components: PanelComponents): void {
@@ -54,12 +58,4 @@ export function registerWorkspacePanel(slots: SlotRegistry, components: PanelCom
     order: 20,
     label: () => WORKSPACE_PANEL_LABEL,
   }, components.Icon))
-
-  // Optional frame-wide pill. The occupant renders null unless a workspace is
-  // cold-starting or asleep, so it never competes with the app for attention.
-  slots.inject('shell.overlay', () => slots.register({
-    name: 'shell.overlay',
-    id: WORKSPACE_PILL_ID,
-    order: 30,
-  }, components.Pill))
 }

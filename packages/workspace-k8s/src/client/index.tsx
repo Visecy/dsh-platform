@@ -5,9 +5,9 @@
  * - OFFICIAL `ui-workspace` (a profile row, not this plugin) owns the sidebar
  *   workspace/session list, the conversation hero, the `sidebar.workspaces`
  *   contract and the workspace dialogs.
- * - THIS plugin adds a keyed `main` panel plus its `sidebar.panellist` entry
- *   and an optional `shell.overlay` pill, showing the k8s side of a workspace:
- *   pod phase, metrics, and the wake/sleep/cleanup lifecycle actions.
+ * - THIS plugin adds a keyed `main` panel plus its `sidebar.panellist` entry,
+ *   showing the k8s side of a workspace: pod phase, metrics, and the
+ *   wake/sleep/cleanup lifecycle actions.
  *
  * Nothing here patches an official bundle, and nothing here has a user or a
  * permission concept: the panel reads `/workspaces/api/list` and dispatches
@@ -20,7 +20,7 @@
  * aborted this whole apply and left every dependent client entry pending.
  */
 import { registerWorkspacePanel } from './register.ts'
-import { WorkspacePanelIcon, WorkspaceStatusPanel, WorkspaceStatusPill } from './panel.tsx'
+import { WorkspacePanelIcon, WorkspaceStatusPanel } from './panel.tsx'
 import { injectPanelStyles } from './styles.ts'
 
 /**
@@ -47,6 +47,5 @@ export function apply(ctx: ClientContext): void {
   registerWorkspacePanel(ctx.slots, {
     Panel: WorkspaceStatusPanel,
     Icon: WorkspacePanelIcon,
-    Pill: WorkspaceStatusPill,
   })
 }

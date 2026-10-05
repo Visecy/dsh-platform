@@ -4,9 +4,13 @@
  *
  * The official `ui-workspace` row owns the sidebar workspace/session list, the
  * conversation hero and the `sidebar.workspaces` contract; this plugin adds a
- * keyed `main` panel with its `sidebar.panellist` entry and an optional
- * `shell.overlay` pill. Nothing here patches or replaces an official surface,
- * and nothing here knows about users or permissions.
+ * keyed `main` panel with its `sidebar.panellist` entry. Nothing here patches
+ * or replaces an official surface, and nothing here knows about users or
+ * permissions.
+ *
+ * There is deliberately no frame-wide overlay: the `shell.overlay` pill this
+ * plugin used to register rendered over the brand mark and is gone (see
+ * `register.ts` and the `panel-slots` spec).
  *
  * Every action failure renders the API's own `error.message`: the panel must
  * never look idle while a wake/sleep/delete silently failed.
@@ -16,10 +20,9 @@ import {
   actionsFor,
   confirmLabel,
   metricsText,
-  overlayText,
-  overlayVisible,
   phaseText,
   statusDetail,
+  statusSummary,
   timelineHead,
   WORKSPACE_POLL_MS,
   type StatusAction,
@@ -145,18 +148,8 @@ export function WorkspacePanelIcon({ size = 16, active = false }: { size?: numbe
   return createElement('span', {
     className: `dsh-wsp-icon${active ? ' active' : ''}`,
     style: { width: size, height: size },
-    title: overlayVisible(status.rows) ? overlayText(status.rows) : '工作区状态',
+    // The aggregate the removed pill used to show lives here: a tooltip on the
+    // row that opens the same status, where it cannot cover anything.
+    title: statusSummary(status.rows),
   }, createElement('span', { className: `dsh-wsb-dot ${phase}`, style: dot }))
-}
-
-/** `shell.overlay` pill: only while something is cold-starting or asleep. */
-export function WorkspaceStatusPill() {
-  const status = useStatus()
-  if (!overlayVisible(status.rows)) return null
-  const text = overlayText(status.rows)
-  const busy = status.rows.some((row) => row.phase === 'waking' || row.phase === 'provision')
-  return createElement('div', { className: `dsh-wsp-pill${busy ? ' busy' : ''}`, role: 'status' },
-    createElement('span', { className: 'dot' }),
-    createElement('span', { className: 'text' }, text),
-  )
 }

@@ -10,8 +10,6 @@ import type { CatalogPhase, CatalogWorkspace } from './api.ts'
 
 /** Slot id shared by the `main` panel key and its `sidebar.panellist` row. */
 export const WORKSPACE_PANEL_ID = 'workspace-status'
-/** Id of the optional frame-wide status pill (`shell.overlay`). */
-export const WORKSPACE_PILL_ID = 'workspace-status-pill'
 /** Sidebar row / panel title. */
 export const WORKSPACE_PANEL_LABEL = '工作区状态'
 /** Catalog poll cadence. */
@@ -165,24 +163,25 @@ export function timelineHead(row: CatalogWorkspace, now: number): { text: string
 }
 
 /**
- * Whether the frame-wide pill should be on screen: only while a workspace is
- * cold-starting or asleep, i.e. when the operator is waiting on the platform
- * rather than merely looking at it.
+ * The status surface's OWN summary line: what the sidebar entry says about the
+ * fleet in a tooltip.
+ *
+ * It is deliberately the only aggregate copy this plugin renders. It used to
+ * also feed a frame-wide `shell.overlay` pill, which was removed: the pill
+ * rendered top-left over the brand mark, and the numbers it carried are
+ * already on the `main` panel and this sidebar row — both in layout-owned
+ * space. A summary that cannot cover anything is a tooltip, not an overlay.
  * @param rows - catalog rows.
- * @returns true when at least one workspace is provisioning, waking or asleep.
+ * @returns one line naming whichever half the operator is waiting on.
  */
-export function overlayVisible(rows: readonly CatalogWorkspace[]): boolean {
-  return rows.some((row) => row.phase === 'provision' || row.phase === 'waking' || row.phase === 'sleep')
-}
-
-/** Aggregate copy for the pill. */
-export function overlayText(rows: readonly CatalogWorkspace[]): string {
+export function statusSummary(rows: readonly CatalogWorkspace[]): string {
   const sleeping = rows.filter((row) => row.phase === 'sleep').length
   const starting = rows.filter((row) => row.phase === 'provision' || row.phase === 'waking').length
   const parts: string[] = []
   if (starting > 0) parts.push(`${starting} 个拉起中`)
   if (sleeping > 0) parts.push(`${sleeping} 个休眠中`)
-  return parts.length === 0 ? '' : `工作区：${parts.join(' · ')}`
+  if (parts.length > 0) return `工作区状态：${parts.join(' · ')}`
+  return rows.length === 0 ? '工作区状态：暂无工作区' : '工作区状态：运行中'
 }
 
 /**

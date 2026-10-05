@@ -4,13 +4,14 @@
  *
  * This is the end-to-end check that the decoupling really landed in the built
  * artifact rather than only in the sources: the bundle must export an `apply`,
- * claim the three additive slots (`main`, `sidebar.panellist`, `shell.overlay`),
- * must not touch `sidebar.workspaces` (the official ui-workspace row owns it
- * now), must carry no trace of the deleted vendored browser string, and must
- * apply on a context that provides nothing but `slots` — the removed client
- * services (`remote`, `workspaces`, `sessions`) were only ever needed by the
- * vendored browser, and reading one that the fiber did not declare is what once
- * left this whole plugin pending.
+ * claim the additive panel surfaces (`main`, `sidebar.panellist`), must not
+ * touch `sidebar.workspaces` (the official ui-workspace row owns it now), must
+ * carry no trace of the deleted vendored browser string, must not re-register
+ * the `shell.overlay` pill that used to cover the brand mark, and must apply
+ * on a context that provides nothing but `slots` — the removed client services
+ * (`remote`, `workspaces`, `sessions`) were only ever needed by the vendored
+ * browser, and reading one that the fiber did not declare is what once left
+ * this whole plugin pending.
  *
  * React and the DOM are stubbed: `apply()` performs registration only, and the
  * components are never rendered here. The bundle is materialized exactly once
@@ -121,8 +122,8 @@ describe('shipped client bundle', () => {
 
   it('registers the additive panel surfaces on the official slots', () => {
     const { registered, injected } = applyBundle()
-    expect(injected).toEqual(['main', 'sidebar.panellist', 'shell.overlay'])
-    expect(registered.map((r) => r.slot)).toEqual(['main', 'sidebar.panellist', 'shell.overlay'])
+    expect(injected).toEqual(['main', 'sidebar.panellist'])
+    expect(registered.map((r) => r.slot)).toEqual(['main', 'sidebar.panellist'])
     expect(registered.find((r) => r.slot === 'main')?.options.key).toBe('workspace-status')
     expect(registered.find((r) => r.slot === 'sidebar.panellist')?.options.id).toBe('workspace-status')
     for (const call of registered) expect(call.component).toBeTruthy()
@@ -136,6 +137,13 @@ describe('shipped client bundle', () => {
     expect(slots).not.toContain('conversation.view')
   })
 
+  it('does not re-register the shell overlay pill that covered the brand mark', () => {
+    const { registered, injected } = applyBundle()
+    expect(injected).not.toContain('shell.overlay')
+    expect(registered.map((r) => r.slot)).not.toContain('shell.overlay')
+    expect(readFileSync(BUNDLE, 'utf8')).not.toContain('dsh-wsp-pill')
+  })
+
   it('carries no vendored workspace browser string', () => {
     const source = readFileSync(BUNDLE, 'utf8')
     expect(source).not.toContain('@visecy/dsh-workspace-k8s/vendored-browser')
@@ -147,6 +155,6 @@ describe('shipped client bundle', () => {
     // Nothing is pulled out of the client context any more: the panel watches
     // its own HTTP snapshot.
     expect(requested).toEqual([])
-    expect(registered).toHaveLength(3)
+    expect(registered).toHaveLength(2)
   })
 })

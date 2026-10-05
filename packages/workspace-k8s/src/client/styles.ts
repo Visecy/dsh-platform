@@ -1,5 +1,5 @@
 export const WORKSPACE_UI_CSS = `
-/* ── 工作区状态面板（main 面板 + sidebar.panellist + shell.overlay）── */
+/* ── 工作区状态面板（main 面板 + sidebar.panellist）── */
 .dsh-wsp { flex: 1 1 auto; box-sizing: border-box; width: 100%; min-width: 0; min-height: 0; overflow-y: auto; padding: 24px 32px 96px; }
 .dsh-wsp-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
 .dsh-wsp-title { margin: 0; font-size: 20px; font-weight: 600; color: var(--dsw-alias-label-primary, #111); }
@@ -31,12 +31,8 @@ export const WORKSPACE_UI_CSS = `
 .dsh-wsp-timeline .t { flex: none; color: var(--dsw-alias-label-tertiary, #888); }
 .dsh-wsp-icon { display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; }
 .dsh-wsp-icon.active { background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.08)); }
-.dsh-wsp-pill { pointer-events: auto; display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px; font-size: 13px; border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.1)); background: var(--dsw-alias-bg-layer-2, #fff); color: var(--dsw-alias-label-secondary, #666); box-shadow: 0 2px 10px rgba(0,0,0,.08); }
-.dsh-wsp-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dsw-alias-state-success-primary, #22c55e); }
-.dsh-wsp-pill.busy .dot { background: var(--dsw-alias-state-warn-primary, #f59e0b); animation: dsh-wsb-blink 1.2s ease-in-out infinite; }
-.dsh-wsp-pill.busy .text { color: var(--dsw-alias-state-warn-primary, #f59e0b); }
 
-/* ── 工作区相位指示点（面板行 / 侧栏图标 / 药丸共用）── */
+/* ── 工作区相位指示点（面板行 / 侧栏图标共用）── */
 .dsh-wsb-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--dsw-alias-label-tertiary, #888); }
 .dsh-wsb-dot.running { background: var(--dsw-alias-state-success-primary, #22c55e); }
 .dsh-wsb-dot.sleep { background: var(--dsw-alias-label-tertiary, #888); }
