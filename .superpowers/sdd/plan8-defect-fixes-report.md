@@ -8,7 +8,7 @@ revertible. Branch `main`, base `51ec5f3`.
 | 1 | `ed944c6` | `fix(workspace-ui): style the new-workspace dialog's buttons` |
 | 2 | `051ae54` | `fix(workspace-k8s): prune the record of a workspace whose PVC is gone` |
 | 3 | `24a95b1` | `fix(workspace-k8s): make the panel report the observed cluster, not a stale phase` |
-| 4 | `8af5d19` | `fix(platform-domain): keep stored credentials in PostgreSQL, not in DSH_HOME` |
+| 4 | `8af5d19` (+ `test(platform-domain)`) | `fix(platform-domain): keep stored credentials in PostgreSQL, not in DSH_HOME` |
 
 Write scope respected: only `packages/workspace-k8s/**`, `packages/platform-domain/**`,
 `docker/profiles/*.cordis.patch.yml`. No DSH version change, no new runtime
@@ -68,14 +68,15 @@ packages/session-persistence-rdb   Tests  129 passed | 24 skipped (153)
 Totals over the run (`TEST_EXIT=0`):
 
 ```
-passed: 523
+passed: 525
 Tests  129 passed | 24 skipped        ← the PostgreSQL-gated suite
 failures / load errors: none
 ```
 
-523 = the expected ~490 plus the 33 cases added here (4 dialog-stylesheet,
-6 wire/endpoint, 6 reconciler-prune, 6 management-phase, 13 credentials — several
-of which REPLACE weak assertions, see below). The 24 skips are the same
+488 passed before this work, 525 after — the +37 are the cases added here
+(4 dialog-stylesheet, 6 wire/endpoint, 6 reconciler-prune, 6 management-phase,
+13 credentials unit, 2 credentials-over-the-real-storage-stack); several of them
+REPLACE weak assertions that could not fail, see below. The 24 skips are the same
 PostgreSQL-gated ones as before, and no spec file failed to load.
 
 ### `bash scripts/harness-profile.sh .tmp-plan8/harness`
@@ -490,6 +491,16 @@ empty-value rule with "no write when absent", the event, the reference grammar,
 the record half (including the declined write leaving the row untouched),
 a verbatim grant payload read back by a replacement store, concurrent rotation
 serialization (`['v1','v2']`, ending at `v3`), and the two refusals.
+
+`packages/platform-domain/tests/credentials-storage.spec.ts`, 2 cases over the
+REAL stack (`storage-db` backend + `defineDomain`/`DomainFacility` + the declared
+zod schema, which the stub table cannot exercise): a value written by one context
+is read back by a REPLACEMENT context over the same database file, and the stored
+row is inspected directly to pin the layout the checklist's SQL queries
+(`dsh_storage_records`, unit `platform_credentials`, table `credentials`, key
+`ref:DEEPSEEK_API_KEY`, row shape). SQLite, since the suite has no PostgreSQL —
+same table layout as the postgres backend, dialect covered by the PG-gated
+suite.
 
 ### Unverifiable without a cluster
 
