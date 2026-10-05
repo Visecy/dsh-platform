@@ -9,10 +9,13 @@
  * `createByName` — the owner share's picked-path callback is not part of what
  * the cell is handed.
  *
- * The stylesheet half is here because a dialog that renders unstyled over the
- * frame is a real failure mode: the mask and the card must ship with it, and
- * the mask is the ONLY fixed-position rule this plugin may carry (the removed
- * status pill was the other one, and it covered the brand mark).
+ * The stylesheet half is here because the dialog's styling is now somebody
+ * else's: it is built from the official `@deepseek-ai/dsh-client-ui-primitives`
+ * family (see `new-workspace-dialog.spec.ts` for the identity assertions and
+ * `workspace-dialog-styles.spec.ts` for the full contract), so this plugin must
+ * ship NO rule for it — and no fixed-position rule at all, since the removed
+ * status pill was the plugin's other always-on overlay and it covered the brand
+ * mark.
  */
 import { describe, expect, it } from 'vitest'
 import { registerNewWorkspaceDialog, registerWorkspacePanel, type SlotRegistry } from '../src/client/register.ts'
@@ -86,14 +89,21 @@ describe('registerNewWorkspaceDialog', () => {
 })
 
 describe('the new-workspace dialog stylesheet', () => {
-  it('ships the mask and the card the dialog renders', () => {
-    expect(WORKSPACE_UI_CSS).toContain('.dsh-ws-modal-overlay')
-    expect(WORKSPACE_UI_CSS).toContain('.dsh-ws-modal-error')
+  it('no longer styles the dialog: the official family does', () => {
+    // The mask, the card, the field and the buttons are the official
+    // components' now. These rules are exactly what drifted into "the name
+    // field runs past the card", so their absence is asserted, not assumed.
+    expect(WORKSPACE_UI_CSS).not.toContain('dsh-ws-modal')
+    expect(WORKSPACE_UI_CSS).not.toContain('dsh-ws-btn')
   })
 
-  it('carries exactly one fixed-position rule: the dialog mask', () => {
+  it('carries no fixed-position rule at all: the overlay is the official Modal', () => {
+    // The dialog's mask used to be the one fixed-position rule allowed here;
+    // it now comes from the official `Modal` (its stylesheet ships with the
+    // web shell). What is left is the rule this plugin must never re-add: an
+    // always-on overlay of its own, which is how the status pill covered the
+    // brand mark.
     const fixed = WORKSPACE_UI_CSS.split('\n').filter((line) => /position:\s*fixed/.test(line))
-    expect(fixed).toHaveLength(1)
-    expect(fixed[0]).toContain('.dsh-ws-modal-overlay')
+    expect(fixed).toEqual([])
   })
 })

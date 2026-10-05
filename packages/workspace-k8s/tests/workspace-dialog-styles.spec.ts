@@ -1,27 +1,37 @@
 /**
- * The new-workspace dialog's STYLESHEET, asserted against the SHIPPED bundle.
+ * The new-workspace dialog no longer has a stylesheet of its own — and that is
+ * the assertion.
  *
- * The dialog was restored byte-identical from `bc6689a^` (commit 9d70232) while
- * its stylesheet was rewritten twice in between, and the operator's first click
- * showed a browser-default form. Markup restored verbatim says nothing about
- * whether anything styles it: the class names the component renders and the
- * class names the plugin injects are two independent facts, and only the pair
- * makes a dialog.
+ * The dialog was restored from `bc6689a^` (commit 9d70232) while the plugin's
+ * stylesheet was rewritten in between, so its markup rendered as a
+ * browser-default form; commit `ed944c6` then added `dsh-ws-*` rules by hand to
+ * make it look like a dialog again. Those rules drifted exactly as hand-written
+ * CSS does: the operator's next look found the name field running past the card
+ * ("都快顶出窗口了"), because the rules were the plugin's own idea of a modal
+ * rather than the platform's.
  *
- * So this spec does not grep the stylesheet for a selector someone remembered to
- * list. It:
+ * The rebuild takes the platform's own components instead
+ * (`@deepseek-ai/dsh-client-ui-primitives`, a static seed word of the web
+ * shell's module table — see `new-workspace-dialog.spec.ts` for the identity
+ * assertions), so this spec pins the other half of that decision:
  *
- *   1. applies the committed `lib/client.js` and takes the stylesheet the plugin
- *      ACTUALLY appended to `document.head` (and asserts it carries the
- *      `data-dsh-workspace-ui` guard attribute the injection path keys on);
- *   2. renders the dialog the bundle registered, with the real owner share;
- *   3. requires a rule that matches EVERY element the dialog renders —
- *      including the two footer buttons, whose `dsh-ws-btn` rules were the ones
- *      actually missing while the mask and card were present.
+ *   1. the plugin's injected stylesheet STILL exists, once per document, with
+ *      the `data-dsh-workspace-ui` guard the injection path keys on — the panel
+ *      and the detail view are still styled by it;
+ *   2. it carries NO rule for the dialog any more (the whole `新建工作区 Modal`
+ *      block and the `dsh-ws-btn` rules are deleted, not renamed), while the
+ *      panel/detail families it does own survive;
+ *   3. nothing the dialog renders carries a plugin-authored class. That is the
+ *      mechanical form of "the dialog is the official one": if a future edit
+ *      reintroduces a `dsh-ws-*` class to fix a width, this fails.
  *
- * A missing class therefore fails here as a user would meet it: as an element
- * with no styling. Adding a class name to the component without a rule for it
- * fails this spec too, which is the point.
+ * The real width of the field is the official `Input` wrapper's, inside the
+ * official `Modal`'s 24px content column (`Modal.module.css`: card
+ * `width: min(380px, 100%)`, body `padding: 0 24px`; `Input.module.css`: the
+ * wrapper is an inline-flex span with no width of its own, so a flex-column
+ * parent stretches it to exactly that column). No unit test here can measure
+ * that — it is asserted in the browser, on the live cluster, against the
+ * computed style of the rendered input.
  */
 import { describe, expect, it } from 'vitest'
 import {
@@ -62,12 +72,8 @@ function selectors(css: string): string[] {
     .filter((selector) => selector.startsWith('.'))
 }
 
-/** Whether some rule's selector names every class the element carries. */
-function styledBy(css: string, className: string): boolean {
-  const classes = className.split(/\s+/).filter((name) => name !== '')
-  return selectors(css).some((selector) =>
-    classes.every((name) => new RegExp(`\\.${name}(?![A-Za-z0-9_-])`).test(selector)))
-}
+/** The stylesheet the plugin actually appended. */
+const pluginCss = (): string => injectedStyles()[0]?.textContent ?? ''
 
 /** The dialog, open, as the frame renders it. */
 function openDialog(): Rendered {
@@ -89,13 +95,15 @@ function classNames(rendered: Rendered): string[] {
   return [...found]
 }
 
-describe('the new-workspace dialog stylesheet', () => {
-  it('is appended to the document, carrying the plugin guard attribute', () => {
+describe('the new-workspace dialog and the plugin stylesheet', () => {
+  it('still injects the plugin stylesheet, guarded the same way', () => {
     applyBundle()
     const styles = injectedStyles()
     expect(styles).toHaveLength(1)
     expect(styles[0].dataset.dshWorkspaceUi).toBe('true')
-    expect(styles[0].textContent).toContain('.dsh-ws-modal')
+    // The stylesheet is still the panel's and the detail view's home.
+    expect(styles[0].textContent).toContain('.dsh-wsp')
+    expect(styles[0].textContent).toContain('.dsh-wsd')
   })
 
   it('is injected once per document, not once per apply', () => {
@@ -107,31 +115,33 @@ describe('the new-workspace dialog stylesheet', () => {
     expect(injectedStyles()).toHaveLength(1)
   })
 
-  it('styles every element the dialog renders, footer buttons included', () => {
-    const rendered = openDialog()
-    const css = injectedStyles()[0]?.textContent ?? ''
-    const names = classNames(rendered)
-    // The dialog renders the mask, the card, its copy, its input, the footer
-    // and the two buttons; an empty tree would make the coverage check vacuous.
-    expect(names).toContain('dsh-ws-modal-overlay')
-    expect(names).toContain('dsh-ws-btn')
-    const unstyled = names.filter((name) => !styledBy(css, name))
-    expect(unstyled).toEqual([])
+  it('no longer carries a single rule for the dialog it replaced', () => {
+    applyBundle()
+    const css = pluginCss()
+    // The whole bespoke block: the mask/card/field/footer rules AND the button
+    // rules `ed944c6` added after their absence rendered user-agent buttons.
+    expect(css).not.toContain('dsh-ws-modal')
+    expect(css).not.toContain('dsh-ws-btn')
+    const dialogRules = selectors(css).filter((selector) =>
+      /\.dsh-ws-(?:modal|btn)(?![A-Za-z0-9_-])/.test(selector))
+    expect(dialogRules).toEqual([])
+    // The panel/detail families are NOT collateral damage: `dsh-wsd-btn` is a
+    // different class from the deleted `dsh-ws-btn` and must survive.
+    expect(selectors(css).some((selector) => selector.includes('.dsh-wsd-btn'))).toBe(true)
   })
 
-  it('renders the card as a centred overlay and its buttons as buttons', () => {
+  it('renders no element carrying a plugin-authored class', () => {
     const rendered = openDialog()
-    const css = injectedStyles()[0]?.textContent ?? ''
-    const overlay = rendered.find((element) => element.props.className === 'dsh-ws-modal-overlay')
-    expect(overlay).toBeDefined()
-    const buttons = rendered.findAll((element) => element.type === 'button')
-    expect(buttons).toHaveLength(2)
-    // The primary action is visually distinct from the cancel beside it; both
-    // are the platform's button, not the user agent's.
-    expect(styledBy(css, 'dsh-ws-btn')).toBe(true)
-    expect(styledBy(css, 'dsh-ws-btn primary')).toBe(true)
-    expect(styledBy(css, 'dsh-ws-modal-footer')).toBe(true)
-    // The mask the user closes the dialog with covers the frame.
-    expect(css).toMatch(/\.dsh-ws-modal-overlay\s*\{[^}]*position:\s*fixed/)
+    const names = classNames(rendered)
+    // The dialog renders the official family's elements; an empty tree would
+    // make this vacuous, so pin the ones that exist.
+    expect(names.length).toBeGreaterThan(0)
+    const own = names.filter((name) => name.includes('dsh-'))
+    expect(own).toEqual([])
+    // …and none of the classes it does carry is addressed by the plugin's CSS.
+    const css = pluginCss()
+    const addressed = names.filter((name) =>
+      selectors(css).some((selector) => selector.includes(`.${name}`)))
+    expect(addressed).toEqual([])
   })
 })

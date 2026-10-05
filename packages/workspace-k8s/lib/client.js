@@ -354,28 +354,6 @@ var WORKSPACE_UI_CSS = `
 .dsh-wsd-btn.danger { color: var(--dsw-alias-state-error-primary, #ef4444); }
 .dsh-wsd-btn:disabled { opacity: .5; cursor: default; }
 
-/* \u2500\u2500 \u65B0\u5EFA\u5DE5\u4F5C\u533A Modal \u2500\u2500 */
-.dsh-ws-modal-overlay { position: fixed; inset: 0; background: var(--dsw-alias-bg-mask-1, rgba(0,0,0,.24)); display: flex; align-items: center; justify-content: center; z-index: 100; }
-.dsh-ws-modal { width: 380px; background: var(--dsw-alias-bg-layer-3, #fff); border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.1)); border-radius: 12px; box-shadow: 0 16px 48px rgba(0,0,0,.2); padding: 20px; }
-.dsh-ws-modal h3 { margin: 0 0 8px; font-size: 15px; color: var(--dsw-alias-label-primary, #111); }
-.dsh-ws-modal-desc { margin: 0 0 14px; color: var(--dsw-alias-label-secondary, #666); font-size: 13px; }
-.dsh-ws-modal input { width: 100%; padding: 7px 9px; border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.1)); border-radius: 8px; font-size: 14px; background: var(--dsw-alias-button-elevated-fill, #fff); color: var(--dsw-alias-label-primary, #111); outline: none; }
-.dsh-ws-modal input:focus { border-color: var(--dsw-alias-brand-primary, #111); }
-.dsh-ws-modal-error { color: var(--dsw-alias-state-error-primary, #ef4444); font-size: 12px; margin: 8px 0 0; }
-.dsh-ws-modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
-/* The dialog's own buttons. The component renders the classes dsh-ws-btn and
-   dsh-ws-btn primary \u2014 the names it has carried since the first name-based
-   dialog \u2014 but their rules were lost when this stylesheet was rewritten for the
-   vendored browser (f9f3886), which restyled the DETAIL page's buttons as
-   dsh-wsd-btn and dropped the modal ones. The dialog was restored later
-   (9d70232) together with the mask and the card, so its two footer buttons
-   rendered as user-agent buttons beside a styled card: the exact shape of "the
-   dialog is unstyled". Same design tokens as the detail page's button so the
-   two surfaces cannot drift apart again. */
-.dsh-ws-btn { cursor: pointer; padding: 7px 16px; font-size: 14px; border: 1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.1)); border-radius: 10px; background: var(--dsw-alias-button-elevated-fill, #fff); color: var(--dsw-alias-label-primary, #111); }
-.dsh-ws-btn:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.08)); }
-.dsh-ws-btn.primary { background: var(--dsw-alias-button-primary-fill, #111); border-color: transparent; color: var(--dsw-alias-label-primary-foreground, #fff); }
-.dsh-ws-btn:disabled { opacity: .5; cursor: default; }
 `;
 function injectPanelStyles() {
   if (typeof document === "undefined") return;
@@ -511,6 +489,8 @@ function WorkspacePanelIcon({ size = 16, active = false }) {
 
 // packages/workspace-k8s/src/client/NewWorkspaceDialog.tsx
 var import_react2 = require("react");
+var import_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
+var FIELD_LABEL = "\u5DE5\u4F5C\u533A\u540D\u79F0";
 function NewWorkspaceDialog(props) {
   const { open, busy, onCancel, onError, createByName } = props;
   const [name, setName] = (0, import_react2.useState)("");
@@ -536,34 +516,49 @@ function NewWorkspaceDialog(props) {
     }
   };
   return (0, import_react2.createElement)(
-    "div",
-    { className: "dsh-ws-modal-overlay", onClick: (e) => {
-      if (e.target === e.currentTarget) onCancel();
-    } },
-    (0, import_react2.createElement)(
+    import_dsh_client_ui_primitives.Modal,
+    {
+      open,
+      onClose: onCancel,
+      closeLabel: "\u5173\u95ED",
+      title: "\u65B0\u5EFA\u5DE5\u4F5C\u533A",
+      description: "\u8F93\u5165\u5DE5\u4F5C\u533A\u540D\u79F0\u3002\u521B\u5EFA\u540E\u4F1A\u51FA\u73B0\u5728\u4FA7\u8FB9\u680F\u5DE5\u4F5C\u533A\u7EC4\u4E2D\u3002",
+      footer: [
+        (0, import_react2.createElement)(import_dsh_client_ui_primitives.Button, {
+          key: "cancel",
+          variant: "outline",
+          disabled: busy,
+          onClick: onCancel
+        }, "\u53D6\u6D88"),
+        (0, import_react2.createElement)(import_dsh_client_ui_primitives.Button, {
+          key: "create",
+          variant: "primary",
+          disabled: busy,
+          onClick: () => void submit()
+        }, "\u521B\u5EFA")
+      ]
+    },
+    (0, import_react2.createElement)(import_dsh_client_ui_primitives.Input, {
+      key: "name",
+      id: "dsh-ws-name",
+      "aria-label": FIELD_LABEL,
+      placeholder: "\u4F8B\u5982\uFF1Amy-project",
+      // The Modal's documented initial-focus hook. React's `autoFocus` is
+      // deliberately NOT used: it would fight the dialog's own focus restore.
+      "data-modal-autofocus": true,
+      value: name,
+      disabled: busy,
+      onChange: (e) => setName(e.target.value),
+      onKeyDown: (e) => {
+        if (e.key === "Enter") void submit();
+      }
+    }),
+    // The API's own message, verbatim, in the platform's danger tone. A failed
+    // create keeps the flow open so the operator can correct the name.
+    error === "" ? null : (0, import_react2.createElement)(
       "div",
-      { className: "dsh-ws-modal" },
-      (0, import_react2.createElement)("h3", null, "\u65B0\u5EFA\u5DE5\u4F5C\u533A"),
-      (0, import_react2.createElement)("p", { className: "dsh-ws-modal-desc" }, "\u8F93\u5165\u5DE5\u4F5C\u533A\u540D\u79F0\u3002\u521B\u5EFA\u540E\u4F1A\u51FA\u73B0\u5728\u4FA7\u8FB9\u680F\u5DE5\u4F5C\u533A\u7EC4\u4E2D\u3002"),
-      (0, import_react2.createElement)("label", { htmlFor: "dsh-ws-name" }, "\u5DE5\u4F5C\u533A\u540D\u79F0"),
-      (0, import_react2.createElement)("input", {
-        id: "dsh-ws-name",
-        placeholder: "\u4F8B\u5982\uFF1Amy-project",
-        autoFocus: true,
-        value: name,
-        disabled: busy,
-        onChange: (e) => setName(e.target.value),
-        onKeyDown: (e) => {
-          if (e.key === "Enter") void submit();
-        }
-      }),
-      error === "" ? null : (0, import_react2.createElement)("div", { className: "dsh-ws-modal-error" }, error),
-      (0, import_react2.createElement)(
-        "div",
-        { className: "dsh-ws-modal-footer" },
-        (0, import_react2.createElement)("button", { className: "dsh-ws-btn", onClick: onCancel, disabled: busy }, "\u53D6\u6D88"),
-        (0, import_react2.createElement)("button", { className: "dsh-ws-btn primary", onClick: () => void submit(), disabled: busy }, "\u521B\u5EFA")
-      )
+      { key: "error", role: "alert" },
+      (0, import_react2.createElement)(import_dsh_client_ui_primitives.Tag, { tone: "danger" }, error)
     )
   );
 }

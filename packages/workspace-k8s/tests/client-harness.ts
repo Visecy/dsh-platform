@@ -77,7 +77,101 @@ const reactStub = {
   useSyncExternalStore: <S>(_subscribe: unknown, getSnapshot: () => S): S => getSnapshot(),
 }
 
+/** The official component family the plugin's dialogs are built from. */
+export const PRIMITIVES_MODULE = '@deepseek-ai/dsh-client-ui-primitives'
+
+const element = (type: unknown, props: Record<string, unknown>, ...children: unknown[]): Element => ({
+  type,
+  props: { ...props, ...(children.length > 0 ? { children: children.length === 1 ? children[0] : children } : {}) },
+})
+
+/**
+ * Marks a component the tree walk may invoke.
+ *
+ * Only the harness's own stand-ins carry it. The plugin's sub-components do
+ * not: invoking one outside React would need hook state the harness keeps for
+ * the component under test alone, and `WorkspaceDetailView`'s row component
+ * uses `useState`. The walk therefore expands exactly the official family it
+ * provided, and leaves everything else a leaf — the behaviour every existing
+ * assertion was written against.
+ */
+const STAND_IN = Symbol.for('dsh.harness.clientStandIn')
+
+const standIn = <T extends (props: Record<string, unknown>) => unknown>(component: T): T => {
+  Object.defineProperty(component, STAND_IN, { value: true })
+  return component
+}
+
+/**
+ * The official primitives, stood in for.
+ *
+ * The real `@deepseek-ai/dsh-client-ui-primitives@0.2.0-rc.2` IS in this
+ * composition — it is one of the web shell's static seed words
+ * (`dsh-web-frontend/dist/assets/index-*.js` maps the specifier into the
+ * browser module table) and every official client bundle `require`s it — but it
+ * is a browser module: it imports `react`, `react-dom` and its own
+ * `.module.css` files, none of which this workspace installs. So the harness
+ * hands the bundle a stand-in for the members it uses, and keeps the parts a
+ * spec can assert: WHICH member the dialog rendered (identity, so a return to
+ * hand-written `div`s fails the spec), on which element, with which props.
+ *
+ * Every stand-in marks its output with `data-primitive="<member>"`. That is the
+ * HARNESS's marker, not the component's DOM: it is what makes "the dialog used
+ * the official member" checkable after the tree walk has expanded the component
+ * into its output.
+ *
+ * Each stand-in's DOM shape is the real component's, because that shape is what
+ * the assertions are about:
+ *   - `Modal`  → mask/card chrome with the title, the description, the body and
+ *                the footer; `null` while `open` is false;
+ *   - `Button` → the NATIVE button (variant and disabled ride through);
+ *   - `Input`  → a wrapper span around the native input, with `className` on
+ *                the wrapper and every other prop on the input (the real
+ *                component's split, and the reason a field's width comes from
+ *                its container rather than from a class);
+ *   - `Tag`    → a tone-carrying span.
+ */
+export const primitivesStub = {
+  Modal: standIn((props: Record<string, unknown>): Element | null => {
+    if (props.open !== true) return null
+    return element('div', { className: 'official-modal', role: 'dialog', 'aria-label': props.title, 'data-primitive': 'Modal' },
+      element('h2', { className: 'official-modal-title' }, props.title),
+      props.description === undefined
+        ? null
+        : element('p', { className: 'official-modal-description' }, props.description),
+      element('div', { className: 'official-modal-body' }, props.children),
+      element('div', { className: 'official-modal-footer' }, props.footer))
+  }),
+  Button: standIn((props: Record<string, unknown>): Element =>
+    element('button', {
+      className: `official-button ${String(props.variant ?? 'ghost')}`,
+      disabled: props.disabled,
+      onClick: props.onClick,
+      'data-primitive': 'Button',
+    }, props.children)),
+  Input: standIn((props: Record<string, unknown>): Element => {
+    const { icon, className, ...rest } = props
+    return element('span', { className: `official-input ${String(className ?? '')}`.trim(), 'data-primitive': 'Input' }, element('input', rest))
+  }),
+  Tag: standIn((props: Record<string, unknown>): Element =>
+    element('span', { className: 'official-tag', 'data-tone': props.tone ?? 'outline', 'data-primitive': 'Tag' }, props.children)),
+}
+
 let cached: { apply: (ctx: unknown) => void } | undefined
+
+/**
+ * Every module specifier the bundle asked the module table for while
+ * materializing. A plugin that stops using the official component family stops
+ * requiring it, which is a fact about the shipped artifact a spec can assert
+ * (the bundle treats those specifiers as externals; see
+ * `scripts/build-workspace-ui.mjs`).
+ */
+const required: string[] = []
+
+/** Every module specifier the committed bundle required at materialization. */
+export function requiredModules(): readonly string[] {
+  return required
+}
 
 /**
  * One `<style>` the bundle appended to `document.head`.
@@ -114,8 +208,12 @@ export function loadClientBundle(): { apply: (ctx: unknown) => void } {
   vi.stubGlobal('window', {
     __ModuleLoader__: {
       load: (definition: { factory: (req: (id: string) => unknown) => unknown }) => {
-        exports = definition.factory((id: string) =>
-          id === 'react' || id === 'react/jsx-runtime' ? reactStub : {}) as typeof exports
+        exports = definition.factory((id: string) => {
+          required.push(id)
+          if (id === 'react' || id === 'react/jsx-runtime') return reactStub
+          if (id === PRIMITIVES_MODULE) return primitivesStub
+          return {}
+        }) as typeof exports
       },
     },
   })
@@ -180,22 +278,51 @@ export function registeredIn(applied: Applied, slot: string): Registered {
 const isElement = (value: unknown): value is Element =>
   typeof value === 'object' && value !== null && 'type' in value && 'props' in value
 
+/**
+ * Render one node the way React would — for the HARNESS'S OWN stand-ins.
+ *
+ * The official primitives the dialog is built from are components (`Modal` →
+ * the card tree, `Button` → the native button, `Input` → the wrapper span
+ * around the native input), and assertions here are about the DOM a user meets
+ * ("is there exactly one input", "is there a button labelled 创建"), so the walk
+ * has to reach their output. Only components marked {@link STAND_IN} are
+ * invoked: they are hook-free by construction, while the plugin's own
+ * sub-components are rendered by the frame with hook state this harness keeps
+ * for the component under test alone.
+ */
+const renderNode = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(renderNode)
+  if (isElement(value) && typeof value.type === 'function') {
+    const component = value.type as { [STAND_IN]?: true }
+    if (component[STAND_IN] === true) {
+      return renderNode((value.type as (props: Record<string, unknown>) => unknown)(value.props))
+    }
+  }
+  return value
+}
+
 const childrenOf = (element: Element): unknown[] => {
   const raw = element.props.children
   if (raw === undefined || raw === null || typeof raw === 'boolean') return []
-  return Array.isArray(raw) ? raw : [raw]
+  return [raw].flat(Infinity).map(renderNode).flat(Infinity)
 }
 
-const walk = (element: Element | null, visit: (node: Element) => void): void => {
-  if (element === null) return
-  visit(element)
-  for (const child of childrenOf(element)) {
-    if (isElement(child)) walk(child, visit)
+const walk = (root: Element | null, visit: (node: Element) => void): void => {
+  const step = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const item of node) step(item)
+      return
+    }
+    if (!isElement(node)) return
+    visit(node)
+    for (const child of childrenOf(node)) step(child)
   }
+  // Start from the RENDERED root: the top-level element is usually a component
+  // (`Modal`), and what a user meets is its output, not the element itself.
+  step(renderNode(root))
 }
 
-const textOf = (element: Element | null): string => {
-  if (element === null) return ''
+const textOf = (root: Element | null): string => {
   const parts: string[] = []
   const visit = (node: unknown): void => {
     if (typeof node === 'string' || typeof node === 'number') { parts.push(String(node)); return }
@@ -204,7 +331,7 @@ const textOf = (element: Element | null): string => {
       for (const child of childrenOf(node)) visit(child)
     }
   }
-  visit(element)
+  visit(renderNode(root))
   return parts.join('')
 }
 

@@ -18,6 +18,14 @@ if (!existsSync(clientSrc)) {
 }
 mkdirSync(join(root, 'lib'), { recursive: true })
 
+// Browser-module specifiers the WEB SHELL provides and the profile must not
+// try to resolve here: the client bundle registers a factory with the page's
+// module loader, and these names are handed back through its `require` exactly
+// as the shell hands them to the official bundles. `dsh-client-ui-primitives`
+// is one of the shell's static seed words (alongside `react`, `react-dom`,
+// `dsh-client-store` and `dsh-client-ui-slots`), which is why the new-workspace
+// dialog can be built from the official `Modal`/`Button`/`Input`/`Tag`
+// components with no new dependency and no vendored copy.
 const external = [
   'react',
   'react/jsx-runtime',
@@ -26,6 +34,7 @@ const external = [
   'cordis',
   '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-client-ui-slots',
+  '@deepseek-ai/dsh-client-ui-primitives',
   '@deepseek-ai/dsh-client-ui-conversation',
   '@deepseek-ai/dsh-client-ui-conversation/client',
   '@deepseek-ai/dsh-client-ui-sidebar',

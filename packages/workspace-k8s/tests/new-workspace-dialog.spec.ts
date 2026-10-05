@@ -14,7 +14,14 @@
  *   - the commit path is `workspaceApi.create(name)` + a catalog poll, and the
  *     HTTP body carries a `name` and nothing else — no `path`, no picker;
  *   - the dialog renders one name input, submits on Enter or 创建, and shows the
- *     API's own error message in place (there is no silent failure path).
+ *     API's own error message in place (there is no silent failure path);
+ *   - the dialog is built from the OFFICIAL component family
+ *     (`@deepseek-ai/dsh-client-ui-primitives`): its chrome is the official
+ *     `Modal`, its field the official `Input`, its actions the official
+ *     `Button`, and its failure the official `Tag`. Its widths, spacing and
+ *     typography are therefore the platform's, not this plugin's invention —
+ *     which is what the operator asked for after a hand-written stylesheet left
+ *     the name field running past the card.
  *
  * The props are the real owner share the official picker flow hands its hole
  * occupant (`open`, `busy`, `onPicked`, `onCancel`, `onError`); `onPicked` is
@@ -25,8 +32,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   applyBundle,
   button,
+  PRIMITIVES_MODULE,
+  primitivesStub,
   registeredIn,
   renderComponent,
+  requiredModules,
   type Rendered,
 } from './client-harness.ts'
 
@@ -187,7 +197,7 @@ describe('new-workspace dialog: the commit path', () => {
     await click(rendered, '创建')
     rendered.rerender()
 
-    expect(rendered.find((element) => element.props.className === 'dsh-ws-modal-error')).toBeDefined()
+    expect(rendered.find((element) => element.props['data-tone'] === 'danger')).toBeDefined()
     expect(rendered.text()).toContain('名字已被占用')
     expect(onError).toHaveBeenCalledWith('名字已被占用')
     // A failed create keeps the flow open so the operator can correct the name.
@@ -223,5 +233,81 @@ describe('new-workspace dialog: what the operator sees', () => {
 
   it('renders nothing until the owner opens the flow', () => {
     expect(openDialog({ open: false }).root()).toBeNull()
+  })
+})
+
+/**
+ * The dialog is the OFFICIAL one, not a lookalike.
+ *
+ * The operator's instruction was to reuse the official page styles instead of
+ * writing our own, so "the dialog looks right" is not the assertion — "the
+ * dialog IS the official components" is. Identity is checkable because the
+ * bundle receives them from the module table exactly as the browser does
+ * (`@deepseek-ai/dsh-client-ui-primitives` is a seed word of the web shell).
+ */
+describe('new-workspace dialog: built from the official component family', () => {
+  const openDialog = (over: Record<string, unknown> = {}): Rendered => {
+    const entry = registeredIn(applyBundle(), 'sidebar.workspaces.directoryFlow')
+    return renderComponent(entry.component, {
+      open: true,
+      busy: false,
+      createByName: vi.fn(async () => undefined),
+      onCancel: vi.fn(),
+      onPicked: vi.fn(),
+      onError: vi.fn(),
+      ...over,
+    })
+  }
+
+  it('requires the official family from the module table', () => {
+    applyBundle()
+    expect(requiredModules()).toContain(PRIMITIVES_MODULE)
+  })
+
+  it('renders the official Modal as its root, with the official field and actions', () => {
+    const rendered = openDialog()
+    expect(rendered.root()?.type).toBe(primitivesStub.Modal)
+    const input = rendered.find((element) => element.type === 'input')
+    expect(input).toBeDefined()
+    // The native input sits inside the official Input wrapper, which is what
+    // bounds its width by the container instead of by a caller class.
+    const field = rendered.find((element) => element.props['data-primitive'] === 'Input')
+    expect(field?.props.className).toContain('official-input')
+    expect(rendered.find((element) => element.type === 'input')).toBeDefined()
+    const actions = rendered.findAll((element) => element.props['data-primitive'] === 'Button')
+    expect(actions.map((action) => action.props.className)).toEqual([
+      'official-button outline',
+      'official-button primary',
+    ])
+    expect(rendered.text()).toContain('取消')
+    expect(rendered.text()).toContain('创建')
+  })
+
+  it('shows a failure through the official danger Tag, not a bespoke element', async () => {
+    const entry = registeredIn(applyBundle(), 'sidebar.workspaces.directoryFlow')
+    const createByName = vi.fn(async () => { throw new Error('"a b" is not a valid workspace name') })
+    const rendered = renderComponent(entry.component, {
+      open: true, busy: false, createByName, onCancel: vi.fn(), onPicked: vi.fn(), onError: vi.fn(),
+    })
+    const input = rendered.find((element) => element.type === 'input')
+    ;(input?.props.onChange as (event: unknown) => void)({ target: { value: 'a b' } })
+    rendered.rerender()
+    await click(rendered, '创建')
+    rendered.rerender()
+
+    const tag = rendered.find((element) => element.props['data-primitive'] === 'Tag')
+    expect(tag?.props['data-tone']).toBe('danger')
+    expect(rendered.text()).toContain('"a b" is not a valid workspace name')
+    // Announced, not just painted.
+    expect(rendered.find((element) => element.props.role === 'alert')).toBeDefined()
+  })
+
+  it('carries no plugin-authored class: every element is the official one', () => {
+    const rendered = openDialog()
+    const own = rendered.elements()
+      .map((element) => element.props.className)
+      .filter((className): className is string => typeof className === 'string')
+      .filter((className) => className.includes('dsh-'))
+    expect(own).toEqual([])
   })
 })
