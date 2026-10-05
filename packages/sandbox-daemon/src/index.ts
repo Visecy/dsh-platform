@@ -7,17 +7,28 @@ import { resolve } from 'node:path'
 import { FilesService, FilesError } from './files.ts'
 import { CommandRegistry } from './commands.ts'
 import { PtyRegistry } from './pty.ts'
+import { prepareRuntimeRoot } from './runtime.ts'
 import type { CommandSpec, PtySpec, WriteIntent } from './protocol.ts'
 
 export interface DaemonOptions {
   root: string
   port: number
   commandTimeoutMs: number
+  /**
+   * Absolute directory for the daemon's OWN runtime state: command frame
+   * files, per-process pid/exit records, pty frame files. It MUST be absolute
+   * and MUST NOT be inside `root` — `root` is the user's workspace, and this
+   * state is per-pod (see `runtime.ts`). Omitted, the pod's own ephemeral area
+   * is used.
+   */
+  runtimeRoot?: string
 }
 
 export interface StartedDaemon {
   server: Server
   baseUrl: string
+  /** The pod-local directory holding this daemon's runtime state. */
+  runtimeRoot: string
 }
 
 const MAX_BODY = 64 * 1024 * 1024
@@ -58,9 +69,18 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartedDaemon> {
   // root MUST be absolute: child shells run with their own cwd and would
   // resolve a relative runtime root against it (writing status files into /).
   const root = resolve(opts.root)
+  // …and the runtime root is asked for in absolute terms explicitly, because
+  // this is the directory those children write their pid/exit records into.
+  const runtimeRoot = await prepareRuntimeRoot(root, opts.runtimeRoot)
+  // ONE root for the user's files, ANOTHER for the daemon's own state: the file
+  // service serves the workspace (the PVC mount) while commands/ptys publish
+  // their frame files, pids and exit records into the pod's ephemeral area.
+  // Sharing one root wrote `commands/`, `processes/` and `ptys/` into every
+  // workspace the operator created (visible in the file browser, in
+  // `git status` and to the agent).
   const files = new FilesService(root)
-  const commands = new CommandRegistry({ runtimeRoot: root, defaultGraceMs: 2000 })
-  const ptys = new PtyRegistry({ runtimeRoot: root })
+  const commands = new CommandRegistry({ runtimeRoot, defaultGraceMs: 2000 })
+  const ptys = new PtyRegistry({ runtimeRoot })
 
   const server = createServer(async (req, res) => {
     try {
@@ -270,5 +290,5 @@ export async function startDaemon(opts: DaemonOptions): Promise<StartedDaemon> {
     void ptys.dispose()
   })
 
-  return { server, baseUrl: `http://127.0.0.1:${port}` }
+  return { server, baseUrl: `http://127.0.0.1:${port}`, runtimeRoot }
 }
