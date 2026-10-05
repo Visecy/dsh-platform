@@ -7,9 +7,17 @@
  * missing from the official registry is bridged back into `workspace.list`.
  * This restores the frontend menu after a control-plane restart.
  *
- * Deletion is intentionally explicit (workspaceDeleter) rather than diff-driven:
- * a transient registry-list failure or empty/lost registry must never be
- * interpreted as mass deletion.
+ * The pass is not add-only. A record whose volume is gone is a workspace that
+ * no longer exists — the shape a delete leaves when it destroys the PVC but the
+ * record survives — and it used to stay on screen forever, because nothing ever
+ * looked at a record again. Removing it is deliberately NARROWER than the
+ * bridge: see {@link WorkspaceReconciler.pruneStaleRecords} for the
+ * observation that has to hold first, and why the bare fact "no volume" cannot
+ * authorize it.
+ *
+ * Deletion of the RUBBLE is separate and stays explicit (workspaceDeleter,
+ * record-deletions): a transient registry-list failure or empty/lost registry
+ * must never be interpreted as mass deletion.
  */
 import { mkdir, realpath } from 'node:fs/promises'
 import type { PodController } from './k8s-client.ts'
@@ -86,6 +94,24 @@ function pvcToWorkspaceId(name: string): string {
 }
 
 /**
+ * One cluster read, with FAILURE kept distinct from EMPTINESS.
+ *
+ * The prune removes records on the ABSENCE of a volume, and an empty array
+ * produced by a `catch` is not evidence of absence — it is how one failed
+ * listing would read as "no PVC exists anywhere" and become a mass deletion of
+ * every workspace on the cluster. The additive half of the pass can treat a
+ * failed read as an empty one (the next tick retries); the destructive half
+ * must not, so the flag travels with the value.
+ */
+async function readOr<T>(read: () => Promise<T>, fallback: T): Promise<{ value: T; ok: boolean }> {
+  try {
+    return { value: await read(), ok: true }
+  } catch {
+    return { value: fallback, ok: false }
+  }
+}
+
+/**
  * Run one diagnostic line without letting the diagnostic break the pass: a
  * logger that throws must not turn a reporting path into a new silent failure.
  */
@@ -131,6 +157,35 @@ export class WorkspaceReconciler {
   private reporting: Set<string> | undefined
   /** Tail of the pass queue; see {@link reconcile}. */
   private tail: Promise<void> = Promise.resolve()
+
+  /**
+   * The workspaces this process has OBSERVED backed by a volume.
+   *
+   * This set is the DISCRIMINATOR the stale-record prune reads, and it is the
+   * only honest one available at this layer. A record with no PVC means one of
+   * two things and they need opposite treatment:
+   *
+   *  - "its PVC existed and is now gone" — the workspace is gone; the record is
+   *    a ghost that must be removed, which is the case the operator hit; or
+   *  - "it never had a PVC here" — either adopted from outside this platform,
+   *    or created moments ago and still mid-provision (`management.create`
+   *    writes the record BEFORE anything creates the volume, so this is the
+   *    normal shape of a workspace being created).
+   *
+   * The cluster alone cannot tell them apart: both are "a record, no PVC". What
+   * separates them is history, and this pass is the only place that has it: a
+   * workspace that HAD a volume was seen with one on an earlier tick (or earlier
+   * in this one), and a workspace that never had one never will have been.
+   *
+   * Two limits are deliberate. The memory is in-process, so a ghost that
+   * outlived a control-plane restart is only pruned after its volume is seen and
+   * then missed again — the operator deletes again and this time it lands, the
+   * same price `record-deletions.ts` pays for never destroying on inference. And
+   * an entry is dropped the moment its record is pruned, so a workspace
+   * RE-created under the same id is judged from scratch instead of inheriting
+   * the deleted volume's witness.
+   */
+  private readonly volumesSeen = new Set<string>()
 
   constructor(private opts: ReconcilerOptions) {}
 
@@ -192,11 +247,14 @@ export class WorkspaceReconciler {
       for (const message of await condemned.retry()) this.report(message)
     }
 
-    const [known, pods, pvcs] = await Promise.all([
-      registry.list().catch(() => []),
-      controller.listPods(namespace).catch(() => []),
-      controller.listPvcs(namespace).catch(() => []),
+    const [knownRead, podsRead, pvcsRead] = await Promise.all([
+      readOr(() => registry.list(), [] as RegistryWorkspace[]),
+      readOr(() => controller.listPods(namespace), [] as string[]),
+      readOr(() => controller.listPvcs(namespace), [] as string[]),
     ])
+    const known = knownRead.value
+    const pods = podsRead.value
+    const pvcs = pvcsRead.value
 
     // The registry projection is also the uuid → workspace join the deletion
     // signal resolves against. `known` is empty when the listing failed, which
@@ -208,6 +266,19 @@ export class WorkspaceReconciler {
     // are stale prototypes/orphans and must NOT be auto-adopted; they are
     // surfaced for manual cleanup instead.
     const pvcIds = new Set(pvcs.map(pvcToWorkspaceId))
+    const podIds = new Set(pods)
+    // Every volume this pass sees is a workspace whose backing exists. Recorded
+    // before the prune, so a pass that cannot judge a workspace (an unreadable
+    // listing) still remembers the volume it did see.
+    for (const id of pvcIds) this.volumesSeen.add(id)
+
+    if (pvcsRead.ok && podsRead.ok) {
+      await this.pruneStaleRecords(known, pvcIds, podIds)
+    } else {
+      const missing = [podsRead.ok ? undefined : 'pods', pvcsRead.ok ? undefined : 'PVCs'].filter((what) => what !== undefined)
+      this.report(`workspace reconcile: could not list the cluster's ${missing.join(' and ')}; the stale-record prune was skipped this pass (${known.length} record(s) left in place)`)
+    }
+
     const resources = new Set([...pvcIds].filter((id) => condemned?.isCondemned(id) !== true))
     for (const pod of pods) {
       if (pvcIds.has(pod) && condemned?.isCondemned(pod) !== true) resources.add(pod)
@@ -254,6 +325,65 @@ export class WorkspaceReconciler {
     if (registered === undefined) return
 
     await this.rebindSessions(registered, hostRoot)
+  }
+
+  /**
+   * Remove the records of workspaces whose volume is gone.
+   *
+   * This is the mirror of the bridge above and it is intentionally narrower. A
+   * record is removed only when ALL of these hold:
+   *
+   *  - its id has no PVC in this pass's snapshot (the workspace's durable
+   *    backing is gone);
+   *  - this process has SEEN that id backed by a volume before
+   *    ({@link volumesSeen}) — so "no PVC" means "the PVC existed and is now
+   *    gone", never "this record never described a volume here": a workspace
+   *    adopted from outside, or one created seconds ago and still
+   *    mid-provision, has no volume YET and must survive every pass;
+   *  - no pod runs for it, so a workspace whose volume was removed underneath a
+   *    live pod is reported as an orphan (and cleaned up deliberately) instead
+   *    of disappearing from the sidebar while it still serves requests;
+   *  - it is not condemned (see `record-deletions.ts`): a destroy being retried
+   *    has no record to remove, and if one reappeared the condemnation, not this
+   *    pass, is the authority;
+   *  - the pod AND PVC listings both succeeded this pass. A failed listing is
+   *    indistinguishable from an empty cluster at this layer, and acting on it
+   *    would delete every workspace on a cluster hiccup. The caller skips this
+   *    method entirely in that case.
+   *
+   * A removed record cannot come back on a later pass: the bridge only creates
+   * records for PVC-backed resources, and the volume is what is missing — so the
+   * prune is permanent, which is what "delete destroys the workspace" means.
+   * @param known - the registry's current records.
+   * @param pvcIds - workspace ids backed by a PVC in this pass's snapshot.
+   * @param podIds - workspace ids with a pod in this pass's snapshot.
+   */
+  private async pruneStaleRecords(
+    known: readonly RegistryWorkspace[],
+    pvcIds: ReadonlySet<string>,
+    podIds: ReadonlySet<string>,
+  ): Promise<void> {
+    const { registry, condemned } = this.opts
+    for (const ws of known) {
+      const id = ws.workspaceId
+      if (pvcIds.has(id)) continue
+      if (!this.volumesSeen.has(id)) continue
+      if (podIds.has(id)) continue
+      if (condemned?.isCondemned(id) === true) continue
+      try {
+        await registry.delete(id)
+        // The observation history ends with the volume it described. Keeping it
+        // would sentence the record of a workspace RE-created under the same id:
+        // that fresh record has no volume yet, and the deleted volume's witness
+        // would read it as a ghost on the very next pass.
+        this.volumesSeen.delete(id)
+        this.report(`workspace reconcile: removed the record of '${id}' (${ws.path}): its PVC is gone and no pod runs for it`)
+      } catch (error) {
+        // Leave the witness in place: the record is still stale, and the next
+        // pass must be able to try again.
+        this.report(`workspace reconcile: could not remove the record of '${id}' (${ws.path}): ${String(error)}`)
+      }
+    }
   }
 
   /**
