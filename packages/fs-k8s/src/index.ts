@@ -319,8 +319,65 @@ export class FsK8s extends FileSystem {
     throw this.asFsError(e)
   }
 
+  /** `path` is `hostRoot` itself or lies underneath it. */
+  private withinRoot(path: string): boolean {
+    const rel = posix.relative(this.translate.hostRoot, path)
+    return rel === '' || (!rel.startsWith('..') && !posix.isAbsolute(rel))
+  }
+
+  /**
+   * The base a RELATIVE path resolves against when the caller supplies no
+   * `opts.cwd`.
+   *
+   * A relative path has no meaning without one, and refusing to answer is not
+   * neutral: `@deepseek-ai/dsh-headless` boots with
+   * `fs.processPath(await fs.resolve("."))` (`lib/index.js:315`) because it is
+   * ASKING for the session cwd — it cannot supply one. Answering "no workspace
+   * here" made this provider the reason the headless profile could not start
+   * (R5: the plugin layer must work under any profile, even though this
+   * deployment is not required to).
+   *
+   * So the provider defines the base, in this order:
+   *
+   *   1. the harness process's own working directory, when it lies inside the
+   *      workspace root. That is what `.` means on every real filesystem (POSIX
+   *      resolves a relative path against the process cwd), and it is the case
+   *      that makes a dsh started INSIDE a workspace pod name that workspace
+   *      rather than the anchors directory above it — host and pod paths are
+   *      identical in this deployment (`hostRoot === podRoot === /workspaces`),
+   *      so the process cwd is a path this provider's world can address.
+   *   2. otherwise the workspace root itself: the one directory this provider
+   *      always serves. The deployment already declares it the process world's
+   *      start (the profile mounts `@deepseek-ai/dsh-bash-local` with
+   *      `cwd: '/workspaces'`), it really exists — `management.create` and the
+   *      reconciler mkdir the anchor directories — and it is the only answer a
+   *      static-endpoint composition (no resolver, no session, no workspace id)
+   *      can give without inventing a workspace that does not exist. A caller
+   *      that then operates on it gets the same one-line, non-fatal membership
+   *      answer as any other path beside the anchors (7b536ea), instead of a
+   *      boot failure.
+   */
+  private defaultBase(): string {
+    const root = this.translate.hostRoot
+    let cwd: string
+    try {
+      cwd = posix.normalize(process.cwd())
+    } catch {
+      // A process whose cwd has been removed has no relative-path base to
+      // offer; the workspace root is still one (and must not become a throw).
+      return root
+    }
+    return this.withinRoot(cwd) ? cwd : root
+  }
+
   override async resolve(path: string, opts?: { cwd?: string }): Promise<FsTarget> {
-    const abs = opts?.cwd !== undefined && !path.startsWith('/') ? opts.cwd + '/' + path : path
+    // ABSOLUTE paths are literal — `/.git` keeps answering "absent" (534565e),
+    // and an absolute path under the root keeps routing to its workspace.
+    // RELATIVE paths take the caller's `opts.cwd` (the seam's documented base)
+    // or, when the caller cannot supply one, the provider's own — see
+    // `defaultBase`. `join` normalizes as well, so a returned displayPath never
+    // carries a stray `/.` or `..` segment.
+    const abs = posix.isAbsolute(path) ? path : posix.join(opts?.cwd ?? this.defaultBase(), path)
     let podPath: string
     try {
       podPath = this.translate.toPod(abs)
@@ -332,7 +389,7 @@ export class FsK8s extends FileSystem {
     }
     return {
       targetKey: FsTargetKey(`dsh-k8s:${podPath}`),
-      displayPath: abs,
+      displayPath: posix.normalize(abs),
     }
   }
 
