@@ -2,19 +2,36 @@
 
 DeepSeek Harness 多用户平台——插件 monorepo（pnpm workspace）。
 
-**架构**：方案 1（执行世界 seam）。会话/agent loop/Web UI 在控制面宿主；执行（fs/subprocess/PTY）经官方 seam 路由到每工作区一个的 k8s 执行 pod。
+**状态：预览版（preview）**。当前 `main` 对应 tag `v0.1.87`；发布物是控制面镜像
+`ghcr.io/visecy/dsh-web-platform`（插件内置）与 npm 上的 `@visecy/dsh-*` 插件包。
+预览版**不面向生产**：不支持多副本、多租户隔离、非 Kubernetes 部署等，先读
+[已知限制](#已知限制预览版明确不支持)。
 
-**设计文档**：见 ../dsh-research/specs/（2026-08-16-workspace-lifecycle-design.md、2026-08-16-multiuser-platform-design.md）
-**实现计划**：见 ../dsh-research/plans/2026-08-16-platform-implementation.md
+**架构**：方案 1（执行世界 seam）。会话 / agent loop / Web UI 在控制面宿主；执行
+（fs / subprocess / PTY）经官方 seam 路由到「每工作区一个」的 k8s 执行 pod。
+一页纸的组件与数据流见 [`docs/architecture.md`](docs/architecture.md)；完整设计见
+[`design/`](design/)。
 
-**DSH 基线**：`0.1.5-rc.1`（npm `latest`）。所有 `@deepseek-ai/dsh-*` 依赖都按该版本机械对齐；
-`docker/dsh-web-platform.Dockerfile` 的 `DSH_VERSION` 与之相同。升级到新的 DSH 版本时，
-必须重新验证依赖官方扩展点的地方（见下）。
+**部署**：控制面 chart、工作区运行时参考、IdP 配置样例与本地集群脚本在配套仓库
+[`dsh-platform-deploy`](https://github.com/Visecy/dsh-platform-deploy)，运维步骤见该仓库的
+`docs/deployment.md`。本仓 README 只讲插件与开发。
+
+## 兼容性矩阵
+
+平台按 tag 发布：镜像与插件版本都由 tag 决定，DSH 版本是**显式 pin**（不是 semver 范围）。
+
+| 平台版本 | 目标 DSH | 说明 |
+|---|---|---|
+| `v0.1.80` – `v0.1.87`（当前 `main`） | `0.2.0-rc.2`（npm `latest`） | 四处真值必须一致：`pnpm-lock.yaml`、各 `packages/*/package.json` 的 `@deepseek-ai/dsh-*` 依赖、`docker/dsh-web-platform.Dockerfile` 的 `DSH_VERSION`、`.github/workflows/release.yml` 的 build-args |
+| `v0.1.2` – `v0.1.79` | `0.1.5-rc.1` 及更早 | 历史版本，不再回归验证 |
+
+**升级 DSH 版本时**：先改上表四处真值，再跑 `pnpm -r test` + 两个 smoke（见
+[开发与验证](#开发与验证)），并逐条复核下面「与官方产物耦合的地方」。
 
 **认证**：同 pod 的 oauth2-proxy sidecar 是唯一入口（chart 传 `--host 127.0.0.1`），
-进程内不再有任何认证组件。`@visecy/dsh-identity-bridge` 只做三件事：注入
-`__DSH_TRANSPORT__`、用官方 `authenticatedUrl()`/`authorizeIndex()` 完成 launch-token
-handoff、从 sidecar 的 `X-Forwarded-User`/`X-Forwarded-Groups` 提供 `ctx.dshAuth`。
+进程内没有任何认证组件。`@visecy/dsh-identity-bridge` 只做三件事：注入
+`__DSH_TRANSPORT__`、用官方 `authenticatedUrl()` / `authorizeIndex()` 完成 launch-token
+handoff、从 sidecar 的 `X-Forwarded-User` / `X-Forwarded-Groups` 提供 `ctx.dshAuth`。
 
 ### 部署硬前提（违反即等于没有认证）
 
@@ -32,37 +49,59 @@ handoff、从 sidecar 的 `X-Forwarded-User`/`X-Forwarded-Groups` 提供 `ctx.ds
 **违反任一条的后果**：任何能连到这个端口的调用者，只要自己写 `X-Forwarded-User` /
 `X-Forwarded-Groups` 就能冒充任意用户——上游身份头没有签名，唯一屏障是拓扑。
 另外，进程内闸门随 OIDC gate 一起删除后，官方 `/plugins`（bundle）与 `/plugins/events`（SSE）
-路由**自身没有任何信任检查**（0.1.5-rc.1 实测：两处 0 个 `trustedHosts` 引用），
-它们与未认证调用者之间同样只剩"唯一入口是认证代理"这一条。
+路由**自身没有任何信任检查**（0.1.5-rc.1 实测；0.2.0-rc.2 复核：`trustedHosts` 只出现在
+`dsh-client-connection` / `dsh-web-app`，而这两条路由的宿主 `dsh-client-hmr` /
+`dsh-client-modules` 中 0 处引用），它们与未认证调用者之间同样只剩「唯一入口是认证代理」
+这一条。
+
+工作区执行 pod 的 daemon（files / commands / pty）**没有认证**。平台可以按工作区创建一条
+NetworkPolicy 把它围到控制面（`workspace.networkPolicy.enabled=true`，**默认关闭**：只有支持
+NetworkPolicy 的 CNI 会执行，selector 写错会让所有工作区不可达）。默认关闭时，必须由部署方在
+命名空间上提供默认拒绝 / 显式放行，否则同集群任意 Pod 都能读写工作区文件并执行命令。
+见 `docs/architecture.md` 与部署仓的 deployment 文档。
+
+### 已知限制（预览版明确不支持）
+
+| 场景 | 现状 |
+|---|---|
+| 非 Kubernetes 部署（单机 Docker / docker-compose） | ❌ 不支持：执行世界完全路由到工作区 Pod，profile 禁用了官方本地 fs / subprocess 行 |
+| 控制面多副本（HA / 水平扩容） | ❌ 不支持：无 leader election；生命周期状态与闲置回收在进程内，跨副本会互相回收对方的 Pod |
+| 多租户隔离与授权 | ❌ 未实现：`rbac` / `cluster-access` 是空实现，`ctx.dshAuth` 目前没有消费方。**所有通过认证的用户共享同一份控制面状态**（会话、工作区、模型凭据），且都能列出 / 休眠 / 删除彼此的工作区 |
+| ARM64 / 多架构镜像 | ⚠️ release workflow 已构建 `linux/amd64` + `linux/arm64`；**v0.1.87 及更早的已发布镜像只有 amd64**，请用包含该改动之后打出的 tag |
+| air-gapped / 离线安装 | ❌ 未提供镜像搬运与离线清单 |
+| `pod-security.kubernetes.io/enforce=restricted` 命名空间 | ✅ 控制面与工作区 Pod 都已 runAsNonRoot、丢弃全部 capability、设置 `seccompProfile: RuntimeDefault`（控制面容器另有 `readOnlyRootFilesystem`）；工作区 daemon 需要可写的 `/tmp`，这不属于 restricted 的检查项 |
+| 子路径发布（`https://host/dsh`） | ❌ 只能独占一个 host authority |
+| 工作区共享存储（ReadWriteMany） | ❌ PVC 固定 `ReadWriteOnce` |
+| 数据库 | ⚠️ PostgreSQL 必需：镜像 profile 写死 `type: postgres`；代码层存在 SQLite 后端，但镜像不提供该路径 |
+| 控制面 ↔ 工作区网络 | ⚠️ 控制面必须能直连工作区 Pod IP 的 daemon 端口（4390）；默认拒绝 egress 的策略、Istio STRICT mTLS 或集群外控制面都会切断全部 fs / 命令 / PTY |
 
 ## 包清单
 
-| 包 | 职责 | 计划 |
+| 包 | 职责 | 状态 |
 |---|---|---|
-| sandbox-daemon | 工作区执行 pod 内 daemon（files/commands/pty） | Plan 1 |
-| fs-k8s | ctx.fs 提供方（→ daemon） | Plan 1 |
-| subprocess-k8s | ctx.subprocess 提供方（→ daemon） | Plan 1 |
-| workspace-k8s | 工作区生命周期状态机 + lifecycle owner + 官方槽位状态面板 | Plan 1-2 |
-| session-persistence-rdb | ctx.sessionPersistence 的 SQLite/PostgreSQL 后端 | Plan 2 |
-| storage-db | ctx.storage 的 SQLite/PostgreSQL 后端 | Plan 3 |
-| platform-domain | 平台状态（工作区/设置/凭据）的 storage-domain 规格 | Plan 3 |
-| identity-bridge | 官方扩展点上的身份 seam（transport hook + token handoff + ctx.dshAuth） | Plan 5 |
-| workspace-picker | ctx.directoryPicker 的 k8s PVC 实现 | Plan 3 |
-| auth-oidc | **deprecated**：OIDC client + session codec 库（不再注册插件，认证已移到 sidecar） | — |
-| rbac / cluster-access | 会话注册表 + 授权；集群准入（**空实现**） | Plan 4-5 |
+| sandbox-daemon | 工作区执行 pod 内 daemon（files / commands / pty） | 可用；镜像 `ghcr.io/visecy/dsh-platform/dsh-sandbox-daemon` |
+| fs-k8s | `ctx.fs` 提供方（→ daemon） | 可用；发布到 npm |
+| subprocess-k8s | `ctx.subprocess` 提供方（→ daemon） | 可用；发布到 npm |
+| workspace-k8s | 工作区生命周期状态机 + lifecycle owner + 官方槽位状态面板 | 可用；发布到 npm |
+| workspace-picker | `ctx.directoryPicker` 的 k8s PVC 实现 | 可用；发布到 npm |
+| identity-bridge | 官方扩展点上的身份 seam（transport hook + token handoff + `ctx.dshAuth`） | 可用；**尚未发布到 npm**（镜像从本仓检出安装），首次发布需要手工 bootstrap |
+| session-persistence-rdb | `ctx.sessionPersistence` 的 SQLite / PostgreSQL 后端 | 可用；镜像内置（私有包） |
+| storage-db | `ctx.storage` 的 SQLite / PostgreSQL 后端 | 可用；镜像内置（私有包） |
+| platform-domain | 平台状态（工作区 / 设置 / 凭据）的 storage-domain 规格 | 可用；镜像内置（私有包） |
+| logging-stdout | Cordis 日志的 stdout sink | 可用；镜像内置（私有包） |
+| auth-oidc | **deprecated**：OIDC client + session codec 库（不再注册插件，认证已移到 sidecar） | 仅历史兼容，计划停止发布 |
+| rbac / cluster-access / daemon-protocol / user-domain | 授权、集群准入、协议、用户域的占位 | **空实现**，预览版未接线 |
 
 ## 与官方产物耦合的地方（升级 DSH 时必须复核）
 
 **两条路径都已零编译产物补丁、零 webserver fork**：镜像里的 `@deepseek-ai/*` 与 npm 发布的一致。
-认证路径由 `identity-bridge` 走官方扩展点（见 2）；工作区 UI 也已在 **Plan 2（工作区 UI 解耦）**
-中反转回官方槽位：官方 `ui-workspace` 行重新启用并own 侧栏工作区/会话、hero 与
-`sidebar.workspaces` 契约，平台只**新增** `workspace-k8s` 的状态面板
-（`main` keyed 面板 + `sidebar.panellist` 入口 + 可选 `shell.overlay` 药丸，见
-`packages/workspace-k8s/src/client/panel.tsx`）。原先"把官方浏览器 bundle 抠出来打 14 处补丁"
-的 vendoring 链路（`vendor-workspace-browser.mjs` / `vendored-workspace.ts` /
-`enable-workspace-ui.mjs`）已整体删除，因此**升级 DSH 不再需要重新对锚点**。
+认证路径由 `identity-bridge` 走官方扩展点；工作区 UI 也已反转回官方槽位：官方 `ui-workspace`
+行重新启用并 own 侧栏工作区 / 会话、hero 与 `sidebar.workspaces` 契约，平台只**新增**
+`workspace-k8s` 的状态面板（`main` keyed 面板 + `sidebar.panellist` 入口 + 可选
+`shell.overlay` 药丸，见 `packages/workspace-k8s/src/client/panel.tsx`）。此前「把官方浏览器
+bundle 抠出来打补丁」的 vendoring 链路已整体删除，因此**升级 DSH 不再需要重新对锚点**。
 
-升级时仍需复核的官方契约（跑 `pnpm -r test` + 两个 smoke 即可发现变化）：
+升级时仍需复核（跑 `pnpm -r test` + 两个 smoke 即可发现变化）：
 
 1. `identity-bridge`：`webserver/index-inject` 的 `{ kind: 'global', name, value }` 行、
    `ctx.connection.authenticatedUrl()` / `authorizeIndex()` 与 `ConnectionIndexResponse`、
@@ -72,27 +111,39 @@ handoff、从 sidecar 的 `X-Forwarded-User`/`X-Forwarded-Groups` 提供 `ctx.ds
    `shell.overlay`（list）。这三者自 0.1.5-rc.1 起就在 `dsh-client-ui-layout` /
    `dsh-client-ui-sidebar` 的类型契约里；若上游改签名，面板注册会走 `slots.inject` 的等待路径
    （槽位未声明就不注册），不会像 vendoring 那样静默改坏官方 bundle。
+3. `docker/profiles/*.cordis.patch.yml` 里被 disable / 重述的官方行 id 与 config key：
+   每个 patch 都必须在目标 DSH 版本的 `dsh --profile web --dump-default-config` 里仍然存在，
+   否则 `patch: entry "…" not found` 只 warn 不报错。
 
 ## 开发与验证
 
 ```bash
 pnpm install && pnpm build && pnpm test
 
+# 端到端配置验证：搭一个与镜像同构的临时 DSH home（profile bundles + 平台插件行）。
+# 需要与本仓 DSH_VERSION 一致的 dsh CLI（当前 0.2.0-rc.2；镜像里装的就是它）。
+bash scripts/harness-profile.sh /tmp/dsh-harness
+DSH_HOME=/tmp/dsh-harness/home dsh --profile web --dump-config > /tmp/web.yml
+
 # 零补丁冒烟：只装配【未打补丁】的官方 webserver + 官方 connection +
 # identity-bridge，断言 transport 注入 / 302 handoff / 303 换 cookie / 200 渲染 /
 # /api 401 策略 / x-forwarded-* 身份头。认证路径上任何编译产物补丁都会让它失败。
-node <repo>/scripts/smoke-zero-patch.mjs --target "$PWD/node_modules"
+#
+# --target 必须指向一个 **profile** 的 node_modules（含未打补丁的官方包与
+# identity-bridge），也就是上面 harness 脚本产出的那个目录；仓库根的 node_modules
+# 只有构建工具（esbuild / typescript），跑不了这两个脚本。
+node scripts/smoke-zero-patch.mjs --target /tmp/dsh-harness/home/profiles/web/node_modules
 
 # 官方扩展点证据：这两个补丁为什么可以被官方扩展点替代（同样只加载未打补丁的产物）
-node <repo>/scripts/smoke-official-integration.mjs --target "$PWD/node_modules"
-
-# 端到端配置验证：搭一个与镜像同构的临时 DSH home（profile bundles + 平台插件行）
-# 需要 0.1.5-rc.1 的 dsh CLI（镜像里装的就是它）
-bash scripts/harness-profile.sh /tmp/dsh-harness
-DSH_HOME=/tmp/dsh-harness/home dsh --profile web --dump-config > /tmp/web.yml
+node scripts/smoke-official-integration.mjs --target /tmp/dsh-harness/home/profiles/web/node_modules
 ```
 
 `--dump-config` 会解析 profile 的 bundle/patch 层并把每个 row 的最终配置打印出来；
 未知 id / name 不匹配只会 warn，所以要看 stderr 里有没有 warning。
 
-`pnpm build` 中 `packages/sandbox-daemon` 走 `tsc --noEmit`（其它包走 esbuild 打包，不做类型检查）。
+`pnpm build` 中 `packages/sandbox-daemon` 走 `tsc --noEmit`；其它包走 esbuild 打包，不做类型检查，
+**已发布的 npm 包因此暂不提供 TypeScript 类型声明**（`package.json` 里不再声明 `types`，
+以免指向不存在的 `dist/index.d.ts`）。补齐声明前需要先让这些包通过 `tsc`。
+
+`pnpm -r test` 里 PostgreSQL 与 golden-fixture 用例默认跳过（需要 `TEST_PG_URL` /
+`DSH_CAPTURE_FIXTURE=1`），所以本地全绿不等于 Postgres 后端被覆盖。
