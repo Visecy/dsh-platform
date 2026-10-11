@@ -1,0 +1,113 @@
+# Pull-request / main-branch gate.
+#
+# Why this exists: the only other workflow runs on `v*` tags, so between tags
+# nothing checked a commit -- no tests, no typecheck, no smoke, no consistency
+# check on the package manifests. This is the gate that makes the tag-triggered
+# release a formality instead of the first time anything runs.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r build
+
+      # packages/{platform-domain,session-persistence-rdb,storage-db}/dist are
+      # committed AND installed by the image, but the release workflow does not
+      # rebuild them. This is the gate that keeps a source edit from shipping a
+      # stale bundle.
+      - name: Committed build output must match the source
+        run: git diff --exit-code -- 'packages/*/dist' 'packages/*/lib'
+
+      # The blocker this replaces: five published packages declared
+      # `types: dist/index.d.ts` while the build only emitted dist/index.js.
+      - name: Package manifests promise only what the tarball ships
+        run: node scripts/check-package-manifests.mjs
+
+      # The blocker this replaces: the DSH baseline was stated four different
+      # ways (README / Dockerfile / release workflow / stale exclude list).
+      - name: One DSH version everywhere
+        run: node scripts/check-dsh-version.mjs
+
+      - name: Test
+        run: pnpm -r test
+
+      - name: Typecheck
+        # `pnpm -r build` type-checks sandbox-daemon (tsc --noEmit). These two are
+        # the only other packages that pass `tsc` today; the remaining published
+        # packages carry pre-existing type drift against DSH 0.2.0-rc.2, so
+        # gating them here would block every commit. Closing that drift (and then
+        # dropping this note) is follow-up work.
+        run: |
+          pnpm --filter @visecy/dsh-identity-bridge run typecheck
+          pnpm --filter @visecy/dsh-fs-k8s run typecheck
+
+  auth-smoke:
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # The smokes boot the real composition and need the official CLI. The
+      # version is READ from the Dockerfile rather than repeated here, so this
+      # file can never become the fifth place the DSH baseline is stated.
+      - name: Install the pinned dsh CLI
+        run: |
+          DSH_VERSION="$(sed -n 's/^ARG DSH_VERSION=//p' docker/dsh-web-platform.Dockerfile | head -1)"
+          echo "installing @deepseek-ai/dsh@${DSH_VERSION}"
+          npm install --global --no-audit --no-fund \
+            --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs \
+            "@deepseek-ai/dsh@${DSH_VERSION}"
+          dsh --version
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r build
+
+      # Builds a throwaway DSH home that mirrors the image's profile: official
+      # bundles + every platform plugin row. It also asserts that all plugins
+      # import cleanly from the profile and that the official CLI refuses a
+      # non-loopback bind.
+      - name: Build the harness profile
+        run: bash scripts/harness-profile.sh "$RUNNER_TEMP/dsh-harness"
+
+      - name: Zero-patch smoke (the auth path has no compiled-artifact patches)
+        run: node scripts/smoke-zero-patch.mjs --target "$RUNNER_TEMP/dsh-harness/home/profiles/web/node_modules"
+
+      - name: Official-integration smoke (each patch has an official replacement)
+        run: node scripts/smoke-official-integration.mjs --target "$RUNNER_TEMP/dsh-harness/home/profiles/web/node_modules"

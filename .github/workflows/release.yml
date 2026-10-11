@@ -1,10 +1,19 @@
 name: release
 
+# Tag-driven. `workflow_dispatch` needs an explicit tag: on a manual run
+# GITHUB_REF_NAME is the BRANCH, and the old workflow fed it straight into
+# `npm version`, so a manual dispatch could only ever fail (or, worse, version
+# the packages to a branch name).
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing v* tag to release (e.g. v0.1.88)'
+        required: true
+        type: string
 
 env:
   IMAGE: ghcr.io/visecy/dsh-web-platform
@@ -30,18 +39,44 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: pnpm
 
+      # The tag is the single source of truth: every package is versioned to the
+      # tag before publishing, and the image installs that exact version.
+      - name: Resolve the release tag
+        run: |
+          REF="${{ inputs.tag || github.ref_name }}"
+          case "$REF" in
+            v*) ;;
+            *) echo "FATAL: release ref '$REF' is not a v* tag" >&2; exit 1 ;;
+          esac
+          echo "RELEASE_TAG=$REF" >> "$GITHUB_ENV"
+          echo "PLUGIN_VERSION=${REF#v}" >> "$GITHUB_ENV"
+
+          # Prerelease tags (anything with a semver prerelease part) must not
+          # move `latest`: a preview release would otherwise become the default
+          # tag for every `:latest` consumer.
+          case "${REF#v}" in
+            *-*) IMAGE_TAGS="${IMAGE}:${REF}" ; DAEMON_TAGS="${DAEMON_IMAGE}:${REF}" ;;
+            *)
+              IMAGE_TAGS="${IMAGE}:${REF},${IMAGE}:latest"
+              DAEMON_TAGS="${DAEMON_IMAGE}:${REF},${DAEMON_IMAGE}:latest"
+              ;;
+          esac
+          echo "IMAGE_TAGS=$IMAGE_TAGS" >> "$GITHUB_ENV"
+          echo "DAEMON_TAGS=$DAEMON_TAGS" >> "$GITHUB_ENV"
+          echo "releasing $REF (plugin version ${REF#v}); image tags: $IMAGE_TAGS"
+
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      # The tag is the single source of truth: packages are versioned to the
-      # tag before publishing, and the image installs that exact version.
+      # All packages, not only the published ones: the workspace has to be
+      # internally consistent (it used to leave logging-stdout at 0.1.0 while
+      # everything else moved to the tag).
       - name: Sync versions to tag
         run: |
-          VER="${GITHUB_REF_NAME#v}"
-          echo "PLUGIN_VERSION=$VER" >> $GITHUB_ENV
-          for p in auth-oidc fs-k8s subprocess-k8s workspace-k8s workspace-picker identity-bridge; do
-            (cd packages/$p && npm version $VER --no-git-tag-version --allow-same-version)
+          for p in packages/*; do
+            (cd "$p" && npm version "${PLUGIN_VERSION}" --no-git-tag-version --allow-same-version > /dev/null)
           done
+          node scripts/check-dsh-version.mjs
 
       - name: Build packages
         run: |
@@ -63,14 +98,20 @@ jobs:
           # so lib/client.js must be regenerated here or it ships stale.
           node scripts/build-workspace-ui.mjs
 
-      - name: Test published packages
-        run: |
-          cd packages/auth-oidc && pnpm test && cd ../..
-          cd packages/fs-k8s && pnpm test && cd ../..
-          cd packages/subprocess-k8s && pnpm test && cd ../..
-          cd packages/workspace-k8s && pnpm test && cd ../..
-          cd packages/workspace-picker && pnpm test && cd ../..
-          cd packages/identity-bridge && pnpm test && cd ../..
+      # The image installs the committed dist of these three packages verbatim.
+      # CI gates this on main; repeating it here is what makes a tag safe even
+      # when it is pushed from a branch that never ran CI.
+      - name: Committed build output must match the source
+        run: git diff --exit-code -- 'packages/*/dist' 'packages/*/lib'
+
+      - name: Package manifests promise only what the tarball ships
+        run: node scripts/check-package-manifests.mjs
+
+      - name: Test every package
+        run: pnpm -r test
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -79,15 +120,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # arm64 is part of the release, not an afterthought: the platform is
+      # deployed on Graviton / Apple-Silicon kind clusters too, and an
+      # amd64-only image simply does not start there. QEMU makes the native
+      # builds (node-pty) slow but correct.
       - name: Build image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/dsh-web-platform.Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ env.IMAGE }}:${{ github.ref_name }},${{ env.IMAGE }}:latest
+          provenance: true
+          sbom: true
+          tags: ${{ env.IMAGE_TAGS }}
           build-args: |
             PLUGIN_VERSION=${{ env.PLUGIN_VERSION }}
+            # Must equal the Dockerfile's `ARG DSH_VERSION` default and the
+            # dependency pin; scripts/check-dsh-version.mjs (CI + a step above)
+            # fails the release when they drift.
             DSH_VERSION=0.2.0-rc.2
 
       - name: Build sandbox daemon image
@@ -95,8 +146,11 @@ jobs:
         with:
           context: .
           file: docker/dsh-sandbox-daemon.Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ env.DAEMON_IMAGE }}:${{ github.ref_name }},${{ env.DAEMON_IMAGE }}:latest
+          provenance: true
+          sbom: true
+          tags: ${{ env.DAEMON_TAGS }}
 
       # npm Trusted Publisher: no NPM_TOKEN. The registry verifies our GitHub
       # Actions OIDC token against the publisher configured on npmjs.com.
@@ -108,10 +162,13 @@ jobs:
       # depends on that here -- the images install every platform plugin from
       # THIS CHECKOUT, not from the registry -- so leaving it out cannot produce a
       # half-released image.
+      #
+      # `pnpm publish`, not `npm publish`: the workspace packages declare a
+      # `workspace:*` devDependency, and only pnpm rewrites that protocol to a
+      # real version in the published manifest. `--no-git-checks` because a tag
+      # build is a detached HEAD.
       - name: Publish to npm (@visecy)
         run: |
           for p in auth-oidc fs-k8s subprocess-k8s workspace-k8s workspace-picker; do
-            cd packages/$p
-            npm publish --access public --provenance --registry=https://registry.npmjs.org
-            cd ../..
+            (cd "packages/$p" && pnpm publish --access public --provenance --no-git-checks --registry=https://registry.npmjs.org)
           done
