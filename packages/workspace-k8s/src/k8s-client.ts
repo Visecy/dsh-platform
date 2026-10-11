@@ -13,12 +13,65 @@ export interface WorkspacePodSpec {
   resources?: { cpu?: string; memory?: string }
   storageClassName?: string
   storageSize?: string
+  /**
+   * RuntimeClass for isolation escalation (runc -> gvisor -> kata). Deployment
+   * supplied: the platform has no opinion on which classes a cluster offers.
+   */
+  runtimeClassName?: string
 }
 
 export interface PvcOptions {
   namespace?: string
   storageClassName?: string
   storageSize?: string
+}
+
+/**
+ * Per-workspace NetworkPolicy for the execution pod.
+ *
+ * `sandbox-daemon` is unauthenticated HTTP: whoever reaches 4390 can read and
+ * write the workspace and run commands in it. The platform cannot authenticate
+ * that hop (the control plane is a plain HTTP client), so the fence has to be
+ * network-level — and whether one is wanted is a deployment decision:
+ * a policy-blind CNI ignores it, and a wrong selector makes workspace pods
+ * unreachable. Hence opt-in, with the control plane's labels supplied by the
+ * deployment rather than guessed here.
+ */
+export interface NetworkPolicyOptions {
+  /** Labels of the pods allowed to reach the daemon (the control plane). */
+  controlPlanePodLabels: Record<string, string>
+}
+
+/** The control-plane labels the shipped Helm chart renders. */
+export const DEFAULT_CONTROL_PLANE_POD_LABELS: Record<string, string> = {
+  'app.kubernetes.io/name': 'dsh-control-plane',
+}
+
+/**
+ * Parse the deployment's JSON label selector, falling back to the shipped
+ * chart's labels. Malformed input must NOT throw: this runs while a plugin row
+ * is mounting, where a throw is a boot failure the operator cannot see.
+ */
+export function parsePodLabels(raw: string | undefined): Record<string, string> {
+  const fallback = { ...DEFAULT_CONTROL_PLANE_POD_LABELS }
+  if (raw === undefined || raw.trim() === '') return fallback
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return fallback
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return fallback
+  const entries = Object.entries(parsed as Record<string, unknown>)
+  if (entries.length === 0) return fallback
+  if (!entries.every(([, value]) => typeof value === 'string' && value !== '')) return fallback
+  return Object.fromEntries(entries) as Record<string, string>
+}
+
+/** Controller options beyond the PVC: pod-level deployment choices. */
+export interface WorkspacePodOptions extends PvcOptions {
+  /** Create + delete a per-workspace NetworkPolicy. Absent = do not. */
+  networkPolicy?: NetworkPolicyOptions
 }
 
 /** One metrics.k8s.io sample for a workspace pod. */
@@ -105,10 +158,20 @@ function isAlreadyGone(error: unknown): boolean {
   return statusOf(error) === 404
 }
 
+/**
+ * Whether a create failed because the object is already there. The platform
+ * creates resources idempotently (ensure = "make sure it exists"), so this one
+ * message is "done" while every other failure is real and must propagate.
+ */
+function isAlreadyPresent(error: unknown): boolean {
+  const status = (error as { body?: { message?: string } }).body?.message ?? String(error)
+  return status.includes('already exists')
+}
+
 export class K8sPodController implements PodController {
   constructor(
     private kc: k8s.KubeConfig,
-    private pvc: PvcOptions = {},
+    private pvc: WorkspacePodOptions = {},
   ) {}
 
   /** Sanitize a workspace id into a k8s-compatible resource name (as-is). */
@@ -133,6 +196,11 @@ export class K8sPodController implements PodController {
     return this.podName(workspaceId) + '-svc'
   }
 
+  /** The per-workspace NetworkPolicy's name (only created when opted in). */
+  netpolName(workspaceId: string): string {
+    return this.podName(workspaceId) + '-netpol'
+  }
+
   async ensurePod(spec: WorkspacePodSpec): Promise<string> {
     const core = this.kc.makeApiClient(k8s.CoreV1Api)
     const name = this.podName(spec.workspaceId)
@@ -146,6 +214,8 @@ export class K8sPodController implements PodController {
         annotations,
       },
       spec: {
+        // Deployment-supplied isolation escalation (runc -> gvisor -> kata).
+        runtimeClassName: spec.runtimeClassName,
         containers: [
           {
             name: 'sandbox-daemon',
@@ -173,7 +243,15 @@ export class K8sPodController implements PodController {
             ],
           },
         ],
-        securityContext: { runAsNonRoot: true, runAsUser: 1000, fsGroup: 1000 },
+        securityContext: {
+          runAsNonRoot: true,
+          runAsUser: 1000,
+          fsGroup: 1000,
+          // Required by the `restricted` PodSecurity standard; RuntimeDefault is
+          // the runtime's own profile, so this changes nothing but the admission
+          // decision for clusters that enforce the standard.
+          seccompProfile: { type: 'RuntimeDefault' },
+        },
         volumes: [
           spec.pvcName !== undefined
             ? { name: 'workspace', persistentVolumeClaim: { claimName: spec.pvcName } }
@@ -185,8 +263,7 @@ export class K8sPodController implements PodController {
     try {
       await core.createNamespacedPod({ namespace: spec.namespace, body: pod })
     } catch (e: unknown) {
-      const status = (e as { body?: { message?: string } }).body?.message ?? String(e)
-      if (!status.includes('already exists')) throw e
+      if (!isAlreadyPresent(e)) throw e
     }
 
     // headless service for stable in-cluster DNS
@@ -201,8 +278,44 @@ export class K8sPodController implements PodController {
     try {
       await core.createNamespacedService({ namespace: spec.namespace, body: svc })
     } catch (e: unknown) {
-      const status = (e as { body?: { message?: string } }).body?.message ?? String(e)
-      if (!status.includes('already exists')) throw e
+      if (!isAlreadyPresent(e)) throw e
+    }
+
+    // Optional fence around the unauthenticated daemon: only the control plane
+    // may open 4390 on this workspace's pod. Skip-able because a policy-blind
+    // CNI ignores it and a wrong selector would make the workspace unusable.
+    if (this.pvc.networkPolicy !== undefined) {
+      const networking = this.kc.makeApiClient(k8s.NetworkingV1Api)
+      const policy: k8s.V1NetworkPolicy = {
+        metadata: {
+          name: this.netpolName(spec.workspaceId),
+          namespace: spec.namespace,
+          labels,
+          annotations,
+        },
+        spec: {
+          podSelector: { matchLabels: labels },
+          policyTypes: ['Ingress'],
+          ingress: [
+            {
+              // `_from`, NOT `from`: the generated client renames the API field
+              // `from` (a reserved word upstream) to `_from` in the TypeScript
+              // model, and its serializer DROPS an unknown `from` key. Passing
+              // `from` therefore produced a rule with no source restriction at
+              // all -- "allow from anywhere" -- which the live cluster confirmed
+              // by letting an unlabelled pod reach the daemon. The unit test
+              // serializes through the same serializer for that reason.
+              _from: [{ podSelector: { matchLabels: this.pvc.networkPolicy.controlPlanePodLabels } }],
+              ports: [{ protocol: 'TCP', port: spec.daemonPort }],
+            },
+          ],
+        },
+      }
+      try {
+        await networking.createNamespacedNetworkPolicy({ namespace: spec.namespace, body: policy })
+      } catch (e: unknown) {
+        if (!isAlreadyPresent(e)) throw e
+      }
     }
     return name
   }
@@ -284,6 +397,16 @@ export class K8sPodController implements PodController {
       await core.deleteNamespacedService({ name: this.svcName(workspaceId), namespace })
     } catch (error) {
       if (!isAlreadyGone(error)) throw error
+    }
+    // The pod is gone, so its NetworkPolicy has nothing left to fence. Leaving
+    // it behind would accumulate one object per deleted workspace.
+    if (this.pvc.networkPolicy !== undefined) {
+      const networking = this.kc.makeApiClient(k8s.NetworkingV1Api)
+      try {
+        await networking.deleteNamespacedNetworkPolicy({ name: this.netpolName(workspaceId), namespace })
+      } catch (error) {
+        if (!isAlreadyGone(error)) throw error
+      }
     }
   }
 

@@ -35,6 +35,8 @@ export interface LifecycleOptions {
   resources?: { cpu?: string; memory?: string }
   storageClassName?: string
   storageSize?: string
+  /** Isolation escalation for the pods this manager recreates. */
+  runtimeClassName?: string
   /** Idle timeout with no lingering commands. Default 5 minutes. */
   idleTimeoutMs?: number
   /** Lingering-command grace before force termination. Default 3 hours. */
@@ -357,6 +359,7 @@ export class WorkspaceLifecycleManager {
             daemonPort: this.opts.daemonPort,
             pvcName,
             resources: undefined,
+            runtimeClassName: this.opts.runtimeClassName,
           }
           const name = await this.controller.ensurePod(spec)
           await this.controller.waitReady(this.opts.namespace, name)

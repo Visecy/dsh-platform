@@ -7,7 +7,7 @@
  */
 import { Context, Service } from '@deepseek-ai/cordis'
 import * as k8s from '@kubernetes/client-node'
-import { K8sPodController, type PodController, type WorkspacePodSpec } from './k8s-client.ts'
+import { K8sPodController, parsePodLabels, type PodController, type WorkspacePodSpec } from './k8s-client.ts'
 import { registerWorkspaceApi } from './api.ts'
 import { WorkspaceManagement } from './management.ts'
 import { WorkspaceMetricsSampler } from './metrics.ts'
@@ -27,6 +27,20 @@ export interface Config {
   storageClassName?: string
   storageSize?: string
   runtimeClassName?: string
+  /**
+   * Fence the unauthenticated sandbox daemon to the control plane with a
+   * per-workspace NetworkPolicy.
+   *
+   * Opt-in on purpose: it only takes effect on a CNI that enforces
+   * NetworkPolicy, and a selector that does not match the control-plane pods
+   * makes every workspace unreachable. `controlPlanePodLabels` is a JSON object
+   * (`'{"app.kubernetes.io/name":"dsh-control-plane"}'`); it defaults to the
+   * labels the shipped Helm chart renders.
+   */
+  networkPolicy?: {
+    enabled?: boolean
+    controlPlanePodLabels?: string
+  }
   /** Idle timeout with no lingering commands. Default 5 minutes. */
   idleTimeoutMs?: number
   /** Lingering-command grace before force termination. Default 3 hours. */
@@ -75,6 +89,9 @@ export class WorkspaceRuntimeService extends Service implements WorkspaceRuntime
       namespace: this.config.namespace,
       storageClassName: this.config.storageClassName,
       storageSize: this.config.storageSize,
+      networkPolicy: this.config.networkPolicy?.enabled === true
+        ? { controlPlanePodLabels: parsePodLabels(this.config.networkPolicy.controlPlanePodLabels) }
+        : undefined,
     })
   }
 
@@ -102,6 +119,7 @@ export class WorkspaceRuntimeService extends Service implements WorkspaceRuntime
       resources: this.config.resources,
       storageClassName: this.config.storageClassName,
       storageSize: this.config.storageSize,
+      runtimeClassName: this.config.runtimeClassName,
     }
     const name = await this.controller.ensurePod(spec)
     await this.controller.waitReady(this.config.namespace, name)
@@ -213,6 +231,7 @@ export function apply(ctx: Context, config: Config | undefined): void {
       storageSize: config.storageSize,
       idleTimeoutMs: config.idleTimeoutMs,
       graceMs: config.graceMs,
+      runtimeClassName: config.runtimeClassName,
       onBeforeSleep,
       // Detached lifecycle actions (an idle sleep, a drift recycle, a lost pod)
       // have no caller left to reject to; without a sink their failures were
