@@ -16,15 +16,14 @@
   "scripts": {
     "build": "node ../../scripts/build-pkg.mjs fs-k8s src/index.ts",
     "prepublishOnly": "npm run build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "publishConfig": {
     "access": "public"
   },
   "main": "dist/index.js",
-  "types": "dist/index.d.ts",
   "exports": {
-    "types": "./dist/index.d.ts",
     "default": "./dist/index.js"
   },
   "files": [
@@ -34,5 +33,6 @@
     "type": "git",
     "url": "https://github.com/Visecy/dsh-platform.git",
     "directory": "packages/fs-k8s"
-  }
+  },
+  "license": "MIT"
 }

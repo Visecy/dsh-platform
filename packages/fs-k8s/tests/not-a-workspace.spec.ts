@@ -154,7 +154,9 @@ describe("the operator's case: '.git' as the first segment under the workspace r
       () => fs.lstat('.git', { cwd: ROOT }),
       () => fs.listDir(target),
       () => fs.writeText(target, 'x'),
-      () => fs.editText(target, { oldString: 'a', newString: 'b' }),
+      // `replaceAll` is part of the official FsEditRequest shape (DSH 0.2); the
+      // refusal this case asserts happens before the edit is even inspected.
+      () => fs.editText(target, { oldString: 'a', newString: 'b', replaceAll: false }),
     ]) {
       const error = await operation().catch((e: unknown) => e)
       expect(error, 'every member must degrade with the same precise error').toBeInstanceOf(FsError)

@@ -25,5 +25,6 @@
   },
   "bin": {
     "dsh-sandbox-daemon": "src/main.ts"
-  }
+  },
+  "license": "MIT"
 }
