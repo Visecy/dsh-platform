@@ -2,7 +2,7 @@
 
 DeepSeek Harness 多用户平台——插件 monorepo（pnpm workspace）。
 
-**状态：预览版（preview）**。当前 `main` 对应 tag `v0.1.87`；发布物是控制面镜像
+**状态：预览版（preview）**。当前 `main` 对应 tag `v0.1.88`（已发布，含多架构镜像）；发布物是控制面镜像
 `ghcr.io/visecy/dsh-web-platform`（插件内置）与 npm 上的 `@visecy/dsh-*` 插件包。
 预览版**不面向生产**：不支持多副本、多租户隔离、非 Kubernetes 部署等，先读
 [已知限制](#已知限制预览版明确不支持)。
@@ -22,7 +22,7 @@ DeepSeek Harness 多用户平台——插件 monorepo（pnpm workspace）。
 
 | 平台版本 | 目标 DSH | 说明 |
 |---|---|---|
-| `v0.1.80` – `v0.1.87`（当前 `main`） | `0.2.0-rc.2`（npm `latest`） | 四处真值必须一致：`pnpm-lock.yaml`、各 `packages/*/package.json` 的 `@deepseek-ai/dsh-*` 依赖、`docker/dsh-web-platform.Dockerfile` 的 `DSH_VERSION`、`.github/workflows/release.yml` 的 build-args |
+| `v0.1.80` – `v0.1.88`（当前 `main` 即 `v0.1.88`） | `0.2.0-rc.2`（npm `latest`） | 四处真值必须一致：`pnpm-lock.yaml`、各 `packages/*/package.json` 的 `@deepseek-ai/dsh-*` 依赖、`docker/dsh-web-platform.Dockerfile` 的 `DSH_VERSION`、`.github/workflows/release.yml` 的 build-args |
 | `v0.1.2` – `v0.1.79` | `0.1.5-rc.1` 及更早 | 历史版本，不再回归验证 |
 
 **升级 DSH 版本时**：先改上表四处真值，再跑 `pnpm -r test` + 两个 smoke（见
@@ -67,7 +67,7 @@ NetworkPolicy 的 CNI 会执行，selector 写错会让所有工作区不可达�
 | 非 Kubernetes 部署（单机 Docker / docker-compose） | ❌ 不支持：执行世界完全路由到工作区 Pod，profile 禁用了官方本地 fs / subprocess 行 |
 | 控制面多副本（HA / 水平扩容） | ❌ 不支持：无 leader election；生命周期状态与闲置回收在进程内，跨副本会互相回收对方的 Pod |
 | 多租户隔离与授权 | ❌ 未实现：`rbac` / `cluster-access` 是空实现，`ctx.dshAuth` 目前没有消费方。**所有通过认证的用户共享同一份控制面状态**（会话、工作区、模型凭据），且都能列出 / 休眠 / 删除彼此的工作区 |
-| ARM64 / 多架构镜像 | ⚠️ release workflow 已构建 `linux/amd64` + `linux/arm64`；**v0.1.87 及更早的已发布镜像只有 amd64**，请用包含该改动之后打出的 tag |
+| ARM64 / 多架构镜像 | ⚠️ release workflow 已构建 `linux/amd64` + `linux/arm64`；**`v0.1.88` 起为双架构；`v0.1.87` 及更早只有 amd64**，请用包含该改动之后打出的 tag |
 | air-gapped / 离线安装 | ❌ 未提供镜像搬运与离线清单 |
 | `pod-security.kubernetes.io/enforce=restricted` 命名空间 | ✅ 控制面与工作区 Pod 都已 runAsNonRoot、丢弃全部 capability、设置 `seccompProfile: RuntimeDefault`（控制面容器另有 `readOnlyRootFilesystem`）；工作区 daemon 需要可写的 `/tmp`，这不属于 restricted 的检查项 |
 | 子路径发布（`https://host/dsh`） | ❌ 只能独占一个 host authority |
