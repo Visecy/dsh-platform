@@ -240,13 +240,35 @@
       name: '@visecy/dsh-workspace-k8s'
       config:
         namespace: !!js process.env.WS_NAMESPACE
-        image: !!js process.env.WS_IMAGE ?? 'ghcr.io/visecy/dsh-platform/dsh-sandbox-daemon:v0.1.19'
+        # The daemon image must match the platform tag that built this image:
+        # the two sides share the daemon wire protocol and there is no version
+        # handshake. The deploy chart always passes WS_IMAGE; this default is the
+        # fallback for hand-rolled manifests and is kept equal to the current tag.
+        image: !!js process.env.WS_IMAGE ?? 'ghcr.io/visecy/dsh-platform/dsh-sandbox-daemon:v0.1.87'
         daemonPort: 4390
         idleTimeoutMs: !!js Number(process.env.WS_IDLE_TIMEOUT_MS ?? (5 * 60 * 1000))
         graceMs: !!js Number(process.env.WS_GRACE_MS ?? (3 * 60 * 60 * 1000))
         reconcileIntervalMs: !!js Number(process.env.WS_RECONCILE_INTERVAL_MS ?? 60000)
-        storageClassName: !!js process.env.WS_STORAGE_CLASS ?? 'local-path'
-        storageSize: '2Gi'
+        # Empty string means "use the cluster's default class" -- but Kubernetes
+        # spells that by OMITTING the field (`storageClassName: ""` means "no
+        # class, static binding only", which leaves the PVC Pending forever).
+        # `|| undefined` is what turns the chart's empty-string value into an
+        # omitted field.
+        storageClassName: !!js process.env.WS_STORAGE_CLASS || undefined
+        storageSize: !!js process.env.WS_STORAGE_SIZE || '2Gi'
+        # Isolation escalation (runc -> gvisor -> kata); unset = cluster default.
+        # `|| undefined` so the chart's empty-string value means "not set"
+        # instead of a RuntimeClass named "".
+        runtimeClassName: !!js process.env.WS_RUNTIME_CLASS || undefined
+        # Fence the unauthenticated daemon to the control plane. Opt-in: only a
+        # policy-capable CNI enforces it, and a selector that does not match the
+        # control-plane pods would make every workspace unreachable. Set
+        # WS_NETWORK_POLICY=1, and WS_CONTROL_PLANE_POD_LABELS as a JSON object
+        # when the chart's own labels (app.kubernetes.io/name=dsh-control-plane)
+        # do not apply to this deployment.
+        networkPolicy:
+          enabled: !!js process.env.WS_NETWORK_POLICY === '1'
+          controlPlanePodLabels: !!js process.env.WS_CONTROL_PLANE_POD_LABELS
         metricIntervalMs: !!js Number(process.env.WS_METRIC_INTERVAL_MS ?? 15000)
         resources:
           cpu: !!js process.env.WS_CPU_LIMIT ?? '2'
