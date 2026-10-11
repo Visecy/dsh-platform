@@ -5,28 +5,11 @@ allowBuilds:
   esbuild: true
   node-pty: true
 
-minimumReleaseAgeExclude:
-  - '@deepseek-ai/dsh-brand@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-client-ui-workspace@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-credentials@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-fs@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-host-directory-picker@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-invariants@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-llm@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-sandbox@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-scope@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-session-format@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-session-format-catalog@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-session-format-v0-to-v1@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-session-format-v1-to-v2@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-session-format-v2-to-v3@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-session-persistence@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-session@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-settings@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-storage-domain@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-storage@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-subprocess@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-timeout@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-typert-protocol@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-util-crypto@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-util-values@0.1.5-rc.1'
+# NOTE: there is deliberately no `minimumReleaseAgeExclude` here. No
+# `minimumReleaseAge` is configured (neither in this repo nor in the user-level
+# pnpm/npm config), so an exclude list would be dead configuration — the block
+# that used to live here still listed the 0.1.5-rc.1 line long after every
+# dependency had moved to 0.2.0-rc.2. If a `minimumReleaseAge` is ever added,
+# it MUST exclude the pinned `@deepseek-ai/dsh-*@0.2.0-rc.2` line (see
+# pnpm-lock.yaml and docker/dsh-web-platform.Dockerfile's DSH_VERSION), or
+# `pnpm install` will refuse the release candidate.

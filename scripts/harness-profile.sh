@@ -9,7 +9,10 @@ set -euo pipefail
 HARNESS="${1:?usage: harness-profile.sh <harness-dir> [dsh-version]}"
 DSH_VERSION="${2:-0.2.0-rc.2}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-STORE="${DSH_STORE_DIR:-/home/ovizro/Code/.pnpm-store}"
+# pnpm store for the throwaway profile. Defaults to the store pnpm itself
+# reports for this checkout, so the script works on any machine; override with
+# DSH_STORE_DIR when you want a separate store (e.g. a clean-cache check).
+STORE="${DSH_STORE_DIR:-$(pnpm store path 2>/dev/null || echo "$HOME/.pnpm-store")}"
 
 rm -rf "$HARNESS"
 mkdir -p "$HARNESS/home"
