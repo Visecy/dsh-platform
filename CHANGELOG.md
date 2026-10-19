@@ -51,6 +51,22 @@ profile 补丁层、vendored 测试夹具与文档一起对齐。
   变为「被容忍」；原先断言「已认领但被索引隐藏」的用例改为断言新的容忍语义（不写、不剪除）。
   `rebind` 仍是非 ENOENT 隐藏场景的修复路径。
 
+### 0.2.1 语义对齐（升级后按上游审计补）
+
+- **凭据优先级跟到 0.2.1（stored-first）**：`platform-domain` 的 `ctx.credentials` 原先复刻的是
+  0.2.0 语义——环境层覆盖 store，且被环境“遮挡”的 `set`/`unset` 直接拒绝。0.2.1 反过来了：
+  已保存的凭据优先，进程环境与 `.env` 降为 fallback，`describe` 一律 `writable: true`，也不再
+  有 shadow 拒绝。实现、类文档与 `tests/credentials.spec.ts` 一起翻转；否则 pod 环境里一个
+  `DEEPSEEK_API_KEY` 会让 Models 页保存的 key 被静默忽略。
+- **两个新行的决定**：`working-directory` 的部署 fallback 显式 restate 为 `/workspaces`（镜像
+  没有 `WORKDIR`，否则控制面上的 `process.cwd()` 是 `/`，落在 fs-k8s/subprocess-k8s 的
+  `/workspaces` 执行根之外）；`harness-dev-context` 关闭（它把控制面的“实现 checkout / Web GUI
+  URL”注入每个会话的模型上下文，对在 workspace pod 里执行的 agent 是误导）。两个 profile 都
+  同步（headless 只有前者）。
+- **跨仓后续（部署 chart）**：0.2.1 新增 `--public-url`；本仓已把 `web-runtime.publicUrl` 转发为
+  `ctx.webStartup.publicUrl`。部署 chart 需要把 `DSH_PUBLIC_ORIGIN` 同时传给
+  `dsh web --public-url`，否则 `DSH_WEB_URL` 与运行时上下文仍是 loopback；这一项不在本仓内。
+
 ### 验证
 
 - `pnpm install --frozen-lockfile`、`pnpm -r build`、`pnpm -r test` 全绿；提交的
@@ -62,6 +78,13 @@ profile 补丁层、vendored 测试夹具与文档一起对齐。
   全绿（认证路径零编译产物补丁、零 webserver fork）。
 - `node scripts/check-dsh-version.mjs`、`node scripts/check-package-manifests.mjs` 通过；
   `pnpm peers check` 无未满足 peer。
+- 升级后按上游审计补的两处（`platform-domain` 凭据 stored-first、`working-directory` /
+  `harness-dev-context` 行决策）另跑：`packages/platform-domain` vitest 20/20，web+headless
+  `--dump-config` 仍 stderr 为空，生效行分别出现 `defaultDirectory: /workspaces` 与
+  `harness-dev-context: disabled`，提交的 `dist` 可重复构建。
+- 发布前由独立（fresh-context）验证者跑了两轮：第一轮全量 PASS；第二轮在审计补丁
+  （`fb1e96a`、`3fb38bf`）之后复核版本真值、构建/测试、全新 harness 的 dump-config 与两个
+  smoke，仍为 PASS。
 
 ## v0.1.88（预览）
 

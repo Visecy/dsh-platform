@@ -324,8 +324,9 @@ export class CredentialStore extends Service {
   }
 
   /**
-   * The inherited-environment value for a reference: the most trusted layer and
-   * the only one that can shadow a write.
+   * The inherited-environment value for a reference. A fallback only: the
+   * stored value resolves first (DSH 0.2.1 precedence), so the environment can
+   * no longer shadow a stored credential or a write.
    */
   private inherited(ref: string): { value: string; source: string } | undefined {
     const entry = this.environment()?.getFrom(ref, ['process'])

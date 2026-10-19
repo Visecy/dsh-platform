@@ -127,8 +127,9 @@ var CredentialStore = class extends Service {
     return this.ctx.get("launchEnvironment", false);
   }
   /**
-   * The inherited-environment value for a reference: the most trusted layer and
-   * the only one that can shadow a write.
+   * The inherited-environment value for a reference. A fallback only: the
+   * stored value resolves first (DSH 0.2.1 precedence), so the environment can
+   * no longer shadow a stored credential or a write.
    */
   inherited(ref) {
     const entry = this.environment()?.getFrom(ref, ["process"]);
