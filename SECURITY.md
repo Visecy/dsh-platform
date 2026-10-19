@@ -57,7 +57,7 @@ chart 或文档让你把端口发布出去）时才算漏洞，请连同证据�
 - 镜像用 buildx 构建 `linux/amd64` + `linux/arm64`，并带 **provenance 与 SBOM** 证明。
 - npm 发布用 **Trusted Publishing（GitHub Actions OIDC）**，发布流程里没有长期 NPM_TOKEN。
 - 镜像内的 `@deepseek-ai/*` 是**未打补丁**的官方 npm 产物（零编译产物补丁、零 webserver
-  fork）。DSH 基线是显式 pin 的 `0.2.0-rc.2`（release candidate），其自身的问题请报给上游。
+  fork）。DSH 基线是显式 pin 的 `0.2.1-rc.2`（release candidate），其自身的问题请报给上游。
 - 只有 `main` 与最新 tag 接受修复；更早的 tag 不再回归验证。
 
 ## 不在范围内
@@ -70,8 +70,8 @@ chart 或文档让你把端口发布出去）时才算漏洞，请连同证据�
 
 ## 支持的版本
 
-只有 `main` 与最新 tag 接受修复。当前 `main` 对应 tag `v0.1.88`（部署 chart 默认 pin 的也是它），
-DSH 基线 `0.2.0-rc.2`，由 `scripts/check-dsh-version.mjs` 在 CI 与发布流程中强制一致。
+只有 `main` 与最新 tag 接受修复。当前 `main` 对应 tag `v0.1.89`（部署 chart 默认 pin 的也是它），
+DSH 基线 `0.2.1-rc.2`，由 `scripts/check-dsh-version.mjs` 在 CI 与发布流程中强制一致。
 更早的 tag（`v0.1.2` – `v0.1.79`，面向 `0.1.5-rc.1` 及更早）不再回归验证。
 
 部署侧的安全必读项（`trustedProxyIps` 生产必需、工作区 daemon 的隔离做法）见部署仓

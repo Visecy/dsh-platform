@@ -28,7 +28,7 @@
  * `historicalChildCatalogSource` implements the same collection for the
  * first-party JSONL backend but is exported by
  * `@deepseek-ai/dsh-session-format-v3-to-v4` — a package the catalog depends on
- * but does not re-export (verified for 0.2.0-rc.2 and 0.2.1-alpha.1). Rather
+ * but does not re-export (verified for 0.2.1-rc.2). Rather
  * than add a second direct dependency the deployment would have to resolve,
  * {@link historicalChildFact} mirrors that function exactly, including its
  * validation: a knowingly malformed descriptor must make collection fail (and

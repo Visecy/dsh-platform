@@ -1,35 +1,36 @@
 /**
  * The MESSAGE-TIME caller, transcribed from the installed official package.
  *
- * `@deepseek-ai/dsh-agent-instructions` (0.2.0-rc.2) identifies the project root
+ * `@deepseek-ai/dsh-agent-instructions` (0.2.1-rc.2) identifies the project root
  * by walking UP from the session cwd to `/`, probing `<dir>/.git` at each step.
- * It runs on every turn, from `compose` (`lib/index.js:1124`) and from
- * `discoverInstructionFiles` (`lib/index.js:577`), both of which load the
- * baseline instruction set for the step. The transcription below is exact —
- * same walk, same predicate, same rethrow — because the acceptance criterion is
- * a real conversation and this is the smallest thing that can fail the same way:
+ * It runs on every turn from the reconcile path (`lib/index.js:1025`,
+ * `reconcileInstructionContext`) and from instruction-file discovery
+ * (`lib/index.js:673`), plus baseline preparation (`lib/index.js:1244`). The
+ * transcription below is exact — same walk, same predicate, same rethrow —
+ * because the acceptance criterion is a real conversation and this is the
+ * smallest thing that can fail the same way:
  *
- *   lib/index.js:480  async function findProjectRoot(cwd, markers, fileSystem, signal) {
- *   lib/index.js:481    let current = resolve(cwd);
- *   lib/index.js:482    for (;;) {
- *   lib/index.js:483      for (const marker of markers) if (await existsAsMarker(join(current, marker), fileSystem, signal)) return current;
- *   lib/index.js:484      const parent = dirname(current);
- *   lib/index.js:485      if (parent === current) return resolve(cwd);
- *   lib/index.js:486      current = parent;
- *   lib/index.js:487    }
- *   lib/index.js:488  }
- *   lib/index.js:451  async function existsAsMarker(path, fileSystem, signal) {
- *   lib/index.js:452    if (fileSystem !== void 0) try {
- *   lib/index.js:453      const target = await fileSystem.resolve(path, signalOptions(signal));
- *   lib/index.js:454      return await fileSystem.stat(target, signal) !== void 0;
- *   lib/index.js:455    } catch (error) {
- *   lib/index.js:456      signal?.throwIfAborted();
- *   lib/index.js:457      if (isMissingProviderPathError(error)) return false;
- *   lib/index.js:458      throw error;            // <-- the arm the turn dies in
- *   lib/index.js:459    }
- *   lib/index.js:410  function isMissingProviderPathError(error) {
- *   lib/index.js:411    return error instanceof Error && "code" in error && error.code === "FS_NOT_FOUND";
- *   lib/index.js:412  }
+ *   lib/index.js:574  async function findProjectRoot(cwd, markers, fileSystem, signal) {
+ *   lib/index.js:575    let current = resolve(cwd);
+ *   lib/index.js:576    for (;;) {
+ *   lib/index.js:577      for (const marker of markers) if (await existsAsMarker(join(current, marker), fileSystem, signal)) return current;
+ *   lib/index.js:578      const parent = dirname(current);
+ *   lib/index.js:579      if (parent === current) return resolve(cwd);
+ *   lib/index.js:580      current = parent;
+ *   lib/index.js:581    }
+ *   lib/index.js:582  }
+ *   lib/index.js:545  async function existsAsMarker(path, fileSystem, signal) {
+ *   lib/index.js:546    if (fileSystem !== void 0) try {
+ *   lib/index.js:547      const target = await fileSystem.resolve(path, signalOptions(signal));
+ *   lib/index.js:548      return await fileSystem.stat(target, signal) !== void 0;
+ *   lib/index.js:549    } catch (error) {
+ *   lib/index.js:550      signal?.throwIfAborted();
+ *   lib/index.js:551      if (isMissingProviderPathError(error)) return false;
+ *   lib/index.js:552      throw error;            // <-- the arm the turn dies in
+ *   lib/index.js:553    }
+ *   lib/index.js:504  function isMissingProviderPathError(error) {
+ *   lib/index.js:505    return error instanceof Error && "code" in error && error.code === "FS_NOT_FOUND";
+ *   lib/index.js:506  }
  *
  * The walk ALWAYS ends at `/` (`dirname('/') === '/'`), so the last probe of any
  * session with no `.git` anywhere in its ancestry is `/.git`. Kept in one place
@@ -39,12 +40,12 @@
 import { posix } from 'node:path'
 import type { FileSystem, FsTarget } from '@deepseek-ai/dsh-fs'
 
-/** The official predicate, transcribed verbatim (`lib/index.js:410-412`). */
+/** The official predicate, transcribed verbatim (`lib/index.js:504-506`). */
 export function isMissingProviderPathError(error: unknown): boolean {
   return error instanceof Error && 'code' in error && (error as { code?: unknown }).code === 'FS_NOT_FOUND'
 }
 
-/** `existsAsMarker` for a composition that HAS an fs provider (`lib/index.js:451-459`). */
+/** `existsAsMarker` for a composition that HAS an fs provider (`lib/index.js:545-553`). */
 export async function existsAsMarker(fileSystem: FileSystem, path: string): Promise<boolean> {
   try {
     const target: FsTarget = await fileSystem.resolve(path)
@@ -57,7 +58,7 @@ export async function existsAsMarker(fileSystem: FileSystem, path: string): Prom
 
 /**
  * The official walk. Returns the project root, or rethrows exactly what the
- * official arm at `lib/index.js:458` rethrows.
+ * official arm at `lib/index.js:552` rethrows.
  *
  * @param markerPaths - every `<dir>/<marker>` probed, in order (evidence).
  */

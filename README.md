@@ -2,7 +2,7 @@
 
 DeepSeek Harness 多用户平台——插件 monorepo（pnpm workspace）。
 
-**状态：预览版（preview）**。当前 `main` 对应 tag `v0.1.88`（已发布，含多架构镜像）；发布物是控制面镜像
+**状态：预览版（preview）**。当前 `main` 对应 tag `v0.1.89`（DSH 基线升级到 `0.2.1-rc.2`，由该 tag 构建多架构镜像）；发布物是控制面镜像
 `ghcr.io/visecy/dsh-web-platform`（插件内置）与 npm 上的 `@visecy/dsh-*` 插件包。
 预览版**不面向生产**：不支持多副本、多租户隔离、非 Kubernetes 部署等，先读
 [已知限制](#已知限制预览版明确不支持)。
@@ -22,7 +22,8 @@ DeepSeek Harness 多用户平台——插件 monorepo（pnpm workspace）。
 
 | 平台版本 | 目标 DSH | 说明 |
 |---|---|---|
-| `v0.1.80` – `v0.1.88`（当前 `main` 即 `v0.1.88`） | `0.2.0-rc.2`（npm `latest`） | 四处真值必须一致：`pnpm-lock.yaml`、各 `packages/*/package.json` 的 `@deepseek-ai/dsh-*` 依赖、`docker/dsh-web-platform.Dockerfile` 的 `DSH_VERSION`、`.github/workflows/release.yml` 的 build-args |
+| `v0.1.89`（当前 `main` 即 `v0.1.89`） | `0.2.1-rc.2`（npm `latest`） | 四处真值必须一致：`pnpm-lock.yaml`、各 `packages/*/package.json` 的 `@deepseek-ai/dsh-*` 依赖、`docker/dsh-web-platform.Dockerfile` 的 `DSH_VERSION`、`.github/workflows/release.yml` 的 build-args |
+| `v0.1.80` – `v0.1.88` | `0.2.0-rc.2` | 历史版本，不再回归验证 |
 | `v0.1.2` – `v0.1.79` | `0.1.5-rc.1` 及更早 | 历史版本，不再回归验证 |
 
 **升级 DSH 版本时**：先改上表四处真值，再跑 `pnpm -r test` + 两个 smoke（见
@@ -49,10 +50,10 @@ handoff、从 sidecar 的 `X-Forwarded-User` / `X-Forwarded-Groups` 提供 `ctx.
 **违反任一条的后果**：任何能连到这个端口的调用者，只要自己写 `X-Forwarded-User` /
 `X-Forwarded-Groups` 就能冒充任意用户——上游身份头没有签名，唯一屏障是拓扑。
 另外，进程内闸门随 OIDC gate 一起删除后，官方 `/plugins`（bundle）与 `/plugins/events`（SSE）
-路由**自身没有任何信任检查**（0.1.5-rc.1 实测；0.2.0-rc.2 复核：`trustedHosts` 只出现在
-`dsh-client-connection` / `dsh-web-app`，而这两条路由的宿主 `dsh-client-hmr` /
-`dsh-client-modules` 中 0 处引用），它们与未认证调用者之间同样只剩「唯一入口是认证代理」
-这一条。
+路由**自身没有任何信任检查**（0.1.5-rc.1 实测；0.2.1-rc.2 复核：`trustedHosts` 只出现在
+`dsh-client-connection` / `dsh-web-app` / `dsh-tool-cordis`，而这两条路由的宿主
+`dsh-client-hmr` / `dsh-client-modules` 中 0 处引用），它们与未认证调用者之间同样只剩
+「唯一入口是认证代理」这一条。
 
 工作区执行 pod 的 daemon（files / commands / pty）**没有认证**。平台可以按工作区创建一条
 NetworkPolicy 把它围到控制面（`workspace.networkPolicy.enabled=true`，**默认关闭**：只有支持
@@ -121,7 +122,7 @@ bundle 抠出来打补丁」的 vendoring 链路已整体删除，因此**升级
 pnpm install && pnpm build && pnpm test
 
 # 端到端配置验证：搭一个与镜像同构的临时 DSH home（profile bundles + 平台插件行）。
-# 需要与本仓 DSH_VERSION 一致的 dsh CLI（当前 0.2.0-rc.2；镜像里装的就是它）。
+# 需要与本仓 DSH_VERSION 一致的 dsh CLI（当前 0.2.1-rc.2；镜像里装的就是它）。
 bash scripts/harness-profile.sh /tmp/dsh-harness
 DSH_HOME=/tmp/dsh-harness/home dsh --profile web --dump-config > /tmp/web.yml
 

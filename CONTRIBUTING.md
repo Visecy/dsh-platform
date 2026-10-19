@@ -26,7 +26,7 @@ PostgreSQL 与 golden-fixture 用例默认跳过：需要 `TEST_PG_URL`（Postgr
 ## 冒烟与 harness
 
 端到端验证要先搭一个与镜像同构的临时 DSH home，需要与本仓一致版本的 `dsh` CLI
-（当前 `0.2.0-rc.2`，与镜像里装的一致）：
+（当前 `0.2.1-rc.2`，与镜像里装的一致）：
 
 ```bash
 bash scripts/harness-profile.sh /tmp/dsh-harness
