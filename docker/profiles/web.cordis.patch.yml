@@ -256,6 +256,15 @@
     # headers. The sidecar is the only thing that may reach this process, so
     # those headers are trusted evidence. Do NOT add a host here: the deploy
     # chart passes the loopback bind to `dsh web`.
+    #
+    # `publicOrigin` is an EXPLICIT override only. When it is unset (the normal
+    # deployment: the chart passes `dsh web --public-url`), the plugin takes the
+    # official advertised root from `ctx.webApp.getAdvertisedUrl()` — fed by the
+    # `web-runtime.publicUrl` restatement above — ignores the loopback fallback
+    # that service reports when no --public-url was given (keeping the
+    # reverse-proxy-aware request origin instead), and refuses to hand the
+    # launch token to an authority outside the connection row's trustedHosts.
+    # So the deployment has ONE external-origin truth: --public-url.
     - id: identity-bridge
       name: '@visecy/dsh-identity-bridge'
       config:

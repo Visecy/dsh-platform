@@ -6,6 +6,17 @@
 需要两次 tag 之间的具体改动请直接看 `git log` 与对应 tag 的 diff。
 DSH 基线由 `scripts/check-dsh-version.mjs` 强制，与平台版本的对应关系见 README 的兼容性矩阵。
 
+## 未发布
+
+- **对外 URL 单一真值（P1）**：identity-bridge 的 launch-token handoff 根现在优先取官方
+  advertised URL（0.2.1 `--public-url` → `web-runtime.publicUrl` →
+  `ctx.webApp.getAdvertisedUrl()`）。显式 `publicOrigin` 仍是覆盖项，并且现在接受
+  `scheme://host[:port][/prefix/]`（为子路径发布铺路）；与监听地址相同的 loopback fallback
+  会被忽略（保留反向代理感知的请求 origin），不在 connection `trustedHosts` 中的 advertised
+  authority 会告警一次并回落到请求 origin，launch token 不会离开受信任拓扑。
+- 下一版部署 chart 会把同一来源作为 `dsh web --public-url` 传入（`DSH_PUBLIC_ORIGIN` 显式
+  覆盖仍兼容），从而消除 chart 与 identity-bridge 两套 origin 配置的漂移。
+
 ## v0.1.89（预览）
 
 `v0.1.89` 相对 `v0.1.88` 的内容。**预览版，不面向生产**；明确的限制见 README「已知限制」。

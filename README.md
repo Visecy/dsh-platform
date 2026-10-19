@@ -34,6 +34,14 @@ DeepSeek Harness 多用户平台——插件 monorepo（pnpm workspace）。
 `__DSH_TRANSPORT__`、用官方 `authenticatedUrl()` / `authorizeIndex()` 完成 launch-token
 handoff、从 sidecar 的 `X-Forwarded-User` / `X-Forwarded-Groups` 提供 `ctx.dshAuth`。
 
+对外 URL 只有一个真值：部署给 `dsh web` 传 0.2.1 的 `--public-url`（部署 chart 从
+`oauth2Proxy.publicOrigin` 推导）。profile 把 `web-runtime.publicUrl` 转发给官方的
+`ctx.webStartup.publicUrl`；identity-bridge 未显式配置 `publicOrigin` 时以
+`ctx.webApp.getAdvertisedUrl()` 作为 handoff 根——忽略与监听地址相同的 loopback fallback
+（回落到请求的 `X-Forwarded-Proto`/`Host`），并且如果该 authority 不在 connection 的
+`trustedHosts` 里就告警并回落，launch token 不会发给不受信任的 authority。`DSH_PUBLIC_ORIGIN`
+只保留为显式覆盖，不再是必需项。
+
 ### 部署硬前提（违反即等于没有认证）
 
 身份**完全**来自请求头，所以下面三条是认证成立的前提，不是建议：

@@ -44,11 +44,14 @@ interface Bench {
 /**
  * Boot one composition: official webserver + official connection + the official
  * frontend-static fallback + this plugin, exactly as the profile mounts them.
- * @param config - this plugin's config (publicOrigin varies per bench).
+ * @param config - this plugin's config (publicOrigin varies per bench) plus an
+ *   optional `advertisedUrl` that stands in for the official `webApp` service
+ *   (`'listener'` models a deployment that configured no `--public-url`, where
+ *   the service reports the loopback listener origin).
  * @returns the running bench with an HTTP client and a teardown.
  */
 async function boot(
-  config: { publicOrigin?: string; userHeader?: string; groupsHeader?: string } = {},
+  config: { publicOrigin?: string; advertisedUrl?: string; userHeader?: string; groupsHeader?: string } = {},
 ): Promise<Bench> {
   const root = await mkdtemp(join(process.cwd(), '.tmp-identity-bridge-'))
   const distIndex = join(root, 'index.html')
@@ -74,6 +77,16 @@ async function boot(
   await ctx.plugin(connection, { trustedHosts: [AUTHORITY, PUBLIC_ORIGIN_AUTHORITY] })
   await ctx.plugin(frontendStatic, { distIndex })
   await ctx.plugin(identityBridge, { distIndex, ...config })
+  // Stand in for the official `webApp` service after this plugin mounts: the
+  // real web-runtime row may mount later too, which is exactly why the plugin
+  // reads the advertised root lazily through `ctx.get('webApp')`.
+  if (config.advertisedUrl !== undefined) {
+    ctx.provide('webApp', {
+      getAdvertisedUrl: () => config.advertisedUrl === 'listener'
+        ? ctx.webServer.getOrigin()
+        : (config.advertisedUrl as string),
+    })
+  }
 
   const server = ctx.webServer
   const deadline = Date.now() + 10_000
@@ -205,14 +218,104 @@ describe('identity-bridge handoff origin', () => {
   })
 })
 
+describe('identity-bridge handoff root sources', () => {
+  it('prefers an explicitly configured root over the advertised one', async () => {
+    const both = await boot({ publicOrigin: PUBLIC_ORIGIN, advertisedUrl: 'https://evil.example.test' })
+    try {
+      const res = await both.request('GET', '/', { host: AUTHORITY })
+      expect(res.status).toBe(302)
+      const location = new URL(String(res.headers.location ?? ''))
+      expect(location.origin).toBe(PUBLIC_ORIGIN)
+      expect(location.searchParams.get('token')).toBeTruthy()
+    } finally {
+      await both.close()
+    }
+  })
+
+  it('uses the officially advertised root when no explicit root is configured', async () => {
+    const advertised = await boot({ advertisedUrl: PUBLIC_ORIGIN })
+    try {
+      const res = await advertised.request('GET', '/', { host: AUTHORITY })
+      expect(res.status).toBe(302)
+      const location = new URL(String(res.headers.location ?? ''))
+      expect(location.origin).toBe(PUBLIC_ORIGIN)
+      expect(location.pathname).toBe('/')
+      expect(location.searchParams.get('token')).toBeTruthy()
+    } finally {
+      await advertised.close()
+    }
+  })
+
+  it('preserves a path prefix from the advertised root', async () => {
+    const prefixed = await boot({ advertisedUrl: `${PUBLIC_ORIGIN}/dsh` })
+    try {
+      const res = await prefixed.request('GET', '/', { host: AUTHORITY })
+      const location = new URL(String(res.headers.location ?? ''))
+      expect(location.origin).toBe(PUBLIC_ORIGIN)
+      // 0.2.1 normalizes the missing trailing slash before the token is added.
+      expect(location.pathname).toBe('/dsh/')
+      expect(location.searchParams.get('token')).toBeTruthy()
+    } finally {
+      await prefixed.close()
+    }
+  })
+
+  it('preserves a path prefix in an explicitly configured root', async () => {
+    const configured = await boot({ publicOrigin: `${PUBLIC_ORIGIN}/dsh` })
+    try {
+      const res = await configured.request('GET', '/', { host: AUTHORITY })
+      const location = new URL(String(res.headers.location ?? ''))
+      expect(location.origin).toBe(PUBLIC_ORIGIN)
+      expect(location.pathname).toBe('/dsh/')
+      expect(location.searchParams.get('token')).toBeTruthy()
+    } finally {
+      await configured.close()
+    }
+  })
+
+  it('ignores the listener-origin fallback and keeps the request origin', async () => {
+    // With no --public-url the official service reports the loopback listener;
+    // handing a remote browser that URL would be useless, so the request origin
+    // (already fence-checked above) stays in charge.
+    const fallback = await boot({ advertisedUrl: 'listener' })
+    try {
+      const res = await fallback.request('GET', '/', { host: AUTHORITY })
+      const location = new URL(String(res.headers.location ?? ''))
+      expect(location.origin).toBe(`http://${AUTHORITY}`)
+      expect(location.pathname).toBe('/')
+      expect(location.searchParams.get('token')).toBeTruthy()
+      expect(location.hostname).not.toBe('127.0.0.1')
+    } finally {
+      await fallback.close()
+    }
+  })
+
+  it('never hands the token to an advertised authority outside the Host fence', async () => {
+    const untrusted = await boot({ advertisedUrl: 'https://evil.example.test' })
+    try {
+      const res = await untrusted.request('GET', '/', { host: AUTHORITY })
+      expect(res.status).toBe(302)
+      const location = new URL(String(res.headers.location ?? ''))
+      expect(location.hostname).not.toBe('evil.example.test')
+      expect(location.origin).toBe(`http://${AUTHORITY}`)
+      // The warning path is exercised; the request still completes safely.
+      expect(location.searchParams.get('token')).toBeTruthy()
+    } finally {
+      await untrusted.close()
+    }
+  })
+})
+
 describe('identity-bridge load-time guards', () => {
   it('refuses a pinned origin that is not an absolute URL', async () => {
     await expect(boot({ publicOrigin: 'not-a-url' })).rejects.toThrow(/is not an absolute URL/)
   })
 
-  it('refuses a pinned origin carrying a path', async () => {
-    await expect(boot({ publicOrigin: 'https://public.example.test/dsh' }))
-      .rejects.toThrow(/must be scheme:\/\/host\[:port\] with no path/)
+  it('refuses a pinned root that is not http(s) or carries credentials/query/whitespace', async () => {
+    await expect(boot({ publicOrigin: 'ftp://public.example.test' })).rejects.toThrow(/absolute http\(s\) URL/)
+    await expect(boot({ publicOrigin: 'https://user:pass@public.example.test' })).rejects.toThrow(/credentials/)
+    await expect(boot({ publicOrigin: 'https://public.example.test/dsh?x=1' })).rejects.toThrow(/query or fragment/)
+    await expect(boot({ publicOrigin: 'https://public.example.test/dsh ' })).rejects.toThrow(/whitespace/)
   })
 
   it('refuses a pinned origin this deployment does not serve, instead of mailing it a launch token', async () => {

@@ -65,8 +65,14 @@ export interface Config {
    */
   distIndex?: string
   /**
-   * Public origin browsers use, `scheme://authority` with no trailing slash.
-   * Defaults to the origin of the request being handed off.
+   * Explicit public root browsers use: `scheme://host[:port][/prefix/]`.
+   * Overrides every derived value and is validated/normalized at load.
+   *
+   * When omitted, the handoff root is the official advertised URL
+   * (`ctx.webApp.getAdvertisedUrl()`, i.e. the deployment's `--public-url`)
+   * when it differs from the listener's own origin; otherwise the origin of the
+   * request being handed off. A configured prefix is preserved, so a
+   * prefix-stripping reverse proxy is sent back under its prefix.
    */
   publicOrigin?: string
   /**
@@ -110,45 +116,119 @@ function assertTrustworthyHeader(name: string, which: string): void {
 }
 
 /**
- * Split a configured public origin and reject anything that is not exactly
- * `scheme://authority`.
- * @param origin - the configured `publicOrigin`.
- * @returns the authority (host[:port]) the handoff will redirect to.
- * @throws when the value is not an absolute URL or carries a path/query/fragment.
+ * Parse a public HTTP(S) root: `scheme://host[:port][/prefix/]`.
+ *
+ * This mirrors the official `--public-url` grammar (0.2.1 `parsePublicUrl`)
+ * because the root is the base of the launch-token handoff redirect: a
+ * prefix-stripping reverse proxy may mount the app under `/dsh/`, and the
+ * browser has to be sent back there after the exchange.
+ * @param value - the candidate root.
+ * @param field - config/service name used in diagnostics.
+ * @returns the parsed URL, with the path normalized to end in `/`.
+ * @throws when the value is not an absolute http(s) URL, carries credentials, a
+ *         query or fragment, ASCII whitespace/control characters, or no host.
  */
-function parsePublicOrigin(origin: string): string {
+function parsePublicRoot(value: string, field = 'publicOrigin'): URL {
+  if (/[\u0000-\u0020\u007f]/u.test(value)) {
+    throw new Error(`identity-bridge: ${field} ${JSON.stringify(value)} must not contain ASCII whitespace or control characters`)
+  }
   let url: URL
   try {
-    url = new URL(origin)
+    url = new URL(value)
   } catch {
-    throw new Error(`identity-bridge: publicOrigin ${JSON.stringify(origin)} is not an absolute URL`)
+    throw new Error(`identity-bridge: ${field} ${JSON.stringify(value)} is not an absolute URL of the form scheme://host[:port][/prefix/]`)
   }
-  if (url.pathname !== '/' || url.search !== '' || url.hash !== '') {
-    throw new Error(
-      `identity-bridge: publicOrigin ${JSON.stringify(origin)} must be scheme://host[:port] with no path, query or fragment`,
-    )
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`identity-bridge: ${field} ${JSON.stringify(value)} must be an absolute http(s) URL`)
   }
-  return url.host
+  if (url.username !== '' || url.password !== '') {
+    throw new Error(`identity-bridge: ${field} ${JSON.stringify(value)} must not include credentials`)
+  }
+  if (url.search !== '' || url.hash !== '') {
+    throw new Error(`identity-bridge: ${field} ${JSON.stringify(value)} must not include a query or fragment`)
+  }
+  if (url.host === '') {
+    throw new Error(`identity-bridge: ${field} ${JSON.stringify(value)} must name a host`)
+  }
+  if (!url.pathname.endsWith('/')) url.pathname += '/'
+  return url
 }
 
 /**
- * Assert that a pinned public origin names an authority this deployment serves.
+ * Assert that a pinned public root names an authority this deployment serves.
  * The per-request fence only checks the REQUEST's authority, so without this a
- * pinned origin the deployment does not serve would still receive a redirect
+ * pinned root the deployment does not serve would still receive a redirect
  * carrying the launch token.
  * @param ctx - plugin context carrying the connection service.
- * @param origin - the configured `publicOrigin`.
+ * @param value - the configured `publicOrigin`.
  * @throws when the value is malformed or the Host fence rejects its authority.
  */
-function assertServedOrigin(ctx: Context, origin: string): void {
-  const authority = parsePublicOrigin(origin)
-  if (ctx.connection.requestRejection({ headers: { host: authority } }) === 403) {
+function assertServedOrigin(ctx: Context, value: string): void {
+  const root = parsePublicRoot(value)
+  if (ctx.connection.requestRejection({ headers: { host: root.host } }) === 403) {
     throw new Error(
-      `identity-bridge: publicOrigin ${JSON.stringify(origin)} is not an authority this deployment serves ` +
+      `identity-bridge: publicOrigin ${JSON.stringify(value)} is not an authority this deployment serves ` +
         `(the Host fence rejects it), so the handoff would hand the launch token to it. ` +
         `Add the authority to the connection row's trustedHosts / the CLI's --trusted-host.`,
     )
   }
+}
+
+/** The official `webApp` service provided by `dsh-web-app` (0.2.1). */
+interface WebAppService {
+  /** The root browsers are told to use: `--public-url`, or the listener's origin. */
+  getAdvertisedUrl(): string
+}
+
+/** One warning per plugin context, so a bad `--public-url` cannot flood the pod log. */
+const ADVERTISED_WARNING_EMITTED = new WeakSet<Context>()
+
+/**
+ * The officially advertised root, when it is a usable handoff base for THIS
+ * process.
+ *
+ * `webApp.getAdvertisedUrl()` is `--public-url` when the deployment set it and
+ * the listener's own origin otherwise. The latter is the loopback address
+ * behind the authenticating proxy — never what a remote browser reached — so it
+ * is ignored and the request origin stays in charge. The advertised root also
+ * carries the process launch token, so an authority outside the Host fence is
+ * refused: one warning is logged and the request origin is used instead.
+ * @param ctx - context carrying webServer and connection.
+ * @returns the normalized root, or `undefined` when this process has no usable
+ *          advertised root.
+ */
+function advertisedPublicRoot(ctx: Context): string | undefined {
+  const webApp = ctx.get('webApp', false) as Partial<WebAppService> | undefined
+  if (webApp === undefined || typeof webApp.getAdvertisedUrl !== 'function') return undefined
+  let root: URL
+  try {
+    root = parsePublicRoot(webApp.getAdvertisedUrl(), 'webApp.getAdvertisedUrl()')
+  } catch {
+    // The official service validated its own input; a value this plugin cannot
+    // use means "announce nothing" rather than a request-time throw.
+    return undefined
+  }
+  let listenerOrigin: string | undefined
+  try {
+    listenerOrigin = new URL(ctx.webServer.getOrigin()).origin
+  } catch {
+    listenerOrigin = undefined
+  }
+  // The official fallback: no --public-url, so the advertised root is the
+  // loopback listener. That is not reachable from the browser side.
+  if (listenerOrigin !== undefined && listenerOrigin === root.origin) return undefined
+  if (ctx.connection.requestRejection({ headers: { host: root.host } }) === 403) {
+    if (!ADVERTISED_WARNING_EMITTED.has(ctx)) {
+      ADVERTISED_WARNING_EMITTED.add(ctx)
+      ctx.logger.warn(
+        `identity-bridge: advertised URL ${JSON.stringify(root.href)} is not an authority this deployment serves ` +
+          `(the Host fence rejects it), so the launch-token handoff falls back to the request origin. ` +
+          `Add the authority to the connection row's trustedHosts / the CLI's --trusted-host.`,
+      )
+    }
+    return undefined
+  }
+  return root.href
 }
 
 /** Which request headers carry the proxy-verified principal. */
@@ -188,7 +268,10 @@ declare module '@deepseek-ai/cordis' {
 interface IndexRouteOptions {
   distIndex: string
   distRoot: string
+  /** Explicit public root from config, already validated and normalized. */
   publicOrigin: string | undefined
+  /** The official advertised root, read lazily: `webApp` may mount after this plugin. */
+  advertisedRoot: () => string | undefined
 }
 
 /**
@@ -205,16 +288,23 @@ interface IndexRouteOptions {
  */
 export function apply(ctx: Context, config: Config = {}): void {
   const distIndex = resolveDistIndex(config)
-  const publicOrigin = config.publicOrigin === '' ? undefined : config.publicOrigin
-  // A pinned origin is what the handoff redirect points at, and that URL carries
+  const configuredOrigin = config.publicOrigin === '' ? undefined : config.publicOrigin
+  // A pinned root is what the handoff redirect points at, and that URL carries
   // the process launch token, so it is validated BEFORE anything is provided:
   // a malformed value or an authority this deployment does not serve must fail
-  // the load, not be discovered per request.
-  if (publicOrigin !== undefined) assertServedOrigin(ctx, publicOrigin)
+  // the load, not be discovered per request. The advertised root needs no
+  // load-time check because `webApp` may mount later; it is re-validated per
+  // request in `advertisedPublicRoot`, which fails closed to the request origin.
+  let publicOrigin: string | undefined
+  if (configuredOrigin !== undefined) {
+    assertServedOrigin(ctx, configuredOrigin)
+    publicOrigin = parsePublicRoot(configuredOrigin).href
+  }
   const options: IndexRouteOptions = {
     distIndex,
     distRoot: dirname(distIndex),
     publicOrigin,
+    advertisedRoot: () => advertisedPublicRoot(ctx),
   }
 
   ctx.on('webserver/index-inject', (table: IndexInjection[]) => {
@@ -251,7 +341,8 @@ export function apply(ctx: Context, config: Config = {}): void {
  * @param ctx - context carrying the connection service.
  * @param req - the root request.
  * @param res - the response to write.
- * @param options - dist anchors and the configured public origin.
+ * @param options - dist anchors, the explicit public root and the lazy
+ *                  advertised root.
  */
 export async function handleIndex(
   ctx: Context,
@@ -284,10 +375,16 @@ export async function handleIndex(
     res.end()
     return
   }
+  // The handoff root, first hit wins: the explicit config/row pin, then the
+  // official advertised URL (`--public-url`), then the origin the browser
+  // actually reached (reverse-proxy aware). The request itself already passed
+  // the Host fence above; the advertised arm re-checks its own authority and
+  // falls back here when the fence would reject it.
+  const handoffRoot = options.publicOrigin ?? options.advertisedRoot() ?? requestOrigin(req)
   res.writeHead(302, {
     'cache-control': 'no-store',
     'referrer-policy': 'no-referrer',
-    location: ctx.connection.authenticatedUrl(options.publicOrigin ?? requestOrigin(req)),
+    location: ctx.connection.authenticatedUrl(handoffRoot),
   })
   res.end()
 }
