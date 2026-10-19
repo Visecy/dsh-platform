@@ -47,7 +47,7 @@
  * it and removed afterwards). Exits non-zero if any assertion fails.
  */
 import { createRequire } from 'node:module'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
 
@@ -57,6 +57,34 @@ const argOf = (name, fallback) => {
 }
 const target = resolve(argOf('--target', process.cwd()))
 const keep = process.argv.includes('--keep')
+
+/**
+ * The browser half of `@deepseek-ai/dsh-client-connection` is a CONDITIONAL
+ * export: 0.2.0 shipped a single `lib/client.js`, while 0.2.1 splits it into
+ * `lib/client.browser.js` / `lib/client.node.js`. Read whichever file the
+ * package's `./client` export names for a browser (falling back to the older
+ * single-file layout), so these string guards inspect the code a browser
+ * actually loads.
+ */
+const connectionClientSource = (profileRequire) => {
+  const manifestPath = profileRequire.resolve('@deepseek-ai/dsh-client-connection/package.json')
+  const packageRoot = dirname(manifestPath)
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  const exported = manifest.exports?.['./client']
+  const candidates = []
+  if (typeof exported === 'string') candidates.push(exported)
+  else if (exported !== null && typeof exported === 'object') {
+    for (const condition of ['browser', 'default', 'node']) {
+      if (typeof exported[condition] === 'string') candidates.push(exported[condition])
+    }
+  }
+  candidates.push('lib/client.browser.js', 'lib/client.node.js', 'lib/client.js')
+  for (const relative of candidates) {
+    const path = join(packageRoot, relative)
+    if (existsSync(path)) return readFileSync(path, 'utf8')
+  }
+  throw new Error(`no client entry found in ${packageRoot} (exports ${JSON.stringify(exported)})`)
+}
 
 const failures = []
 const check = (label, ok, detail = '') => {
@@ -76,7 +104,7 @@ try {
   const webserverEntry = profileRequire.resolve('@deepseek-ai/dsh-host-webserver')
   const connectionLib = dirname(connectionEntry)
   const connectionIndex = readFileSync(join(connectionLib, 'index.js'), 'utf8')
-  const connectionClient = readFileSync(join(connectionLib, 'client.js'), 'utf8')
+  const connectionClient = connectionClientSource(profileRequire)
   const webserverSource = readFileSync(webserverEntry, 'utf8')
 
   // String guards, NOT behavioural proof: each greps the installed source text
@@ -86,12 +114,12 @@ try {
     'found the deleted cookie-bypass marker in lib/index.js')
   check('[string guard] official connection has no isLoopback pin (deleted patch P1)',
     !connectionClient.includes('isLoopback: true,'),
-    'found the deleted isLoopback pin in lib/client.js')
+    'found the deleted isLoopback pin in the official client entry')
   check('[string guard] official webserver carries no registerGate fork extension',
     !webserverSource.includes('registerGate'),
     `found registerGate in ${webserverEntry}`)
   // String guard too (source text, not behaviour): the official client must
-  // still read the hook this plugin publishes. 0.2.0-rc.2 reads it through an
+  // still read the hook this plugin publishes. 0.2.x reads it through an
   // alias (`const globals = globalThis; … globals.__DSH_TRANSPORT__`), so match
   // the property access itself, not a literal `globalThis.` receiver.
   check('[string guard] official client still reads the transport hook the plugin publishes',
@@ -178,9 +206,10 @@ try {
   check('3a. the launch token is exchanged with a 303', exchange.status === 303, `status=${exchange.status}`)
   check('3b. the exchange mints the official browser cookie',
     cookie !== '' && cookie.includes('='), `set-cookie=${setCookie || '(none)'}`)
-  // 0.2.0-rc.2 answers `location: "./"` where 0.1.5 answered `"/"`; both resolve
-  // to the clean root. Assert the resolved target and that the launch token is
-  // NOT replayed, which is what "redirects to clean /" means.
+  // 0.2.x answers `location: "./"` where 0.1.5 answered `"/"` (0.2.1-rc.2
+  // verified); both resolve to the clean root. Assert the resolved target and
+  // that the launch token is NOT replayed, which is what "redirects to clean /"
+  // means.
   const exchangeLocation = String(exchange.headers.location ?? '')
   const exchangeTarget = new URL(exchangeLocation, `http://${AUTHORITY}/`)
   check('3c. the exchange redirects to clean /',

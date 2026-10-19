@@ -37,7 +37,7 @@
  * Exits non-zero if any claim fails. The installed tree is never modified.
  */
 import { createRequire } from 'node:module'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
 
@@ -46,6 +46,34 @@ const argOf = (name, fallback) => {
   return i === -1 ? fallback : process.argv[i + 1]
 }
 const target = resolve(argOf('--target', process.cwd()))
+
+/**
+ * The browser half of `@deepseek-ai/dsh-client-connection` is a CONDITIONAL
+ * export: 0.2.0 shipped a single `lib/client.js`, while 0.2.1 splits it into
+ * `lib/client.browser.js` / `lib/client.node.js`. Read whichever file the
+ * package's `./client` export names for a browser (falling back to the older
+ * single-file layout), so these guards inspect the code a browser actually
+ * loads.
+ */
+const connectionClientSource = (profileRequire) => {
+  const manifestPath = profileRequire.resolve('@deepseek-ai/dsh-client-connection/package.json')
+  const packageRoot = dirname(manifestPath)
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  const exported = manifest.exports?.['./client']
+  const candidates = []
+  if (typeof exported === 'string') candidates.push(exported)
+  else if (exported !== null && typeof exported === 'object') {
+    for (const condition of ['browser', 'default', 'node']) {
+      if (typeof exported[condition] === 'string') candidates.push(exported[condition])
+    }
+  }
+  candidates.push('lib/client.browser.js', 'lib/client.node.js', 'lib/client.js')
+  for (const relative of candidates) {
+    const path = join(packageRoot, relative)
+    if (existsSync(path)) return readFileSync(path, 'utf8')
+  }
+  throw new Error(`no client entry found in ${packageRoot} (exports ${JSON.stringify(exported)})`)
+}
 
 const failures = []
 const check = (label, ok, detail = '') => {
@@ -63,12 +91,12 @@ try {
   const webserverEntry = profileRequire.resolve('@deepseek-ai/dsh-host-webserver')
   const connectionLib = dirname(connectionEntry)
   const connectionIndex = readFileSync(join(connectionLib, 'index.js'), 'utf8')
-  const clientJs = readFileSync(join(connectionLib, 'client.js'), 'utf8')
+  const clientJs = connectionClientSource(profileRequire)
   const webserverJs = readFileSync(webserverEntry, 'utf8')
   check('fixture is unpatched (no cookie bypass)', !connectionIndex.includes('Platform patch: the OIDC gate'))
   check('fixture is unpatched (no isLoopback pin)', !clientJs.includes('isLoopback: true,'))
   check('fixture has no webserver fork extension (no registerGate)', !webserverJs.includes('registerGate'))
-  // 0.2.0-rc.2 reads the global through an alias (`const globals = globalThis;
+  // 0.2.x reads the global through an alias (`const globals = globalThis;
   // … globals.__DSH_TRANSPORT__`), so match the property access, not a literal
   // `globalThis.` receiver.
   check('transport hook is read by the official client', /\.__DSH_TRANSPORT__/.test(clientJs))
