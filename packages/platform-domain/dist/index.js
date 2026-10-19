@@ -147,14 +147,16 @@ var CredentialStore = class extends Service {
     const value = row?.payload.value;
     return typeof value === "string" && value.length > 0 ? value : void 0;
   }
-  /** Resolve one reference: environment, then the store, then `.env`. */
+  /** Resolve one reference: the store, then the environment, then `.env` (0.2.1 order). */
   async resolve(ref) {
-    return this.inherited(ref) ?? (this.stored(ref) !== void 0 ? { value: this.stored(ref), source: SOURCE } : void 0) ?? this.dotenv(ref);
+    const stored = this.stored(ref);
+    if (stored !== void 0) return { value: stored, source: SOURCE };
+    return this.inherited(ref) ?? this.dotenv(ref);
   }
   /** Describe one reference without exposing its value. */
   async describe(ref) {
-    if (this.inherited(ref) !== void 0) return { configured: true, source: "env", writable: false };
     if (this.stored(ref) !== void 0) return { configured: true, source: SOURCE, writable: true };
+    if (this.inherited(ref) !== void 0) return { configured: true, source: "env", writable: true };
     const fallback = this.dotenv(ref);
     if (fallback !== void 0) return { configured: true, source: fallback.source, writable: true };
     return { configured: false, writable: true };
@@ -164,9 +166,6 @@ var CredentialStore = class extends Service {
     assertReferenceName(ref);
     if (value.length === 0) throw new Error(`credentials: an empty value cannot be stored for "${ref}"; use unset`);
     this.assertServeable(`"${ref}"`);
-    if (this.inherited(ref) !== void 0) {
-      throw new Error(`credentials: "${ref}" is supplied read-only by the launching environment, so a write would be shadowed; unset it in the environment this process was started with instead`);
-    }
     await this.enqueue(async () => {
       await this.write(`"${ref}"`, (table) => table.put(REFERENCE_PREFIX + ref, {
         userId: PLATFORM_CREDENTIAL_OWNER,
@@ -182,9 +181,6 @@ var CredentialStore = class extends Service {
   async unset(ref) {
     assertReferenceName(ref);
     this.assertServeable(`"${ref}"`);
-    if (this.inherited(ref) !== void 0) {
-      throw new Error(`credentials: "${ref}" is supplied read-only by the launching environment, so removing the stored value would be shadowed; unset it in the environment this process was started with instead`);
-    }
     await this.enqueue(async () => {
       if (this.read(`"${ref}"`, (table) => table.get(REFERENCE_PREFIX + ref)) === void 0) return;
       await this.write(`"${ref}"`, (table) => table.delete(REFERENCE_PREFIX + ref));

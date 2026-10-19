@@ -38,10 +38,13 @@
  * are reproduced from the official provider deliberately, and each is pinned by
  * a case in `tests/credentials.spec.ts`:
  *
- *  - the launching environment is layered OVER the store and is read-only: a
- *    `DEEPSEEK_API_KEY=…` in the pod's environment is this run's explicit
- *    intent, so a write that it would shadow is REFUSED rather than silently
- *    ineffective;
+ *  - the provider-managed store takes precedence over ambient fallbacks: the
+ *    value the operator saved wins over `DEEPSEEK_API_KEY` in the pod's
+ *    environment, and every write is stored (it can no longer be "shadowed").
+ *    This is DSH 0.2.1's precedence — 0.2.0 put the environment layer on top
+ *    and refused writes it would shadow, which silently ignored a key saved in
+ *    the Models UI; the flip is deliberate and the official provider's doc says
+ *    the stored value takes precedence;
  *  - an empty stored value is absent everywhere (`set` refuses it, `unset` is
  *    what removes a credential);
  *  - a write is validated at the durable boundary, because a row that cannot be
@@ -349,17 +352,17 @@ export class CredentialStore extends Service {
     return typeof value === 'string' && value.length > 0 ? value : undefined
   }
 
-  /** Resolve one reference: environment, then the store, then `.env`. */
+  /** Resolve one reference: the store, then the environment, then `.env` (0.2.1 order). */
   async resolve(ref: string): Promise<{ value: string; source: string } | undefined> {
-    return this.inherited(ref)
-      ?? (this.stored(ref) !== undefined ? { value: this.stored(ref) as string, source: SOURCE } : undefined)
-      ?? this.dotenv(ref)
+    const stored = this.stored(ref)
+    if (stored !== undefined) return { value: stored, source: SOURCE }
+    return this.inherited(ref) ?? this.dotenv(ref)
   }
 
   /** Describe one reference without exposing its value. */
   async describe(ref: string): Promise<CredentialInfo> {
-    if (this.inherited(ref) !== undefined) return { configured: true, source: 'env', writable: false }
     if (this.stored(ref) !== undefined) return { configured: true, source: SOURCE, writable: true }
+    if (this.inherited(ref) !== undefined) return { configured: true, source: 'env', writable: true }
     const fallback = this.dotenv(ref)
     if (fallback !== undefined) return { configured: true, source: fallback.source, writable: true }
     return { configured: false, writable: true }
@@ -370,11 +373,6 @@ export class CredentialStore extends Service {
     assertReferenceName(ref)
     if (value.length === 0) throw new Error(`credentials: an empty value cannot be stored for "${ref}"; use unset`)
     this.assertServeable(`"${ref}"`)
-    // A write the inherited environment would shadow must refuse, not appear to
-    // succeed while resolution keeps returning the environment's value.
-    if (this.inherited(ref) !== undefined) {
-      throw new Error(`credentials: "${ref}" is supplied read-only by the launching environment, so a write would be shadowed; unset it in the environment this process was started with instead`)
-    }
     await this.enqueue(async () => {
       await this.write(`"${ref}"`, (table) => table.put(REFERENCE_PREFIX + ref, {
         userId: PLATFORM_CREDENTIAL_OWNER,
@@ -391,9 +389,10 @@ export class CredentialStore extends Service {
   async unset(ref: string): Promise<void> {
     assertReferenceName(ref)
     this.assertServeable(`"${ref}"`)
-    if (this.inherited(ref) !== undefined) {
-      throw new Error(`credentials: "${ref}" is supplied read-only by the launching environment, so removing the stored value would be shadowed; unset it in the environment this process was started with instead`)
-    }
+    // No inherited-environment refusal: the store wins resolution, so removing
+    // (or storing) a reference is always meaningful even when `.env`/process
+    // env also supplies it. After the unset the environment becomes the
+    // fallback again.
     await this.enqueue(async () => {
       // Absence is checked before the write so an unset of something never
       // stored costs no durable operation and emits nothing at all.

@@ -12,9 +12,10 @@
  * The cases are written against the REQUIREMENT, not the implementation: the
  * first one builds a second store over the same table and reads the value back,
  * which is what "survives a pod replacement" means. The rest pin the official
- * seam's semantics that a replacement must not lose: the environment layer and
- * its read-only refusal, the empty-value rule, the validation at the durable
- * boundary, and the record half including a verbatim grant payload.
+ * seam's semantics that a replacement must not lose: the stored-first
+ * precedence of DSH 0.2.1 (the environment is only an ambient fallback), the
+ * empty-value rule, the validation at the durable boundary, and the record half
+ * including a verbatim grant payload.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
@@ -83,18 +84,28 @@ describe('the durable credential store', () => {
     expect(await registered?.resolve(DEEPSEEK)).toEqual({ value: 'sk-via-service', source: 'postgres' })
   })
 
-  it('lays the launching environment over the store, read-only', async () => {
+  it('prefers the stored credential over the launching environment (0.2.1 order)', async () => {
     const table = new FakeTable()
     const store = await boot(table)
     await store.set(DEEPSEEK, 'sk-stored')
 
     process.env[DEEPSEEK] = 'sk-from-env'
+    // 0.2.1 flipped the precedence: the value the operator saved wins, and the
+    // environment is only an ambient fallback. 0.2.0 had this backwards, which
+    // silently ignored a key saved in the Models UI whenever the pod also had
+    // DEEPSEEK_API_KEY in its environment.
+    expect(await store.resolve(DEEPSEEK)).toEqual({ value: 'sk-stored', source: 'postgres' })
+    expect(await store.describe(DEEPSEEK)).toEqual({ configured: true, source: 'postgres', writable: true })
+    // A write is no longer refused as "shadowed": the store is what resolution
+    // reads first.
+    await store.set(DEEPSEEK, 'sk-from-ui')
+    expect(table.rows.get('ref:' + DEEPSEEK)?.payload.value).toBe('sk-from-ui')
+    expect(await store.resolve(DEEPSEEK)).toEqual({ value: 'sk-from-ui', source: 'postgres' })
+    // After an unset the environment becomes the fallback again, and describe
+    // reports it as configured AND writable.
+    await store.unset(DEEPSEEK)
     expect(await store.resolve(DEEPSEEK)).toEqual({ value: 'sk-from-env', source: 'env' })
-    expect(await store.describe(DEEPSEEK)).toEqual({ configured: true, source: 'env', writable: false })
-    // The write would be shadowed by the environment, so it must refuse rather
-    // than appear to succeed.
-    await expect(store.set(DEEPSEEK, 'sk-other')).rejects.toThrow(/DEEPSEEK_API_KEY/)
-    expect(table.rows.get('ref:' + DEEPSEEK)?.payload.value).toBe('sk-stored')
+    expect(await store.describe(DEEPSEEK)).toEqual({ configured: true, source: 'env', writable: true })
   })
 
   it('reports an unconfigured reference as unconfigured', async () => {
