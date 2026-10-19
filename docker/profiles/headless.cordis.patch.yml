@@ -5,9 +5,10 @@
 # 0.2.0-rc.2 -> 0.2.1-rc.2 effective row delta was measured from the two dumps:
 # 2 rows REMOVED (`skill-badge`, `tool-ralph`) and 4 ADDED (`remote-access`,
 # `tool-working-directory`, `web-deepseek-api`, `working-directory`); none of
-# those ids is referenced by this profile, so the disables below still resolve
-# and nothing had to be added. (`schedule`/`ui-schedule` are dsh-web-app rows
-# and do not enter this composition.)
+# the removed ids is referenced by this profile and every added row keeps its
+# official default except `working-directory`, whose launch-directory fallback
+# is restated at the bottom of this file. (`schedule`/`ui-schedule` are
+# dsh-web-app rows and do not enter this composition.)
 #
 # `workspace-changes` — the new 0.2 package that reads workspace bytes with
 # host `node:fs` and has no `ctx.fs` seam — is a dsh-web-app row and is NOT
@@ -129,3 +130,10 @@
 - id: storage-domain
   config:
     backend: postgres
+# NEW IN 0.2.1 (web profile has the full reasoning). Without it the deployment
+# fallback for sessions with no original directory is `process.cwd()` = `/` on
+# this image, outside the `/workspaces` execution world. Keep both profiles
+# aligned: headless runs see the same host paths.
+- id: working-directory
+  config:
+    defaultDirectory: '/workspaces'
