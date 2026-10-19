@@ -59,7 +59,7 @@ jobs:
       - name: Typecheck
         # `pnpm -r build` type-checks sandbox-daemon (tsc --noEmit). These two are
         # the only other packages that pass `tsc` today; the remaining published
-        # packages carry pre-existing type drift against DSH 0.2.0-rc.2, so
+        # packages carry pre-existing type drift against DSH 0.2.1-rc.2, so
         # gating them here would block every commit. Closing that drift (and then
         # dropping this note) is follow-up work.
         run: |

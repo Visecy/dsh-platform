@@ -9,7 +9,7 @@ allowBuilds:
 # `minimumReleaseAge` is configured (neither in this repo nor in the user-level
 # pnpm/npm config), so an exclude list would be dead configuration — the block
 # that used to live here still listed the 0.1.5-rc.1 line long after every
-# dependency had moved to 0.2.0-rc.2. If a `minimumReleaseAge` is ever added,
-# it MUST exclude the pinned `@deepseek-ai/dsh-*@0.2.0-rc.2` line (see
+# dependency had moved on. If a `minimumReleaseAge` is ever added, it MUST
+# exclude the pinned `@deepseek-ai/dsh-*@0.2.1-rc.2` line (see
 # pnpm-lock.yaml and docker/dsh-web-platform.Dockerfile's DSH_VERSION), or
 # `pnpm install` will refuse the release candidate.

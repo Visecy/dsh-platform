@@ -7,7 +7,7 @@
 set -euo pipefail
 
 HARNESS="${1:?usage: harness-profile.sh <harness-dir> [dsh-version]}"
-DSH_VERSION="${2:-0.2.0-rc.2}"
+DSH_VERSION="${2:-0.2.1-rc.2}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # pnpm store for the throwaway profile. Defaults to the store pnpm itself
 # reports for this checkout, so the script works on any machine; override with

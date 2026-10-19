@@ -139,7 +139,7 @@ jobs:
             # Must equal the Dockerfile's `ARG DSH_VERSION` default and the
             # dependency pin; scripts/check-dsh-version.mjs (CI + a step above)
             # fails the release when they drift.
-            DSH_VERSION=0.2.0-rc.2
+            DSH_VERSION=0.2.1-rc.2
 
       - name: Build sandbox daemon image
         uses: docker/build-push-action@v6
