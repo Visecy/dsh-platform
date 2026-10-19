@@ -7,7 +7,7 @@
  *   gateway/internal: client api: permissionPresets/catalog failed:
  *     transport failure for /api/permissionPresets/catalog: HTTP 404
  *
- * The pairing, established from the installed 0.2.0-rc.2 composition
+ * The pairing, established from the installed 0.2.1-rc.2 composition
  * (`dsh --profile web --dump-default-config`) and the package manifests, is:
  *
  *   - HOST:   row `permission`  = `@deepseek-ai/dsh-permission-presets`

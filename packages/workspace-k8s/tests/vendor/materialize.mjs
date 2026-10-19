@@ -67,9 +67,10 @@ const shown = (path) => relative(join(PACKAGE_DIR, '..', '..'), path) || path
  * flattened copies to be resolvable from this directory — the vendored
  * `dsh-workspace` imports only `@deepseek-ai/cordis`, `@deepseek-ai/dsh-brand`,
  * `@deepseek-ai/dsh-storage-domain` and `zod` at runtime, and its domain form
- * pulls in `@deepseek-ai/dsh-invariants` as an auto-installed peer, which pulls
- * `@deepseek-ai/schemastery`, which pulls `@deepseek-ai/cosmokit` and
- * `@standard-schema/spec`.
+ * (`dsh-storage-domain`) depends on `@deepseek-ai/schemastery`, which pulls
+ * `@deepseek-ai/cosmokit` and `@standard-schema/spec`. There is no
+ * `dsh-invariants` requirement any more: upstream removed the runtime invariant
+ * plugins and `./invariant` exports in the 0.2.1 line.
  *
  * Ranges are ranges on purpose: the store directory name carries a peer-hash
  * suffix that changes on every install, and the fixture must keep working when
@@ -91,11 +92,6 @@ const REQUIREMENTS = [
     name: '@deepseek-ai/dsh-brand',
     rangeFrom: { devDependency: '@deepseek-ai/dsh-brand' },
     needed: 'brandString/brandNumber in the entity and the domain spec',
-  },
-  {
-    name: '@deepseek-ai/dsh-invariants',
-    rangeFrom: { fixturePeer: '@deepseek-ai/dsh-invariants' },
-    needed: 'auto-installed peer of the domain form',
   },
   {
     name: '@deepseek-ai/schemastery',
@@ -260,8 +256,8 @@ function satisfies(rawVersion, range) {
     const comparators = expandComparators(clause)
     if (!comparators.every((comparator) => testComparator(version, comparator))) return false
     // node-semver: a prerelease only matches a comparator set that carries a
-    // prerelease for the SAME release tuple, so `^0.2.0-rc.2` accepts
-    // 0.2.0-rc.3 but never 0.2.1-rc.1.
+    // prerelease for the SAME release tuple, so `^0.2.1-rc.2` accepts
+    // 0.2.1-rc.3 but never 0.2.2-rc.1.
     if (version.prerelease.length === 0) return true
     return comparators.some((comparator) =>
       comparator.version.prerelease.length > 0

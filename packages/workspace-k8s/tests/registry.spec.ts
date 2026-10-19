@@ -22,11 +22,14 @@ const liveChannel = (registry: unknown) => ({
 
 /**
  * The official record's session membership as `@deepseek-ai/dsh-workspace`
- * (0.2.0-rc.2, `lib/index.js`) actually behaves — the same ordering these
- * specs pinned against 0.1.5-rc.3, re-checked when the fixture was re-vendored:
+ * (0.2.1-rc.2, `lib/index.js`) actually behaves — the ordering these specs
+ * pinned against 0.1.5-rc.3, re-checked when the fixture was re-vendored:
  *
  * - reads are filtered by a canonical-cwd index the registry builds once at
- *   init, so an unindexed id reads as unowned even while the record claims it;
+ *   init, so an unindexed id reads as unowned even while the record claims it
+ *   (0.2.1 additionally treats a fully-qualified cwd that is missing with
+ *   ENOENT as a candidate; this fake models the still-unowned case, which is
+ *   what the bridge's detach/attach repair has to handle);
  * - `attachSession` short-circuits on the DURABLE membership FIRST
  *   (`if (!this.record.sessionIds.includes(sessionId))`), and only its
  *   not-already-claimed branch reads the header, validates the cwd and calls

@@ -1,5 +1,5 @@
 /**
- * The slice of `@deepseek-ai/dsh-client-ui-primitives@0.2.0-rc.2` this plugin
+ * The slice of `@deepseek-ai/dsh-client-ui-primitives@0.2.1-rc.2` this plugin
  * uses, declared locally.
  *
  * The package is IN the composition but is not an installed dependency of this

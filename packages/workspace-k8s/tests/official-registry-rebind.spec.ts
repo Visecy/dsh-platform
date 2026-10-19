@@ -7,21 +7,25 @@
  * code instead: a real `WorkspaceRegistry` over a real filesystem, driven
  * through `HostWorkspaceRegistry.rebind`.
  *
- * The vendored bytes are 0.2.0-rc.2 (see `tests/vendor/README.md`); the
- * decision points these tests pin — the `sessionIds` cwd filter, the
+ * The vendored bytes are 0.2.1-rc.2 (see `tests/vendor/README.md`); the
+ * decision points these tests pin — the `sessionIds` candidate filter, the
  * durable-membership short-circuit in `attachSession`, and the prune inside
- * `mutate` — were diffed against 0.1.5-rc.3 and are unchanged, so the
- * assertions below are the same ones that pinned the original defect.
+ * `mutate` — were diffed across 0.1.5-rc.3, 0.2.0-rc.2 and 0.2.1-rc.2. The
+ * 0.2.1 line RELAXED the filter: an id whose stored cwd is fully qualified but
+ * resolves with ENOENT is now a candidate member (`missingSessionPaths`), so a
+ * temporarily missing anchor no longer hides or prunes it.
  *
  * The production situation is the one the live deployment is in:
  *
  * 1. The control plane pod starts. `/workspaces/<id>` anchors do not exist yet
  *    (the reconciler creates them), so at registry init every stored session
- *    header whose cwd points at one is indexed as "cwd does not resolve" and is
- *    therefore INVISIBLE to the registry's `sessionIds` filter.
+ *    header whose cwd points at one fails to resolve.
  * 2. The reconciler then creates the anchor.
  *
- * What happens next is the whole question. These tests pin the answer.
+ * What happens next is the whole question. These tests pin the answer, and the
+ * two cases are now different: an EMPTY record has nothing to preserve (the
+ * first spec), while a record that already claims an id keeps it through the
+ * ENOENT tolerance (the second spec), where 0.2.0 would have pruned it.
  */
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -65,8 +69,8 @@ describe('official dsh-workspace semantics vs. HostWorkspaceRegistry.rebind', ()
 
     // Boot with the anchor missing and the record EMPTY — exactly the production
     // state (`dsh_storage_records` holds `"sessionIds":[]` for the six records
-    // the bridge created). The session is not accounted by the record at all,
-    // and the registry's init marked its cwd unresolvable, so it is invisible.
+    // the bridge created). The session is not accounted by the record at all, so
+    // there is nothing for the ENOENT candidate tolerance to preserve.
     const firstBoot = await startRegistry({
       records: [{ path: workspacePath, sessionIds: [] }],
       storedSessions: [{ id: sessionId, cwd: workspacePath, createdAt: 100 }],
@@ -104,11 +108,18 @@ describe('official dsh-workspace semantics vs. HostWorkspaceRegistry.rebind', ()
 
   })
 
-  it('is a silent no-op for a session the record already claims but the index still hides', async () => {
-    // A record can durably claim an id the index hides: the id was indexed on an
-    // earlier boot (so it entered the record), and a later boot could not
-    // re-index it because its anchor was gone. `attachSession` cannot rescue
-    // that state: its index refresh lives INSIDE the not-already-claimed branch.
+  it('tolerates a claimed session whose cwd is missing at init (0.2.1 ENOENT candidates)', async () => {
+    // A record can durably claim an id whose anchor is gone at boot. Up to
+    // 0.2.0 the registry indexed that header as "cwd does not resolve", so the
+    // id was invisible to `sessionIds` and the record's next write PRUNED it —
+    // `attachSession` could not rescue it either, because its index refresh
+    // lives INSIDE the not-already-claimed branch and the short-circuit runs
+    // first.
+    //
+    // 0.2.1 changed the candidate filter: a fully-qualified cwd that fails with
+    // ENOENT lands in `missingSessionPaths`, and `candidateMatches` keeps such
+    // an id a member. The membership is therefore preserved across the boot,
+    // and the rebind pass has nothing to repair.
     const root = tempRoot()
     const workspacePath = join(root, 'ws-b')
     const sessionId = 'session-b'
@@ -117,6 +128,9 @@ describe('official dsh-workspace semantics vs. HostWorkspaceRegistry.rebind', ()
       storedSessions: [{ id: sessionId, cwd: workspacePath, createdAt: 100 }],
     })
     expect(durableSessionIds(harness, workspacePath)).toEqual([sessionId])
+    // The tolerance is visible already at init: the missing anchor does not hide
+    // the claimed id.
+    expect(harness.registry.list()[0]?.sessionIds).toEqual([sessionId])
 
     mkdirSync(workspacePath, { recursive: true })
     const canonical = realpathSync(workspacePath)
@@ -125,16 +139,11 @@ describe('official dsh-workspace semantics vs. HostWorkspaceRegistry.rebind', ()
       { id: sessionId, path: canonical, createdAt: 100 },
     ])
 
-    // This is the ordering the previous implementer asserted backwards. The
-    // short-circuit runs FIRST (`record.sessionIds.includes(sessionId)`), so no
-    // header is read, `rememberSessionPath` is never called, `mutate` prunes the
-    // hidden id out of the durable membership, and the repair does not happen.
-    expect(attached).toEqual([])
-    expect(harness.registry.list()[0]?.sessionIds).toEqual([])
-    expect(durableSessionIds(harness, workspacePath)).toEqual([])
-    // The one write is a PRUNE, not a repair — and it happened even though the
-    // bridge never called `detachSession`, because `attachSession`'s mutate tail
-    // filters the record by the index on every write.
-    expect(harness.writes.slice(before)).toEqual([`update:ws-${workspacePath}`])
+    // `current` already equals `next`, so the steady-state check returns before
+    // any detach/attach: no write, no prune, and the association never left.
+    expect(attached).toEqual([sessionId])
+    expect(harness.registry.list()[0]?.sessionIds).toEqual([sessionId])
+    expect(durableSessionIds(harness, workspacePath)).toEqual([sessionId])
+    expect(harness.writes.slice(before)).toEqual([])
   })
 })

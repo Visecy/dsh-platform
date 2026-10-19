@@ -120,7 +120,7 @@ const standIn = <T extends (props: Record<string, unknown>) => unknown>(componen
 /**
  * The official primitives, stood in for.
  *
- * The real `@deepseek-ai/dsh-client-ui-primitives@0.2.0-rc.2` IS in this
+ * The real `@deepseek-ai/dsh-client-ui-primitives@0.2.1-rc.2` IS in this
  * composition — it is one of the web shell's static seed words
  * (`dsh-web-frontend/dist/assets/index-*.js` maps the specifier into the
  * browser module table) and every official client bundle `require`s it — but it

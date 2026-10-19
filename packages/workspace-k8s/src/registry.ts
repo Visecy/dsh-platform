@@ -51,16 +51,20 @@ export interface WorkspaceRegistry {
    *
    * The association lives ONLY in the record's `sessionIds`, and the official
    * registry filters that array on read by a canonical-cwd index it builds
-   * once, at init. Any session whose `cwd` did not resolve at that moment is
-   * therefore invisible — and the record's next write prunes it from the
-   * medium.
+   * once, at init. Since dsh-workspace 0.2.1 a session whose stored `cwd` is
+   * fully qualified but resolves with ENOENT is a CANDIDATE member
+   * (`host.candidateMatches` + `missingSessionPaths`), so a temporarily missing
+   * anchor no longer hides it or lets the next write prune it. A session the
+   * index cannot see for any OTHER reason (cwd resolves elsewhere, non-ENOENT
+   * failure) is still invisible and is pruned by the record's next write.
    *
    * `attachSession` is the only repair. It refreshes the index
    * (`rememberSessionPath`) only on its not-already-claimed branch — the
-   * durable-membership short-circuit comes first — so an id the record already
-   * claims takes one pass to clear (its mutate tail prunes it) and a second,
-   * ordinary attach to come back. The first pass therefore reports that id as
-   * NOT attached, and the caller must not hand it to another record.
+   * durable-membership short-circuit comes first — so a claimed-but-hidden id
+   * from the non-ENOENT case takes one pass to clear (its mutate tail prunes
+   * it) and a second, ordinary attach to come back. The first pass therefore
+   * reports that id as NOT attached, and the caller must not hand it to
+   * another record.
    *
    * @returns the ids the record can now index, newest-first. An id that is
    * requested but absent from the result is still `Ungrouped` and needs another
@@ -195,9 +199,11 @@ export class HostWorkspaceRegistry implements WorkspaceRegistry {
 
     // `entity.sessionIds` is the record's membership filtered by the registry's
     // canonical-cwd index — and that index is exactly what a pod replacement
-    // loses. An id absent here is invisible to the sidebar AND is pruned from
-    // the medium by the record's next write, so this getter is the only honest
-    // answer to "what can this record currently own?".
+    // loses. 0.2.1's candidate filter tolerates an ENOENT cwd (the anchor not
+    // created yet), so such an id now stays visible; an id absent here is
+    // hidden for another reason and is pruned from the medium by the record's
+    // next write, so this getter is the only honest answer to "what can this
+    // record currently own?".
     const current = [...(entity.sessionIds ?? [])]
     // Oldest-first: `attachSession` prepends, so replaying history in creation
     // order leaves the membership newest-first, exactly like a live attach.

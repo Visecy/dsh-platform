@@ -17,16 +17,19 @@ whole. The peer packages it needs at import time live in `node_modules/`, which
 
 | Package | Version | Why |
 | --- | --- | --- |
-| `dsh-workspace` | 0.2.0-rc.2 | The entity + registry under test (exact bytes the deployed image loads) |
-| `dsh-storage-domain` | 0.2.0-rc.2 | The registry's `DomainFacility.open(spec)` + zod record parsing |
-| `dsh-storage` | 0.2.0-rc.2 | `UNIT_NAME_RE` / backend key helpers pulled in by the domain form |
-| `dsh-brand` | 0.2.0-rc.2 | `brandString` / `brandNumber` used by the domain specs |
-| `dsh-invariants` | 0.2.0-rc.2 | Auto-installed peer of the domain form |
-| `schemastery` | 3.18.4 | The domain form plugin `Config` declaration |
-| `cosmokit` | 1.8.5 | `schemastery` dependency |
+| `dsh-workspace` | 0.2.1-rc.2 | The entity + registry under test (exact bytes the deployed image loads) |
+| `dsh-storage-domain` | 0.2.1-rc.2 | The registry's `DomainFacility.open(spec)` + zod record parsing |
+| `dsh-storage` | 0.2.1-rc.2 | `UNIT_NAME_RE` / backend key helpers pulled in by the domain form |
+| `dsh-brand` | 0.2.1-rc.2 | `brandString` / `brandNumber` used by the domain specs |
+| `schemastery` | 3.18.5 | The domain form plugin `Config` declaration |
+| `cosmokit` | 1.8.6 | `schemastery` dependency |
 | `@standard-schema/spec` | 1.1.0 | `schemastery` dependency |
 | `zod` | 4.4.3 | Record schemas (runtime files only: no `src/`, `v3/`, `mini/`, `v4-mini/`, `.d.ts`, `.cjs`) |
-| `@deepseek-ai/cordis` | 4.0.4 | Not flattened into the fixture: the vendored bytes resolve the package's own `dependencies` entry, exactly like any other module under `packages/workspace-k8s/` |
+| `@deepseek-ai/cordis` | 4.0.5 | Not flattened into the fixture: the vendored bytes resolve the package's own `dependencies` entry, exactly like any other module under `packages/workspace-k8s/` |
+
+`@deepseek-ai/dsh-invariants` is deliberately absent: upstream removed runtime
+invariant plugins and every package's `./invariant` export in the 0.2.1 line, so
+it is no longer a peer of the domain form (or of anything else here).
 
 ## The fixture version is checked against the shipped release
 
@@ -48,11 +51,11 @@ expected, and never touches the tree:
 
 ```
 [vendor] the vendored fixture does not match the DSH release this checkout installs.
-[vendor]   - the vendored fixture is STALE: packages/workspace-k8s/tests/vendor/dsh-workspace holds @deepseek-ai/dsh-workspace@0.1.5-rc.3, but this checkout installs DSH 0.2.0-rc.2.
+[vendor]   - the vendored fixture is STALE: packages/workspace-k8s/tests/vendor/dsh-workspace holds @deepseek-ai/dsh-workspace@0.1.5-rc.3, but this checkout installs DSH 0.2.1-rc.2.
     present  (packages/workspace-k8s/tests/vendor/dsh-workspace/package.json): 0.1.5-rc.3
-    expected (packages/workspace-k8s/package.json devDependencies: @deepseek-ai/dsh-brand, @deepseek-ai/dsh-storage, @deepseek-ai/dsh-storage-domain): 0.2.0-rc.2
+    expected (packages/workspace-k8s/package.json devDependencies: @deepseek-ai/dsh-brand, @deepseek-ai/dsh-storage, @deepseek-ai/dsh-storage-domain): 0.2.1-rc.2
     the fixture is the exact bytes the deployed image loads, so it has to be re-vendored from the release the image installs:
-    npm pack @deepseek-ai/dsh-workspace@0.2.0-rc.2   # see packages/workspace-k8s/tests/vendor/README.md, "Re-vendoring"
+    npm pack @deepseek-ai/dsh-workspace@0.2.1-rc.2   # see packages/workspace-k8s/tests/vendor/README.md, "Re-vendoring"
 [vendor] the vendored fixture was left untouched; re-vendor it from the expected release and re-run `pnpm test`.
 ```
 
@@ -67,29 +70,47 @@ If a future DSH release versions its packages inconsistently, the three roots
 disagree with each other and the check says so instead of guessing; a human has
 to decide what the fixture should be, loudly.
 
-## The rebind semantics have not moved since 0.1.5-rc.3
+## Rebind semantics: unchanged 0.1.5-rc.3 -> 0.2.0-rc.2, RELAXED in 0.2.1-rc.2
 
 `official-registry-harness.ts` stubs only `storageDomain` and
-`sessionPersistence`; everything that decides the outcome is shipped code. On
-re-vendoring `dsh-workspace` from 0.1.5-rc.3 to 0.2.0-rc.2 those decision points
-were diffed line by line and are UNCHANGED:
+`sessionPersistence`; everything that decides the outcome is shipped code.
 
-- `get sessionIds()` still filters the durable account through
+0.1.5-rc.3 -> 0.2.0-rc.2 (diffed line by line when that release was adopted) did
+NOT move the decision points:
+
+- `get sessionIds()` filtered the durable account through
   `host.sessionPath(id) === record.path`;
-- `attachSession` still short-circuits on `this.record.sessionIds.includes(id)`
-  FIRST, and only its not-already-claimed branch reads the header, validates the
-  cwd and calls `rememberSessionPath`;
-- `mutate` still re-filters the account by that index inside
-  `table.update`, aborting on the unchanged sentinel;
+- `attachSession` short-circuited on `this.record.sessionIds.includes(id)` FIRST,
+  and only its not-already-claimed branch read the header, validated the cwd and
+  called `rememberSessionPath`;
+- `mutate` re-filtered the account by that index inside `table.update`, aborting
+  on the unchanged sentinel;
 - `[Service.init]`, `replaceHeaderIndex`, `indexHeaders`, `listStoredHeaders`,
-  `readSessionHeader` and `validateStoredState` are byte-identical.
+  `readSessionHeader` and `validateStoredState` were byte-identical.
 
-0.2.0-rc.2 adds an `initializeDefault` first-use workspace, session pinning
-(`pinnedSessionIds` in the domain global) and activity-gated archiving — none of
-which the rebind path touches. The specs were re-run against the 0.2 bytes
-unchanged; only version references in comments were updated. Do not "fix" a
-failing rebind spec by relaxing it: if `attachSession`'s ordering ever does
-change, the repair in `src/registry.ts` is what has to change with it.
+0.2.1-rc.2 DOES move the candidate filter (the rest of the ordering is
+unchanged):
+
+- the host seam is now `candidateMatches(id, path)`, true when the indexed path
+  equals the record path OR when the id is in the new `missingSessionPaths` set;
+- `indexHeader` records an id there when its stored cwd is fully qualified and
+  its resolution fails with `ENOENT`. A session whose cwd is *temporarily
+  missing* is therefore a candidate — it stays visible through `sessionIds` and
+  the prune in `mutate` preserves it — instead of being filtered out and dropped
+  by the next write;
+- `replaceHeaderIndex`, `indexHeader` and `rememberSessionPath` maintain that
+  set; `attachSession` still short-circuits on durable membership first, and a
+  claimed-but-unindexed id is only re-attachable through a header read.
+
+Consequence for the platform: the production situation these specs model — the
+control plane boots before the `/workspaces/<id>` anchors exist — is now
+TOLERATED by the registry, so the "claimed but hidden" spec asserts the new
+tolerant no-op (the id stays visible, no write, no prune) instead of the old
+one-pass prune. `src/registry.ts`'s rebind remains the repair for ids the
+registry cannot index for other reasons (a cwd that resolves elsewhere, a
+non-ENOENT failure). Do not "fix" a failing rebind spec by relaxing it: if this
+semantics moves again, the repair in `src/registry.ts` is what has to change
+with it.
 
 ## Materializing the peer tree
 
@@ -110,19 +131,20 @@ tree is already current for this fixture.
 The three roots — `@deepseek-ai/dsh-storage-domain`, `@deepseek-ai/dsh-storage`
 and `@deepseek-ai/dsh-brand` — are `devDependencies` of `packages/workspace-k8s`
 pinned to the release in the table above, so the store always carries them and a
-future `pnpm update` cannot silently move the fixture. The remaining five
-packages arrive transitively through them (`dsh-invariants` as an
-auto-installed peer of the domain form), so they are not declared twice.
+future `pnpm update` cannot silently move the fixture. The remaining four
+packages arrive transitively through them (`schemastery`, `cosmokit` and
+`@standard-schema/spec` from the domain form's dependencies), so they are not
+declared twice.
 
 NO range is a literal. Every one is read from the shipped declaration that owns
 it, so a re-vendored fixture carries its own peer set with it and a hard-coded
-range cannot outlive the bytes it described (the failure above was a stale
-`^0.1.5-rc.2` for `dsh-invariants` — a range read from nothing at all):
+range cannot outlive the bytes it described (an earlier failure was a stale
+`^0.1.5-rc.2` range for a package the domain form no longer pulled in):
 
 | Requirement | Range read from |
 | --- | --- |
 | the three roots | `packages/workspace-k8s/package.json` `devDependencies` |
-| `dsh-invariants`, `zod` | the VENDORED `dsh-workspace/package.json` (`peerDependencies` / `dependencies`) |
+| `zod` | the VENDORED `dsh-workspace/package.json` (`dependencies`) |
 | `schemastery`, `cosmokit`, `@standard-schema/spec` | the `dependencies` of the package already resolved out of the store (`dsh-storage-domain`, then `schemastery`) |
 
 The materializer resolves every requirement by package name plus that range
@@ -146,10 +168,10 @@ node tests/vendor/materialize.mjs --force  # rebuild even when up to date
 
 ```sh
 tmp=$(mktemp -d) && cd "$tmp"
-npm pack @deepseek-ai/dsh-workspace@0.2.0-rc.2
-tar xzf deepseek-ai-dsh-workspace-0.2.0-rc.2.tgz
+npm pack @deepseek-ai/dsh-workspace@0.2.1-rc.2
+tar xzf deepseek-ai-dsh-workspace-0.2.1-rc.2.tgz
 # replace tests/vendor/dsh-workspace/ with package/ WHOLESALE (all of lib/,
-# package.json, LICENSE and the READMEs) — do not hand-edit a file in there.
+# package.json, LICENSE, locale/ and the READMEs) — do not hand-edit a file in there.
 ```
 
 Then check the copy against what the deployment actually loads, byte for byte.

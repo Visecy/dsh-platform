@@ -125,6 +125,7 @@ export declare class WorkspaceRegistry extends Service {
     private readonly entities;
     private readonly headers;
     private readonly sessionPaths;
+    private readonly missingSessionPaths;
     private readonly invalidSessionPaths;
     private operationTail;
     private readonly host;
