@@ -1,29 +1,25 @@
 # ── platform disables ───────────────────────────────────────────────────────
-# Re-verified against the 0.2.0-rc.2 composition, not assumed: every id below
+# Re-verified against the 0.2.1-rc.2 composition, not assumed: every id below
 # (subprocess, bash-sandbox, permission, session-persistence-jsonl, fs-sandbox,
 # directory-picker) is still an official row of the base + web-app bundle
 # layers (`dsh --profile web --dump-default-config`), so no disable in this
 # file went stale and none had to be dropped.
 #
-# The 0.1.5-rc.1 -> 0.2.0-rc.2 effective row delta is 4 rows REMOVED
-# (workflow-worker-thread, code-runtime, ui-schedule, agent-presets) and 31
-# ADDED (tool-plugin-manager, plugin-manager, config-editor, authorization,
-# deepseek-account, otel, ptc-runtime, workflow-ptc, image-offload,
-# mcp-resources, llm-deepseek-account, desktop-product-telemetry,
-# product-analytics, job-controller, terminal-controller,
-# ui-settings-account, account-controller, cordis-inspect-providers,
-# shortcuts, ui-shortcuts, office-to-pdf, ui-sidebar-browser,
-# ui-sidebar-terminal, ui-plugin-manager, workspace-changes,
-# ui-settings-session-log, ui-settings-shell, ui-settings-agent-loop,
-# ui-settings-subagent, ui-settings-web-search, agent-preset-registry), plus
-# name changes (hmr, settings, llm-deepseek) and config-key changes
-# (session-telemetry-otel +maxRequestBytes, spill-policy maxInlineBytes ->
-# maxInlineTokens) on rows this file does not restate.
+# The 0.2.0-rc.2 -> 0.2.1-rc.2 effective row delta was measured from the two
+# `--dump-default-config` outputs, not guessed: 2 rows REMOVED (`skill-badge`,
+# `tool-ralph`) and 9 ADDED (`harness-dev-context`, `remote-access`, `schedule`,
+# `tool-working-directory`, `ui-deepseek-model-label-1017`, `ui-schedule`,
+# `ui-secret-mask`, `web-deepseek-api`, `working-directory`). None of the
+# removed rows is referenced here, all six disables above still resolve, and
+# the added rows are left at their official defaults.
 #
-# `ui-schedule` is NOT a 0.2.0-rc.2 row at all (0.2.1-alpha.1 re-adds it,
-# enabled), so there is nothing to enable or disable for it here. Likewise
-# 0.2.0-rc.2's `web-runtime` has no `publicUrl` key — see the restatement
-# below, which is complete for the version this tree pins.
+# `ui-schedule`/`schedule` are re-added by this line (0.2.0 had no such rows):
+# they are the official automation/reminder feature, they persist through
+# `ctx.storageDomain` (routed to PostgreSQL by the `storage-domain` restatement
+# below), and they execute ordinary sessions, so they need no platform
+# adaptation. `web-runtime` gained `publicUrl` and LOST `trustedHosts` (the
+# fence moved to the `connection` row, which now reads `ctx.webStartup`); see
+# the restatements below, which are complete for the version this tree pins.
 - id: subprocess
   disabled: true
 - id: bash-sandbox
@@ -82,7 +78,7 @@
 # fs, sandboxPolicy, workspaceChanges), so with its only data source gone the
 # row can never activate and every boot reports it as a pending entry.
 #
-# Cost of the disable, read off 0.2.0-rc.2's `dsh-client-ui-deliverables`: the
+# Cost of the disable, read off 0.2.1-rc.2's `dsh-client-ui-deliverables`: the
 # `ui:deliverable-file-references` system-prompt section disappears, and so
 # does the authenticated "native open" RPC for presented files
 # (`registerPresentOpen` reads `ctx.workspaceChanges.summary/diff`). The
@@ -99,7 +95,7 @@
 #   gateway/internal: client api: permissionPresets/catalog failed:
 #     transport failure for /api/permissionPresets/catalog: HTTP 404
 #
-# The pairing, read off the installed 0.2.0-rc.2 composition rather than
+# The pairing, read off the installed 0.2.1-rc.2 composition rather than
 # guessed: the HOST row `permission` (disabled above) is
 # `@deepseek-ai/dsh-permission-presets`, whose `lib/typert.host.js` registers
 # the `permissionPresets` service and the `Remote("catalog")` method — that is
@@ -126,7 +122,7 @@
 # page loads, and no surface advertises a preset this deployment cannot
 # enforce.
 #
-# Cost of the disable, read off 0.2.0-rc.2's `dsh-client-ui-permission-presets`:
+# Cost of the disable, read off 0.2.1-rc.2's `dsh-client-ui-permission-presets`:
 # the Permissions row on the settings page (the new-session default preset) and
 # the `/permission` command with its current-session popup both disappear. The
 # deployment's approval policy is unaffected — it is the `approval` row's own
@@ -148,13 +144,12 @@
 #
 # A patch replaces the targeted row's WHOLE `config`, so a restatement must
 # carry every key the official row owns or the missing ones silently vanish.
-# Verified against 0.2.0-rc.2's `--dump-default-config`: the official
-# `web-runtime` row is exactly {openBrowser, printUrl, surfaceContext,
-# trustedHosts}, and the four keys below are that set — complete for the
-# version pinned here. 0.2.1-alpha.1 adds a fifth key, `publicUrl` (the
-# advertised application URL, loopback when unset); if this tree ever moves to
-# that line, this row MUST restate `publicUrl: !!js ctx.webStartup.publicUrl`
-# or the advertised URL silently falls back to loopback.
+# Verified against 0.2.1-rc.2's `--dump-default-config`: the official
+# `web-runtime` row is exactly {openBrowser, printUrl, publicUrl,
+# surfaceContext}, and the four keys below are that set — complete for the
+# version pinned here. `publicUrl` (the advertised application URL, loopback
+# when unset) is new in the 0.2.1 line and replaced 0.2.0's `trustedHosts` key
+# — the Host fence now lives entirely on the `connection` row below.
 - id: web-runtime
   name: '@deepseek-ai/dsh-web-app'
   inject:
@@ -162,8 +157,8 @@
   config:
     openBrowser: false
     printUrl: false
+    publicUrl: !!js ctx.webStartup.publicUrl
     surfaceContext: true
-    trustedHosts: !!js ctx.webStartup.trustedHosts
 # The official ui-workspace row is ENABLED (default) again: it owns the sidebar
 # workspace/session list, the conversation hero and the `sidebar.workspaces`
 # contract. The platform no longer keeps a patched copy of that browser, so
@@ -172,25 +167,28 @@
 # official slots (main keyed panel + sidebar.panellist entry); see
 # packages/workspace-k8s/src/client.
 # Row inventory notes (carried from the 0.1.5 upgrade, re-checked against
-# 0.2.0-rc.2 where stated):
+# 0.2.1-rc.2 where stated):
 #  - `file-upload` (host `fileUploads` + client `fileUpload`), `resources` and
 #    `workspace-files` are LOAD-BEARING for the 0.1.5 launcher: its
 #    dsh-api-session-controller requires the `fileUploads` inject, so disabling
 #    `file-upload` leaves `session-controller` pending and fails the activation
-#    assertion. All three rows still exist in 0.2.0-rc.2 and none is disabled
-#    here; whether the inject dependency is still literal in 0.2 was NOT
-#    re-verified, so do not add a disable for them without re-checking.
+#    assertion. All three rows still exist in 0.2.1-rc.2 and none is disabled
+#    here; the inject dependency is still literal in 0.2.1 too
+#    (`dsh-api-session-controller`'s `fileUploads` inject), so do not add a
+#    disable for them without re-checking.
 #  - `open-in-app` / `ui-open-in-app` are safe to disable in a remote
 #    deployment (nothing injects their service); they are left enabled here so
 #    the official produced-file affordances keep working through
 #    subprocess-k8s. (`ui-sidebar-browser` is the row 0.2 disables by itself
 #    outside the desktop profile.)
 #  - `tool-str-replace-editor` has not existed since 0.1.5 and is still absent
-#    from 0.2.0-rc.2's base profile.
-# DSH 0.1.2+ (unchanged in 0.2.0-rc.2): dsh-client-connection runs one uniform
+#    from 0.2.1-rc.2's base profile.
+# DSH 0.1.2+ (verified on 0.2.1-rc.2): dsh-client-connection runs one uniform
 # Host/Origin fence over every /api request / RPC channel / WebSocket upgrade,
-# gated on its official `trustedHosts` config. The CLI already forwards
-# --trusted-host values into this row via ctx.webRuntime; restate the row so
+# gated on its official `trustedHosts` config. The CLI forwards --trusted-host
+# values into this row through `ctx.webStartup` (the service 0.2.0 called
+# `webRuntime`; 0.2.1 renamed it, so this row MUST inject `webStartup` or it
+# would sit pending forever); restate the row so
 # deployments can also list public authorities through DSH_TRUSTED_HOSTS
 # (comma-separated, BARE host[:port] authorities only — assertTrustedAuthority
 # rejects schemes, paths and whitespace at plugin load). The built-in
@@ -200,11 +198,11 @@
 - id: connection
   name: '@deepseek-ai/dsh-client-connection'
   inject:
-    - webRuntime
+    - webStartup
   config:
     trustedHosts: !!js >-
       [...(process.env.DSH_TRUSTED_HOSTS ?? '').split(',').map(entry => entry.trim()).filter(Boolean),
-      ...ctx.webRuntime.trustedHosts]
+      ...ctx.webStartup.trustedHosts]
 - insert:
     # FIRST platform row on purpose: rows mount in list order, so every row
     # mounted after this one has its warn/error output reach the pod log.
@@ -244,7 +242,7 @@
         # the two sides share the daemon wire protocol and there is no version
         # handshake. The deploy chart always passes WS_IMAGE; this default is the
         # fallback for hand-rolled manifests and is kept equal to the current tag.
-        image: !!js process.env.WS_IMAGE ?? 'ghcr.io/visecy/dsh-platform/dsh-sandbox-daemon:v0.1.87'
+        image: !!js process.env.WS_IMAGE ?? 'ghcr.io/visecy/dsh-platform/dsh-sandbox-daemon:v0.1.89'
         daemonPort: 4390
         idleTimeoutMs: !!js Number(process.env.WS_IDLE_TIMEOUT_MS ?? (5 * 60 * 1000))
         graceMs: !!js Number(process.env.WS_GRACE_MS ?? (3 * 60 * 60 * 1000))
