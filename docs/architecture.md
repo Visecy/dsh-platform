@@ -6,7 +6,7 @@
 ## 组件
 
 ```
-浏览器 ── TLS ── Ingress / Istio gateway（按 host 路由；不支持子路径）
+浏览器 ── TLS ── Ingress / Istio gateway（按 host + 可选单段前缀路由；前缀必须由入口剥离）
   │
   └─ 控制面 Pod（无状态；emptyDir 的 DSH_HOME，无 PVC）
        ├─ oauth2-proxy sidecar :4180      ← Pod 唯一入口（Service 只暴露它）

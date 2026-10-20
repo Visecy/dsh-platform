@@ -2,7 +2,7 @@
 
 DeepSeek Harness 多用户平台——插件 monorepo（pnpm workspace）。
 
-**状态：预览版（preview）**。当前 `main` 对应 tag `v0.1.89`（DSH 基线升级到 `0.2.1-rc.2`，由该 tag 构建多架构镜像）；发布物是控制面镜像
+**状态：预览版（preview）**。当前 `main` 对应 tag `v0.1.90`（DSH 基线 `0.2.1-rc.2`，由该 tag 构建多架构镜像）；发布物是控制面镜像
 `ghcr.io/visecy/dsh-web-platform`（插件内置）与 npm 上的 `@visecy/dsh-*` 插件包。
 预览版**不面向生产**：不支持多副本、多租户隔离、非 Kubernetes 部署等，先读
 [已知限制](#已知限制预览版明确不支持)。
@@ -22,7 +22,7 @@ DeepSeek Harness 多用户平台——插件 monorepo（pnpm workspace）。
 
 | 平台版本 | 目标 DSH | 说明 |
 |---|---|---|
-| `v0.1.89`（当前 `main` 即 `v0.1.89`） | `0.2.1-rc.2`（npm `latest`） | 四处真值必须一致：`pnpm-lock.yaml`、各 `packages/*/package.json` 的 `@deepseek-ai/dsh-*` 依赖、`docker/dsh-web-platform.Dockerfile` 的 `DSH_VERSION`、`.github/workflows/release.yml` 的 build-args |
+| `v0.1.89` – `v0.1.90`（当前 `main` 即 `v0.1.90`） | `0.2.1-rc.2`（npm `latest`） | 四处真值必须一致：`pnpm-lock.yaml`、各 `packages/*/package.json` 的 `@deepseek-ai/dsh-*` 依赖、`docker/dsh-web-platform.Dockerfile` 的 `DSH_VERSION`、`.github/workflows/release.yml` 的 build-args |
 | `v0.1.80` – `v0.1.88` | `0.2.0-rc.2` | 历史版本，不再回归验证 |
 | `v0.1.2` – `v0.1.79` | `0.1.5-rc.1` 及更早 | 历史版本，不再回归验证 |
 
@@ -57,6 +57,13 @@ connection 的 `trustedHosts` 里就告警并回落，launch token 不会发给�
 
 **违反任一条的后果**：任何能连到这个端口的调用者，只要自己写 `X-Forwarded-User` /
 `X-Forwarded-Groups` 就能冒充任意用户——上游身份头没有签名，唯一屏障是拓扑。
+
+子路径是**代理约定**，不是本进程的能力：部署可以把控制面挂到 `https://host/<prefix>/`，
+但反向代理必须（a）在把请求交给本进程前剥掉前缀（官方 token exchange 只认 `/`），
+（b）把 `/` 与裸 `/<prefix>` 301 到带尾斜杠的 `<root>/`（前端资源是 `./` 相对引用），
+（c）把 `oauth2Proxy.publicOrigin` 设为带前缀的 root（chart 会派生出 `--public-url`、
+`--redirect-url` 与 sidecar 的 `--cookie-path`）。`/<prefix>` 是唯一挂载点；同一 host
+上的两个 DSH 实例仍会互相覆盖会话 cookie，不在支持范围。详见部署仓 §4.4。
 另外，进程内闸门随 OIDC gate 一起删除后，官方 `/plugins`（bundle）与 `/plugins/events`（SSE）
 路由**自身没有任何信任检查**（0.1.5-rc.1 实测；0.2.1-rc.2 复核：`trustedHosts` 只出现在
 `dsh-client-connection` / `dsh-web-app` / `dsh-tool-cordis`，而这两条路由的宿主
@@ -79,7 +86,7 @@ NetworkPolicy 的 CNI 会执行，selector 写错会让所有工作区不可达�
 | ARM64 / 多架构镜像 | ⚠️ release workflow 已构建 `linux/amd64` + `linux/arm64`；**`v0.1.88` 起为双架构；`v0.1.87` 及更早只有 amd64**，请用包含该改动之后打出的 tag |
 | air-gapped / 离线安装 | ❌ 未提供镜像搬运与离线清单 |
 | `pod-security.kubernetes.io/enforce=restricted` 命名空间 | ✅ 控制面与工作区 Pod 都已 runAsNonRoot、丢弃全部 capability、设置 `seccompProfile: RuntimeDefault`（控制面容器另有 `readOnlyRootFilesystem`）；工作区 daemon 需要可写的 `/tmp`，这不属于 restricted 的检查项 |
-| 子路径发布（`https://host/dsh`） | ❌ 只能独占一个 host authority |
+| 子路径发布（`https://host/dsh`） | ✅ 支持（条件）：需要**前缀剥离型**反向代理 + 把 `/` 与裸 `/<prefix>` 301 到 `<root>/`；v1 只支持单段前缀，且同 host 只能放一个 DSH 实例（DSH cookie 是 authority 作用域 + `Path=/`）。操作步骤见部署仓 `docs/deployment.md` §4.4 |
 | 工作区共享存储（ReadWriteMany） | ❌ PVC 固定 `ReadWriteOnce` |
 | 数据库 | ⚠️ PostgreSQL 必需：镜像 profile 写死 `type: postgres`；代码层存在 SQLite 后端，但镜像不提供该路径 |
 | 控制面 ↔ 工作区网络 | ⚠️ 控制面必须能直连工作区 Pod IP 的 daemon 端口（4390）；默认拒绝 egress 的策略、Istio STRICT mTLS 或集群外控制面都会切断全部 fs / 命令 / PTY |

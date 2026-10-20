@@ -165,6 +165,12 @@
 # version pinned here. `publicUrl` (the advertised application URL, loopback
 # when unset) is new in the 0.2.1 line and replaced 0.2.0's `trustedHosts` key
 # — the Host fence now lives entirely on the `connection` row below.
+#
+# `publicUrl` also accepts `scheme://host[/prefix/]` (0.2.1 `parsePublicUrl`
+# grammar). A subpath deployment requires the reverse proxy to STRIP the prefix
+# before this process (the token exchange only answers at `/`) and to send
+# browsers to the canonical entry `<root>/`; the deploy chart derives both from
+# `oauth2Proxy.publicOrigin` — nothing else in this profile changes for it.
 - id: web-runtime
   name: '@deepseek-ai/dsh-web-app'
   inject:
@@ -265,6 +271,11 @@
     # reverse-proxy-aware request origin instead), and refuses to hand the
     # launch token to an authority outside the connection row's trustedHosts.
     # So the deployment has ONE external-origin truth: --public-url.
+    #
+    # A path in that root is the MOUNT POINT: it must equal the prefix the
+    # reverse proxy strips (see the `web-runtime` note above). A mismatch only
+    # produces a 302 to the wrong path — the authority fence still protects the
+    # launch token, and a prefix does not widen the Host/Origin trust surface.
     - id: identity-bridge
       name: '@visecy/dsh-identity-bridge'
       config:
@@ -277,7 +288,7 @@
         # the two sides share the daemon wire protocol and there is no version
         # handshake. The deploy chart always passes WS_IMAGE; this default is the
         # fallback for hand-rolled manifests and is kept equal to the current tag.
-        image: !!js process.env.WS_IMAGE ?? 'ghcr.io/visecy/dsh-platform/dsh-sandbox-daemon:v0.1.89'
+        image: !!js process.env.WS_IMAGE ?? 'ghcr.io/visecy/dsh-platform/dsh-sandbox-daemon:v0.1.90'
         daemonPort: 4390
         idleTimeoutMs: !!js Number(process.env.WS_IDLE_TIMEOUT_MS ?? (5 * 60 * 1000))
         graceMs: !!js Number(process.env.WS_GRACE_MS ?? (3 * 60 * 60 * 1000))

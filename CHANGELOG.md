@@ -1,12 +1,28 @@
 # 变更日志（CHANGELOG）
 
 本仓按 tag 发布：版本格式 `vMAJOR.MINOR.PATCH`，tag 是镜像与插件版本的唯一真值。
-已发布的 tag 覆盖 `v0.1.2` … `v0.1.89`；`v0.1.89` 是当前最新 tag（`main` 即它）。
+已发布的 tag 覆盖 `v0.1.2` … `v0.1.90`；`v0.1.90` 是当前最新 tag（`main` 即它）。
 **早期 tag（`v0.1.2` – `v0.1.87`）没有留下逐版本说明**，本文件不补造历史条目；
 需要两次 tag 之间的具体改动请直接看 `git log` 与对应 tag 的 diff。
 DSH 基线由 `scripts/check-dsh-version.mjs` 强制，与平台版本的对应关系见 README 的兼容性矩阵。
 
 ## 未发布
+
+### 子路径发布（P2）
+
+- 平台生产代码 **0 行**：P1 已让 identity-bridge 接受带前缀的 root 并从官方 advertised URL
+  派生 handoff；P2 只补代理语义的测试与 JSDoc、新增本地前缀剥离代理 e2e
+  `scripts/smoke-subpath.mjs`，并把部署契约写进文档。
+- 部署契约（由部署仓 chart 实现）：反向代理必须在应用之前剥掉前缀（官方 token exchange 只认
+  `/`）；`/` 与裸 `/<prefix>` 必须 301 到带尾斜杠的 `<root>/`；`--redirect-url` 变为
+  `<root>/oauth2/callback`；sidecar cookie 加 `--cookie-path=/<prefix>/`。v1 只支持单段前缀，
+  且同一 host 仍只能有一个 DSH 实例（DSH cookie 是 authority 作用域 + `Path=/`）。
+- `README.md`「已知限制」与 `docs/architecture.md` 的路由描述同步；操作步骤见部署仓
+  `docs/deployment.md` §4.4；Istio 路径有真实集群 e2e，nginx-ingress 路径只有渲染断言。
+
+## v0.1.90（预览）
+
+`v0.1.90` 相对 `v0.1.89` 的内容：把官方 advertised URL 变成部署对外 URL 的单一真值。
 
 - **对外 URL 单一真值（P1）**：identity-bridge 的 launch-token handoff 根现在优先取官方
   advertised URL（0.2.1 `--public-url` → `web-runtime.publicUrl` →
@@ -14,8 +30,8 @@ DSH 基线由 `scripts/check-dsh-version.mjs` 强制，与平台版本的对应�
   `scheme://host[:port][/prefix/]`（为子路径发布铺路）；与监听地址相同的 loopback fallback
   会被忽略（保留反向代理感知的请求 origin），不在 connection `trustedHosts` 中的 advertised
   authority 会告警一次并回落到请求 origin，launch token 不会离开受信任拓扑。
-- 下一版部署 chart 会把同一来源作为 `dsh web --public-url` 传入（`DSH_PUBLIC_ORIGIN` 显式
-  覆盖仍兼容），从而消除 chart 与 identity-bridge 两套 origin 配置的漂移。
+- 部署 chart 把同一来源作为 `dsh web --public-url` 传入（`DSH_PUBLIC_ORIGIN` 显式覆盖仍兼容），
+  从而消除 chart 与 identity-bridge 两套 origin 配置的漂移；对应部署仓 `v0.1.90` chart 已发布。
 
 ## v0.1.89（预览）
 

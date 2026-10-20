@@ -111,3 +111,9 @@ jobs:
 
       - name: Official-integration smoke (each patch has an official replacement)
         run: node scripts/smoke-official-integration.mjs --target "$RUNNER_TEMP/dsh-harness/home/profiles/web/node_modules"
+
+      # Subpath publishing is a deployment contract (prefix-stripping proxy +
+      # canonical `<root>/` entry), so it is proven with a real prefix-stripping
+      # proxy in front of the same composition rather than in the unit bench.
+      - name: Subpath smoke (a prefix works end to end behind a stripping proxy)
+        run: node scripts/smoke-subpath.mjs --target "$RUNNER_TEMP/dsh-harness/home/profiles/web/node_modules" --prefix /dsh

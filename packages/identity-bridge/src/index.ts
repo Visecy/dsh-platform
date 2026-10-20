@@ -73,6 +73,16 @@ export interface Config {
    * when it differs from the listener's own origin; otherwise the origin of the
    * request being handed off. A configured prefix is preserved, so a
    * prefix-stripping reverse proxy is sent back under its prefix.
+   *
+   * Deployment contracts for a prefix (0.2.1 subpath publishing):
+   * - the prefix is valid ONLY behind a prefix-STRIPPING reverse proxy: this
+   *   app must receive the path with the prefix already removed, because the
+   *   token exchange and every document-relative route are evaluated at `/`;
+   * - the canonical browser entry is `<root>/` WITH the trailing slash — that
+   *   is what makes the frontend's relative asset references resolve under the
+   *   prefix; the proxy should 301 `/` and the bare `/<prefix>` to it.
+   * A prefix that does not match the proxy's mount point only produces a 302
+   * to the wrong path; the Host fence still protects the launch token.
    */
   publicOrigin?: string
   /**

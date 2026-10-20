@@ -273,6 +273,47 @@ describe('identity-bridge handoff root sources', () => {
     }
   })
 
+  it('serves the prefix-stripped proxy view: handoff and token exchange stay under the mount', async () => {
+    // What a prefix-stripping proxy does to a browser's GET /dsh/: it forwards
+    // GET / with the same Host. The app must answer with a handoff under the
+    // mount, and the exchange leg must work when the proxy strips the prefix
+    // from the returned Location before replaying it.
+    const mounted = await boot({ publicOrigin: `${PUBLIC_ORIGIN}/dsh` })
+    try {
+      const handoff = await mounted.request('GET', '/', { host: AUTHORITY })
+      expect(handoff.status).toBe(302)
+      const tokenUrl = new URL(String(handoff.headers.location ?? ''))
+      expect(tokenUrl.origin).toBe(PUBLIC_ORIGIN)
+      expect(tokenUrl.pathname).toBe('/dsh/')
+      expect(tokenUrl.searchParams.getAll('token')).toHaveLength(1)
+
+      // Strip the mount prefix, keep the query — the proxy's view of the
+      // Location. The official exchange mints the cookie and answers `./`,
+      // which the browser resolves back to /dsh/.
+      const stripped = `${tokenUrl.pathname.replace('/dsh', '')}${tokenUrl.search}`
+      expect(stripped.startsWith('/?token=')).toBe(true)
+      const exchange = await mounted.request('GET', stripped, { host: AUTHORITY })
+      expect(exchange.status).toBe(303)
+      expect(exchange.headers['set-cookie']?.[0] ?? '').toMatch(/^dsh-auth-/)
+      expect(exchange.headers.location).toBe('./')
+    } finally {
+      await mounted.close()
+    }
+  })
+
+  it('keeps the root-mode handoff target at / (no subpath regression)', async () => {
+    const root = await boot({ publicOrigin: PUBLIC_ORIGIN })
+    try {
+      const res = await root.request('GET', '/', { host: AUTHORITY })
+      expect(res.status).toBe(302)
+      const location = new URL(String(res.headers.location ?? ''))
+      expect(location.pathname).toBe('/')
+      expect(location.searchParams.get('token')).toBeTruthy()
+    } finally {
+      await root.close()
+    }
+  })
+
   it('ignores the listener-origin fallback and keeps the request origin', async () => {
     // With no --public-url the official service reports the loopback listener;
     // handing a remote browser that URL would be useless, so the request origin

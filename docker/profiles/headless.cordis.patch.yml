@@ -76,7 +76,7 @@
         namespace: !!js process.env.WS_NAMESPACE
         # Kept equal to docker/profiles/web.cordis.patch.yml; see that file for
         # why the daemon image must track the platform tag.
-        image: !!js process.env.WS_IMAGE ?? 'ghcr.io/visecy/dsh-platform/dsh-sandbox-daemon:v0.1.89'
+        image: !!js process.env.WS_IMAGE ?? 'ghcr.io/visecy/dsh-platform/dsh-sandbox-daemon:v0.1.90'
         daemonPort: 4390
         idleTimeoutMs: !!js Number(process.env.WS_IDLE_TIMEOUT_MS ?? (5 * 60 * 1000))
         graceMs: !!js Number(process.env.WS_GRACE_MS ?? (3 * 60 * 60 * 1000))
