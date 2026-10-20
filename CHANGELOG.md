@@ -6,6 +6,25 @@
 需要两次 tag 之间的具体改动请直接看 `git log` 与对应 tag 的 diff。
 DSH 基线由 `scripts/check-dsh-version.mjs` 强制，与平台版本的对应关系见 README 的兼容性矩阵。
 
+## v0.1.92（预览）
+
+`v0.1.92` 相对 `v0.1.91`：修复 **0.2.1 线上的工作区唤醒卡死**（升级后第一次唤醒最容易命中），
+无依赖/DSH 基线变化。
+
+### 修复：工作区一直停在「正在唤醒」
+
+- **ensure 失败后丢掉重试**：`WorkspaceLifecycleManager` 的 `ensure` 在 catch 里同步 dispatch
+  `pod-lost`，而 `ensureInflight` 要到 `finally` 才清除——重试路径看到自己的 inflight 标记后
+  直接返回，工作区于是永久停在 `waking`（live 升级时实测：第一个 ensure 与正在终止的旧 pod
+  竞争拿到 404，随后重试被吞）。
+- **`waking` 状态接受 attach / session-created / ensure-requested 重试**：执行 pod 可能已被
+  直连路径（fs / subprocess / `/workspaces/api/ensure` 的 `runtime.ensure`）拉起，而状态机
+  没收到 `pod-ready`；下一次 attach（打开工作区、任何 fs/subprocess 操作都会触发）会重新跑
+  ensure，adopt 现有 pod → `waitReady` → `pod-ready`，自行恢复。
+- 回归测试：failed-ensure-retry（第一次 404、重试必须发生且最终 `running`）、
+  `waking + user-attach` / `waking + session-created` → ensure。
+- 建议所有 0.2.1 线部署（v0.1.89+）升级到 `v0.1.92`（含 v0.1.91 的终端修复）。
+
 ## v0.1.91（预览）
 
 `v0.1.91` 相对 `v0.1.90`：修复 0.2.1 升级带来的**新建终端崩溃**，并带上子路径发布（P2）的

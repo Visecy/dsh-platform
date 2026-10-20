@@ -32,6 +32,8 @@ class FakeClock {
 class MockController implements PodController {
   pods = new Set<string>()
   ensureCalls = 0
+  /** Fail the next N ensurePod calls (models a transient 404 during a rollout). */
+  failEnsure = 0
   deleteCalls: string[] = []
   /** The image each running pod carries, as a real cluster read would report. */
   images = new Map<string, string>()
@@ -40,6 +42,10 @@ class MockController implements PodController {
 
   async ensurePod(spec: WorkspacePodSpec): Promise<string> {
     this.ensureCalls++
+    if (this.failEnsure > 0) {
+      this.failEnsure--
+      throw new Error('HTTP-Code: 404 pods "ws" not found')
+    }
     const name = `${spec.workspaceId}`
     this.pods.add(name)
     this.images.set(name, spec.image)
@@ -159,6 +165,15 @@ describe('WorkspaceLifecycleManager', () => {
     await new Promise((r) => setTimeout(r, 10))
     expect(ctrl.pods.has('ws-1')).toBe(true)
     expect(mgr.stateOf('ws-1')?.phase).toBe('running')
+  })
+
+  it('a failed ensure retries after its inflight guard is released (stuck-waking regression)', async () => {
+    ctrl.failEnsure = 1
+    mgr.attach('ws-retry')
+    await new Promise((r) => setTimeout(r, 50))
+    expect(ctrl.ensureCalls).toBeGreaterThanOrEqual(2)
+    expect(mgr.stateOf('ws-retry')?.phase).toBe('running')
+    expect(ctrl.pods.has('ws-retry')).toBe(true)
   })
 
   it('idle timer does not fire while a session is active', async () => {

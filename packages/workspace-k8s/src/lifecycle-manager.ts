@@ -365,9 +365,16 @@ export class WorkspaceLifecycleManager {
           await this.controller.waitReady(this.opts.namespace, name)
           this.handle(workspaceId, { type: 'pod-ready' })
         } catch (error) {
-          // transient failure: retry via pod-lost semantics
+          // transient failure: retry via pod-lost semantics — but only AFTER
+          // the inflight guard is released. `dispatch` runs the ensure action
+          // synchronously; dispatching from here would make the retry see its
+          // own inflight marker and return without doing anything, and the
+          // workspace stayed in `waking` forever (observed on a live rollout:
+          // the first ensure raced a terminating pod and got a 404, then the
+          // retry was dropped while the pod it needed was created by another
+          // path).
           this.report(`workspace '${workspaceId}': could not provision its pod: ${String(error)}`)
-          this.dispatch(workspaceId, { type: 'pod-lost' })
+          queueMicrotask(() => this.dispatch(workspaceId, { type: 'pod-lost' }))
         } finally {
           this.ensureInflight.delete(workspaceId)
         }

@@ -2,7 +2,7 @@
 
 DeepSeek Harness 多用户平台——插件 monorepo（pnpm workspace）。
 
-**状态：预览版（preview）**。当前 `main` 对应 tag `v0.1.91`（DSH 基线 `0.2.1-rc.2`，由该 tag 构建多架构镜像）；发布物是控制面镜像
+**状态：预览版（preview）**。当前 `main` 对应 tag `v0.1.92`（DSH 基线 `0.2.1-rc.2`，由该 tag 构建多架构镜像）；发布物是控制面镜像
 `ghcr.io/visecy/dsh-web-platform`（插件内置）与 npm 上的 `@visecy/dsh-*` 插件包。
 预览版**不面向生产**：不支持多副本、多租户隔离、非 Kubernetes 部署等，先读
 [已知限制](#已知限制预览版明确不支持)。
@@ -22,7 +22,7 @@ DeepSeek Harness 多用户平台——插件 monorepo（pnpm workspace）。
 
 | 平台版本 | 目标 DSH | 说明 |
 |---|---|---|
-| `v0.1.89` – `v0.1.91`（当前 `main` 即 `v0.1.91`） | `0.2.1-rc.2`（npm `latest`） | 四处真值必须一致：`pnpm-lock.yaml`、各 `packages/*/package.json` 的 `@deepseek-ai/dsh-*` 依赖、`docker/dsh-web-platform.Dockerfile` 的 `DSH_VERSION`、`.github/workflows/release.yml` 的 build-args |
+| `v0.1.89` – `v0.1.92`（当前 `main` 即 `v0.1.92`） | `0.2.1-rc.2`（npm `latest`） | 四处真值必须一致：`pnpm-lock.yaml`、各 `packages/*/package.json` 的 `@deepseek-ai/dsh-*` 依赖、`docker/dsh-web-platform.Dockerfile` 的 `DSH_VERSION`、`.github/workflows/release.yml` 的 build-args |
 | `v0.1.80` – `v0.1.88` | `0.2.0-rc.2` | 历史版本，不再回归验证 |
 | `v0.1.2` – `v0.1.79` | `0.1.5-rc.1` 及更早 | 历史版本，不再回归验证 |
 

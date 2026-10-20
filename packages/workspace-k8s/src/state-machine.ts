@@ -219,6 +219,16 @@ export function transition(state: WorkspaceState, event: WorkspaceEvent): Transi
       if (event.type === 'pod-lost') {
         return { state: s, action: { kind: 'ensure' } }
       }
+      // A direct runtime.ensure (fs/subprocess/management.ensure) can put a
+      // READY pod behind a workspace whose own wake lost its retry; the
+      // manager would otherwise sit in `waking` forever while the panel shows
+      // a wake that never finishes. Any of these events means "the workspace
+      // is wanted": re-run the ensure path. It adopts the existing pod, waits
+      // for readiness and emits pod-ready, and `ensureInflight` keeps
+      // concurrent attachments from stacking.
+      if (event.type === 'user-attach' || event.type === 'ensure-requested' || event.type === 'session-created') {
+        return { state: s, action: { kind: 'ensure' } }
+      }
       return { state: s, action: { kind: 'none' } }
     }
 

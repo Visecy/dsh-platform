@@ -67,6 +67,17 @@ describe('state machine', () => {
     expect(t.action).toEqual({ kind: 'ensure' })
   })
 
+  it('waking + user-attach -> ensure (recovers a wake whose retry was lost)', () => {
+    const t = transition(ws({ phase: 'waking', provisioned: true }), { type: 'user-attach' })
+    expect(t.state.phase).toBe('waking')
+    expect(t.action).toEqual({ kind: 'ensure' })
+  })
+
+  it('waking + session-created -> ensure (same recovery from a direct ensure)', () => {
+    const t = transition(ws({ phase: 'waking', provisioned: true }), { type: 'session-created' })
+    expect(t.action).toEqual({ kind: 'ensure' })
+  })
+
   it('running + session-created cancels timers', () => {
     const t = transition(ws({ phase: 'running', idleSince: 100 }), { type: 'session-created' })
     expect(t.state.idleSince).toBeUndefined()
