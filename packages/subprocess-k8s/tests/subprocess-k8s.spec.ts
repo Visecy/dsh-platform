@@ -50,6 +50,20 @@ describe('SubprocessK8s', () => {
     expect(p).toContain('/echo')
   })
 
+  it('reports the pod terminal environment and satisfies the full 0.2.1 seam', async () => {
+    // 0.2.1 added `terminalEnvironment()` to SubprocessRuntime (the official
+    // terminal controller calls it when no shell is configured). A provider
+    // that only carries the 0.2.0 members fails at runtime with
+    // "subprocess.terminalEnvironment is not a function", so pin both the
+    // method and its facts here.
+    expect(typeof sub.terminalEnvironment).toBe('function')
+    const env = await sub.terminalEnvironment()
+    expect(env.platform).toBe('posix')
+    expect(env.defaultShell).toBe('/bin/sh')
+    const preAborted = AbortSignal.abort(new Error('stop'))
+    await expect(sub.terminalEnvironment(preAborted)).rejects.toThrow('stop')
+  })
+
   it('spawn runs to completion with collected output and exit code', async () => {
     const h = sub.spawn(spec({}))
     const outcome = await h.done

@@ -3,7 +3,7 @@
  * to a workspace pod's sandbox daemon.
  */
 import { Context } from '@deepseek-ai/cordis'
-import { SubprocessRuntime, type SubprocessCollectedOutputs, type SubprocessHandle, type SubprocessOutcome, type SubprocessSpawnSpec, type SubprocessTerminalForeground, type SubprocessTerminalHandle, type SubprocessTerminalSignal, type SubprocessTerminalSpawnSpec } from '@deepseek-ai/dsh-subprocess'
+import { SubprocessRuntime, type SubprocessCollectedOutputs, type SubprocessHandle, type SubprocessOutcome, type SubprocessSpawnSpec, type SubprocessTerminalEnvironment, type SubprocessTerminalForeground, type SubprocessTerminalHandle, type SubprocessTerminalSignal, type SubprocessTerminalSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { Writable, Readable } from 'node:stream'
 import { mkdtempSync } from 'node:fs'
@@ -114,6 +114,19 @@ export class SubprocessK8s extends SubprocessRuntime {
     // overrides the seam documents.
     const endpoint = await this.endpointFor(command)
     return this.client.withEndpoint(endpoint).resolveExecutable(command)
+  }
+
+  /**
+   * Shell-selection facts for the terminal controller (0.2.1 seam).
+   *
+   * The daemon's execution world is the workspace pod, i.e. Linux/POSIX. The
+   * default shell is only a candidate: the official terminal controller runs
+   * resolveExecutable() on it in the same provider, so a daemon image without
+   * /bin/sh fails loudly there instead of allocating a PTY for a bad shell.
+   */
+  override async terminalEnvironment(signal?: AbortSignal): Promise<SubprocessTerminalEnvironment> {
+    signal?.throwIfAborted()
+    return { platform: 'posix', defaultShell: '/bin/sh' }
   }
 
   override spawn(spec: SubprocessSpawnSpec): SubprocessHandle {

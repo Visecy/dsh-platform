@@ -70,7 +70,7 @@ chart 或文档让你把端口发布出去）时才算漏洞，请连同证据�
 
 ## 支持的版本
 
-只有 `main` 与最新 tag 接受修复。当前 `main` 对应 tag `v0.1.90`（部署 chart 默认 pin 的也是它），
+只有 `main` 与最新 tag 接受修复。当前 `main` 对应 tag `v0.1.91`（部署 chart 默认 pin 的也是它），
 DSH 基线 `0.2.1-rc.2`，由 `scripts/check-dsh-version.mjs` 在 CI 与发布流程中强制一致。
 更早的 tag（`v0.1.2` – `v0.1.79`，面向 `0.1.5-rc.1` 及更早）不再回归验证。
 

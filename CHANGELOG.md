@@ -6,12 +6,29 @@
 需要两次 tag 之间的具体改动请直接看 `git log` 与对应 tag 的 diff。
 DSH 基线由 `scripts/check-dsh-version.mjs` 强制，与平台版本的对应关系见 README 的兼容性矩阵。
 
-## 未发布
+## v0.1.91（预览）
+
+`v0.1.91` 相对 `v0.1.90`：修复 0.2.1 升级带来的**新建终端崩溃**，并带上子路径发布（P2）的
+测试与文档。除下面第一条 seam 补齐外，没有平台生产逻辑变化；无依赖/DSH 基线变化。
+
+### 修复：新建终端报 `subprocess.terminalEnvironment is not a function`
+
+- 0.2.1 给官方 `SubprocessRuntime` 抽象 seam 增加了 `terminalEnvironment()`（官方
+  `dsh-api-terminal-controller` 在未配置 shell 时调用它取平台/默认 shell），而平台自带的
+  `@visecy/dsh-subprocess-k8s` 只实现了 0.2.0 的成员，于是点「新建终端」在运行时崩溃
+  （v0.1.89+ 都受影响；v0.1.87 的 0.2.0 线上没有这个调用）。
+- 现按 seam 实现：pod 执行世界报告 `{ platform: 'posix', defaultShell: '/bin/sh' }`；
+  `defaultShell` 仍会被官方 controller 通过同一 provider 的 `resolveExecutable()` 在 pod 内
+  校验，daemon 镜像没有 `/bin/sh` 时会在分配 PTY 之前报错。
+- 补 seam 契约回归测试（方法存在 + facts + pre-abort 拒绝）。**已知流程缺口**：插件包的
+  `build-pkg.mjs` 用 esbuild（不做 typecheck），这类「官方抽象类新增成员」漏实现只会在运行时
+  暴露；本次先以测试钉住，后续应给 CI 加 typecheck 闸门。
+- 建议所有 v0.1.89 / v0.1.90 的部署升级到 `v0.1.91`（终端功能在 0.2.1 线上不可用）。
 
 ### 子路径发布（P2）
 
-- 平台生产代码 **0 行**：P1 已让 identity-bridge 接受带前缀的 root 并从官方 advertised URL
-  派生 handoff；P2 只补代理语义的测试与 JSDoc、新增本地前缀剥离代理 e2e
+- P2 本身**不含平台生产逻辑**：P1 已让 identity-bridge 接受带前缀的 root 并从官方 advertised
+  URL 派生 handoff；P2 只补代理语义的测试与 JSDoc、新增本地前缀剥离代理 e2e
   `scripts/smoke-subpath.mjs`，并把部署契约写进文档。
 - 部署契约（由部署仓 chart 实现）：反向代理必须在应用之前剥掉前缀（官方 token exchange 只认
   `/`）；`/` 与裸 `/<prefix>` 必须 301 到带尾斜杠的 `<root>/`；`--redirect-url` 变为
