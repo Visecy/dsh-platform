@@ -245,7 +245,7 @@ describe('SubprocessK8s', () => {
   it('terminal handles implement the full 0.2.1 handle seam (resize / inspectActivity / control)', async () => {
     // The terminal wrapper calls handle.resize on attach and handle.inspectActivity
     // for retention; missing members surface as runtime errors in the panel.
-    const t = await sub.spawnTerminal({ argv: ['/bin/sh'], cwd: root, rows: 24, cols: 80, graceMs: 500 })
+    const t = await sub.spawnTerminal({ argv: ['/bin/sh', '-c', 'sleep 5'], cwd: root, rows: 24, cols: 80, graceMs: 500 })
     expect(typeof t.resize).toBe('function')
     expect(typeof t.inspectActivity).toBe('function')
     await t.resize(100, 30) // live PTY: ioctl must succeed
@@ -253,6 +253,7 @@ describe('SubprocessK8s', () => {
     expect(activity.state).toBe('unknown')
     expect(typeof activity.revision).toBe('number')
     await t.terminate().catch(() => undefined)
+    await t.done.catch(() => undefined)
 
     const h = sub.spawn(spec({}))
     expect('control' in h).toBe(true)
