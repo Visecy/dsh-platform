@@ -27,6 +27,13 @@ function wireEnv(env: NodeJS.ProcessEnv | undefined): Record<string, string | nu
   return out
 }
 
+/** The workspace-k8s endpoint resolver service, as this provider reads it. */
+export interface ResolverService {
+  resolve?: (workspaceId: string) => Promise<string> | string
+  /** Endpoint + path of the platform's default workspace, when one exists. */
+  resolveDefault?: () => Promise<{ workspaceId: string; path: string; endpoint: string } | undefined>
+}
+
 /** Optional reporter for live workspace command counts (provided by dsh-workspace-k8s). */
 export interface CommandActivityTracker {
   commandStarted(workspaceId: string): void
@@ -95,24 +102,61 @@ export class SubprocessK8s extends SubprocessRuntime {
     return tail === '' ? this.podRoot : this.podRoot + '/' + tail
   }
 
-  /** Resolve the daemon endpoint for a cwd (per-workspace pod) or the static one. */
-  private async endpointFor(cwd: string): Promise<string> {
-    const resolver = this.resolver
-      ?? (this.ctx.get('workspaceEndpointResolver') as { resolve?: (id: string) => Promise<string> | string } | undefined)?.resolve
+  private resolverService(): ResolverService | undefined {
+    return this.ctx.get('workspaceEndpointResolver') as ResolverService | undefined
+  }
+
+  private async endpointForWorkspace(workspaceId: string): Promise<string> {
+    const resolver = this.resolver ?? this.resolverService()?.resolve
     if (resolver === undefined) return this.client.defaultEndpoint
-    const ws = this.workspaceOf(cwd)
-    if (ws === undefined) return this.client.defaultEndpoint
-    return resolver(ws)
+    return resolver(workspaceId)
+  }
+
+  /**
+   * The platform's default workspace, for a path or command that names none.
+   *
+   * DSH asks for the shell BEFORE it knows the terminal's cwd
+   * (`resolveShell` calls `resolveExecutable('/bin/sh')`), and the
+   * working-directory provider may hold the workspace ROOT `/workspaces`
+   * rather than a workspace path. Both are "no workspace id in the path", and
+   * the platform's own default-workspace resolution is the only context left.
+   * Falling back to the loopback placeholder endpoint here is what made every
+   * "new terminal" fail with `sandbox daemon unreachable: fetch failed`.
+   */
+  private async defaultRoute(): Promise<{ workspaceId: string; path: string; endpoint: string } | undefined> {
+    const service = this.resolverService()
+    if (service?.resolveDefault === undefined) return undefined
+    try {
+      return await service.resolveDefault()
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Route one execution to the workspace daemon that must serve it. */
+  private async routeFor(cwd: string): Promise<{ endpoint: string; cwd: string; workspaceId?: string }> {
+    const workspaceId = this.workspaceOf(cwd)
+    if (workspaceId !== undefined) {
+      return { endpoint: await this.endpointForWorkspace(workspaceId), cwd, workspaceId }
+    }
+    const fallback = await this.defaultRoute()
+    if (fallback !== undefined) {
+      return { endpoint: fallback.endpoint, cwd: fallback.path, workspaceId: fallback.workspaceId }
+    }
+    // No default workspace in this composition: keep the historical static
+    // endpoint so hand-rolled compositions/tests are unchanged. A real
+    // platform always provides one as soon as it has a workspace.
+    return { endpoint: this.client.defaultEndpoint, cwd }
   }
 
   override async resolveExecutable(command: string, env?: Readonly<Record<string, string>>, signal?: AbortSignal): Promise<string> {
-    // Resolve through `endpointFor` so a command spelled as a WORKSPACE path
-    // (/workspaces/<id>/...) is looked up in that workspace's pod rather than
-    // in the service-level (default/placeholder) daemon. The seam carries no
-    // cwd, so a bare name or an unrelated path still falls back to the default
-    // endpoint — and the daemon's PATH lookup does not yet honour the `env`
-    // overrides the seam documents.
-    const endpoint = await this.endpointFor(command)
+    // A command spelled as a WORKSPACE path (/workspaces/<id>/...) is looked
+    // up in that workspace's pod. A bare name ('/bin/sh', 'rg') has no cwd in
+    // this seam and uses the platform's default workspace instead.
+    const workspaceId = this.workspaceOf(command)
+    const endpoint = workspaceId !== undefined
+      ? await this.endpointForWorkspace(workspaceId)
+      : (await this.defaultRoute())?.endpoint ?? this.client.defaultEndpoint
     return this.client.withEndpoint(endpoint).resolveExecutable(command)
   }
 
@@ -149,16 +193,21 @@ export class SubprocessK8s extends SubprocessRuntime {
       throw new Error('subprocess-k8s: cwd must not be empty')
     }
 
-    // endpoint resolution is async; the handle resolves it before starting.
-    // The daemon cwd is the pod-side path; translate the host workspace path.
-    const podCwd = this.toPod(spec.cwd)
-    const translated: SubprocessSpawnSpec = { ...spec, cwd: podCwd }
-    const workspaceId = this.workspaceOf(spec.cwd)
+    // Endpoint and cwd resolution is async; the handle resolves both before
+    // starting. A cwd outside every workspace falls back to the platform's
+    // default workspace (see routeFor) instead of the loopback placeholder.
+    const translated: SubprocessSpawnSpec = { ...spec, cwd: this.toPod(spec.cwd) }
     const handle = new RemoteHandle(
-      () => this.endpointFor(spec.cwd).then((ep) => this.client.withEndpoint(ep)),
+      async () => {
+        const route = await this.routeFor(spec.cwd)
+        return {
+          client: this.client.withEndpoint(route.endpoint),
+          cwd: this.toPod(route.cwd),
+          workspaceId: route.workspaceId,
+        }
+      },
       translated,
       this.spillDir,
-      workspaceId,
       this.commandTracker,
     )
     // Service disposal must terminate and await every still-running managed
@@ -187,9 +236,12 @@ export class SubprocessK8s extends SubprocessRuntime {
   }
 
   override async spawnTerminal(spec: SubprocessTerminalSpawnSpec): Promise<SubprocessTerminalHandle> {
-    const ep = await this.endpointFor(spec.cwd)
-    const bound = this.client.withEndpoint(ep)
-    const podCwd = this.toPod(spec.cwd)
+    // The terminal's cwd is a working-directory fact: it may be a workspace
+    // path, but a session that lives outside every workspace resolves to the
+    // root (or nothing), so route through the default-workspace fallback too.
+    const route = await this.routeFor(spec.cwd)
+    const bound = this.client.withEndpoint(route.endpoint)
+    const podCwd = this.toPod(route.cwd)
     const created = await bound.createPty({ argv: spec.argv, cwd: podCwd, env: spec.env, rows: spec.rows, cols: spec.cols })
     const translated: SubprocessTerminalSpawnSpec = { ...spec, cwd: podCwd }
     return new RemoteTerminalHandle(bound, created.ptyId, created.pid, translated)
@@ -211,12 +263,13 @@ class RemoteHandle implements SubprocessHandle {
   private counted = false
 
   private client: DaemonSubprocessClient
+  /** The workspace the tracker counts once the route is known. */
+  private trackedWorkspaceId?: string
 
   constructor(
-    private clientFactory: () => Promise<DaemonSubprocessClient>,
+    private startFactory: () => Promise<{ client: DaemonSubprocessClient; cwd: string; workspaceId?: string }>,
     private spec: SubprocessSpawnSpec,
     spillDir: string,
-    private workspaceId?: string,
     private tracker?: CommandActivityTracker,
   ) {
     this.client = new DaemonSubprocessClient('http://placeholder.invalid:1')
@@ -258,8 +311,9 @@ class RemoteHandle implements SubprocessHandle {
 
   async start(): Promise<void> {
     try {
-      // bind the daemon client to the workspace pod before any call
-      this.client = await this.clientFactory()
+      // bind the daemon client and cwd to the workspace pod before any call
+      const start = await this.startFactory()
+      this.client = start.client
       const stdinData = this.spec.stdio.stdin !== 'ignore' && this.spec.stdio.stdin !== 'pipe'
         ? new TextEncoder().encode(this.spec.stdio.stdin.data)
         : undefined
@@ -275,14 +329,15 @@ class RemoteHandle implements SubprocessHandle {
 
       const info = await this.client.run({
         argv,
-        cwd: this.spec.cwd,
+        cwd: start.cwd,
         env: wireEnv(this.spec.env),
         stdin: stdinData,
       })
       this.cmdId = info.cmdId
-      if (this.workspaceId !== undefined && this.tracker !== undefined) {
+      this.trackedWorkspaceId = start.workspaceId
+      if (this.trackedWorkspaceId !== undefined && this.tracker !== undefined) {
         this.counted = true
-        this.tracker.commandStarted(this.workspaceId)
+        this.tracker.commandStarted(this.trackedWorkspaceId)
       }
 
       if (this.spec.stdio.stdout === 'pipe') {
@@ -331,8 +386,8 @@ class RemoteHandle implements SubprocessHandle {
   private finish(): void {
     if (!this.counted) return
     this.counted = false
-    if (this.workspaceId !== undefined && this.tracker !== undefined) {
-      this.tracker.commandEnded(this.workspaceId)
+    if (this.trackedWorkspaceId !== undefined && this.tracker !== undefined) {
+      this.tracker.commandEnded(this.trackedWorkspaceId)
     }
   }
 

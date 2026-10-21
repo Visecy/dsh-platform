@@ -221,7 +221,7 @@ export function apply(ctx: Context, config: Config | undefined): void {
     hostRoot,
   )
 
-  const { resolveEndpoint, isWorkspace, commandTracker, deleteWorkspace, attach, sleepWorkspace, reconcileImages, status: workspaceStatus } = wireWorkspaceLifecycle(ctx, {
+  const { resolveEndpoint, isWorkspace, resolveDefault, commandTracker, deleteWorkspace, attach, sleepWorkspace, reconcileImages, status: workspaceStatus } = wireWorkspaceLifecycle(ctx, {
     lifecycle: {
       controller: runtime.podController,
       namespace: config.namespace,
@@ -245,11 +245,14 @@ export function apply(ctx: Context, config: Config | undefined): void {
     // own `catch`, which proceeds: the fence stops a phantom workspace, it does
     // not gate the file view on the registry being up.
     knownWorkspace: async (workspaceId) => (await registry.list()).some((ws) => ws.workspaceId === workspaceId),
+    hostRoot,
+    // Lazy on purpose: this stock is written below, after the runtime is built.
+    sessions: () => sessionHeaders,
   })
   // Both halves of the fence are published: `resolve` refuses the creation
   // case, `isWorkspace` lets fs-k8s answer a path that names no workspace in
   // its own terms instead of letting that refusal reach the conversation.
-  ctx.provide('workspaceEndpointResolver', { resolve: resolveEndpoint, isWorkspace } satisfies WorkspaceEndpointResolver)
+  ctx.provide('workspaceEndpointResolver', { resolve: resolveEndpoint, isWorkspace, resolveDefault } satisfies WorkspaceEndpointResolver)
   ctx.provide('workspaceCommandTracker', commandTracker)
   ctx.provide('workspaceStatus', workspaceStatus)
 

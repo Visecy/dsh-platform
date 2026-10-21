@@ -39,7 +39,7 @@ class FakeController implements PodController {
   pvcName(workspaceId: string): string { return workspaceId + '-data' }
 }
 
-const harness = (known?: (workspaceId: string) => Promise<boolean>) => {
+const harness = (known?: (workspaceId: string) => Promise<boolean>, sessions?: () => { list(): Promise<readonly { header: { readonly cwd?: string; readonly createdAt: number } }[]> } | undefined) => {
   const ctrl = new FakeController()
   const ensured: string[] = []
   const runtime: WorkspaceRuntime = {
@@ -54,6 +54,8 @@ const harness = (known?: (workspaceId: string) => Promise<boolean>) => {
       lifecycle: { controller: ctrl, namespace: 'dsh', image: 'test-image:v1' },
       runtime,
       knownWorkspace: known,
+      hostRoot: '/workspaces',
+      sessions,
     },
   )
   return { ctrl, ensured, wired, status: wired.status as WorkspaceStatusService }
@@ -104,6 +106,41 @@ describe('workspace endpoint resolution', () => {
 
     expect(ctrl.provisions).toEqual(['ws-c'])
     expect(status.get('ws-c')?.phase).toBe('running')
+  })
+
+  describe('default workspace (for executions whose path names none)', () => {
+    it('routes to the workspace of the newest durable session', async () => {
+      const defaults: string[] = []
+      const { ensured, wired } = harness(undefined, () => ({
+        list: async () => [
+          { header: { cwd: '/workspaces/older', createdAt: 1 } },
+          { header: { cwd: '/workspaces/newest', createdAt: 2 } },
+        ],
+      }))
+
+      const route = await wired.resolveDefault()
+      expect(route?.workspaceId).toBe('newest')
+      expect(route?.path).toBe('/workspaces/newest')
+      expect(route?.endpoint).toBe('http://pod')
+      expect(ensured).toEqual(['newest'])
+      void defaults
+    })
+
+    it('falls back to an already-running workspace when no session names one', async () => {
+      const { ensured, wired, status } = harness()
+      await wired.resolveEndpoint('ws-running')
+      expect(await until(() => status.get('ws-running')?.phase === 'running')).toBe(true)
+
+      const route = await wired.resolveDefault()
+      expect(route?.workspaceId).toBe('ws-running')
+      expect(route?.path).toBe('/workspaces/ws-running')
+      expect(ensured).toContain('ws-running')
+    })
+
+    it('returns undefined when the platform has no workspace to default to', async () => {
+      const { wired } = harness()
+      expect(await wired.resolveDefault()).toBeUndefined()
+    })
   })
 
   /**

@@ -6,6 +6,30 @@
 需要两次 tag 之间的具体改动请直接看 `git log` 与对应 tag 的 diff。
 DSH 基线由 `scripts/check-dsh-version.mjs` 强制，与平台版本的对应关系见 README 的兼容性矩阵。
 
+## v0.1.93（预览）
+
+`v0.1.93` 相对 `v0.1.92`：修复**新建终端仍然失败**（`sandbox daemon unreachable: fetch failed`）。
+无依赖/DSH 基线变化。
+
+### 修复：新建终端在 shell 解析阶段就打到 loopback daemon
+
+- 官方 terminal controller 的启动顺序是：`terminalEnvironment()` 取默认 shell →
+  `resolveExecutable('/bin/sh')` 校验 → 最后才解析 terminal 的 cwd。`resolveExecutable` 的
+  seam 没有 cwd，v0.1.92 的实现对不含工作区前缀的路径直接回落 `WS_DAEMON_ENDPOINT`（控制面
+  loopback `127.0.0.1:4390`），所以每次新建终端都在 shell 解析阶段失败——v0.1.92 的
+  `terminalEnvironment` 修复只走通了第一步。
+- 平台现在提供**默认工作区**解析：`workspaceEndpointResolver.resolveDefault()` 先取「最新一个
+  位于工作区内的持久会话」的 cwd 对应工作区，其次取已在运行的工作区（不额外唤醒）；平台没有任何
+  工作区时保持历史静态端点行为。`subprocess-k8s` 用它路由：
+  1. 无 cwd 的 `resolveExecutable`（shell 查找）；
+  2. cwd 不在任何工作区内的 `spawn` / `spawnTerminal`（例如工作区根 `/workspaces`），并把
+     cwd 重写到默认工作区路径后再交给 daemon。
+- 回归测试：wire 默认工作区选择（最新会话 / 运行中 / 无）、cwd-less `resolveExecutable` 必须
+  走默认工作区、workspace-root 的 terminal 必须被重写并在真实 daemon 上跑出 PTY 输出。
+- live 升级后用**真实 workspace pod daemon** 复刻 controller 调用序列验证：`terminalEnvironment`
+  → `resolveExecutable('/bin/sh')` → `spawnTerminal(cwd=/workspaces)`；v0.1.92 上第二步即
+  `fetch failed`，v0.1.93 全链路成功。
+
 ## v0.1.92（预览）
 
 `v0.1.92` 是 0.2.1 线的稳定性热修复，包含两个 0.2.1 回归修复与子路径发布（P2）的测试/文档。

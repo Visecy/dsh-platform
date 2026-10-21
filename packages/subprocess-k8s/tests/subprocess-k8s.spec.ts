@@ -230,4 +230,30 @@ describe('SubprocessK8s', () => {
     expect(saw).toBe(true)
     await t.terminate()
   })
+
+  it('routes cwd-less shell resolution and root-cwd terminals through the default workspace', async () => {
+    // The live v0.1.92 failure: the official terminal controller resolves the
+    // shell BEFORE it knows the terminal's cwd, so resolveExecutable('/bin/sh')
+    // had no workspace in scope and fell back to the loopback placeholder
+    // daemon -> "sandbox daemon unreachable: fetch failed". A terminal opened
+    // from the workspace root has the same problem for its cwd.
+    const resolver = {
+      resolve: async () => daemonUrl,
+      resolveDefault: async () => ({ workspaceId: 'ws-default', path: '/workspaces', endpoint: daemonUrl }),
+    }
+    ctx.provide('workspaceEndpointResolver', resolver)
+
+    const shell = await sub.resolveExecutable('/bin/sh')
+    expect(shell).toContain('/sh')
+
+    const t = await sub.spawnTerminal({ argv: ['/bin/sh', '-c', 'pwd'], cwd: '/workspaces', rows: 24, cols: 80, graceMs: 500 })
+    const chunks: Buffer[] = []
+    t.output.on('data', (c: Buffer) => chunks.push(c))
+    await t.done
+    await new Promise((r) => setTimeout(r, 100))
+    // The daemon root in this spec is the temp workspace root; the remapped
+    // cwd is its pod-side spelling.
+    expect(Buffer.concat(chunks).toString()).toContain(root)
+    await t.terminate().catch(() => undefined)
+  })
 })

@@ -8,6 +8,7 @@
 import { SessionTracker } from './session-tracker.ts'
 import { WorkspaceLifecycleManager, type ImageReconcileResult, type LifecycleOptions } from './lifecycle-manager.ts'
 import type { WorkspaceState } from './state-machine.ts'
+import type { SessionHeaderSource } from './reconciler.ts'
 import type { WorkspaceRuntime } from './index.ts'
 
 export interface WireOptions {
@@ -38,6 +39,15 @@ export interface WireOptions {
    * behaviour, because it has no notion of "registered" to check against.
    */
   knownWorkspace?: (workspaceId: string) => Promise<boolean>
+  /** Host-side workspace root, e.g. /workspaces: the path prefix of every workspace. */
+  hostRoot: string
+  /**
+   * Durable session headers (lazy: the store row may activate after this
+   * plugin). The newest session already inside a workspace decides the
+   * platform's default workspace for executions whose path names none — a bare
+   * shell lookup or a terminal opened from the workspace root.
+   */
+  sessions?: () => SessionHeaderSource | undefined
 }
 
 /** Service subprocess-k8s can use to report live background command counts. */
@@ -65,6 +75,11 @@ export interface CommandActivityTracker {
 export interface WorkspaceEndpointResolver {
   resolve(workspaceId: string): Promise<string>
   isWorkspace(workspaceId: string): Promise<boolean>
+  /**
+   * Endpoint + canonical path of the platform's default workspace, for a caller
+   * whose path names no workspace. Undefined when the platform has none.
+   */
+  resolveDefault(): Promise<{ workspaceId: string; path: string; endpoint: string } | undefined>
 }
 
 type EventBus = {
@@ -100,6 +115,7 @@ export interface WorkspaceStatusService {
 export function wireWorkspaceLifecycle(ctx: Context & EventBus, opts: WireOptions): {
   resolveEndpoint: (workspaceId: string) => Promise<string>
   isWorkspace: (workspaceId: string) => Promise<boolean>
+  resolveDefault: () => Promise<{ workspaceId: string; path: string; endpoint: string } | undefined>
   commandTracker: CommandActivityTracker
   deleteWorkspace: (workspaceId: string) => Promise<void>
   attach: (workspaceId: string) => void
@@ -161,8 +177,66 @@ export function wireWorkspaceLifecycle(ctx: Context & EventBus, opts: WireOption
     return opts.knownWorkspace(workspaceId).catch(() => true)
   }
 
+  const routeDefault = async (workspaceId: string): Promise<{ workspaceId: string; path: string; endpoint: string }> => {
+    await opts.runtime.ensure(workspaceId)
+    manager.attach(workspaceId)
+    return {
+      workspaceId,
+      path: `${opts.hostRoot}/${workspaceId}`,
+      endpoint: opts.runtime.getEndpoint(workspaceId),
+    }
+  }
+
+  /**
+   * The platform's default workspace: where a bare command (the shell lookup
+   * DSH performs BEFORE it knows a terminal's cwd) or a workspace-root cwd is
+   * routed. Without this the providers fall back to the loopback placeholder
+   * daemon endpoint, which is exactly the live "new terminal -> sandbox daemon
+   * unreachable: fetch failed" failure.
+   *
+   * Selection is deliberately conservative and unwaking-first: the newest
+   * durable session that already lives inside a workspace (what the operator
+   * worked in last), then an already-running workspace, otherwise none. A
+   * platform with no workspace at all keeps the explicit provider error.
+   */
+  const resolveDefault = async (): Promise<{ workspaceId: string; path: string; endpoint: string } | undefined> => {
+    const known = async (workspaceId: string): Promise<string | undefined> => {
+      try {
+        return (await isWorkspace(workspaceId)) ? workspaceId : undefined
+      } catch {
+        return workspaceId
+      }
+    }
+    const workspaceOf = (cwd: string | undefined): string | undefined => {
+      if (cwd === undefined) return undefined
+      const escaped = opts.hostRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      return new RegExp('^' + escaped + '/([^/]+)').exec(cwd)?.[1]
+    }
+    try {
+      const rows = await opts.sessions?.()?.list()
+      if (rows !== undefined) {
+        const newestFirst = [...rows].sort((a, b) => (b.header.createdAt ?? 0) - (a.header.createdAt ?? 0))
+        for (const row of newestFirst) {
+          const id = workspaceOf(row.header.cwd)
+          if (id === undefined) continue
+          const existing = await known(id)
+          if (existing !== undefined) return await routeDefault(existing)
+        }
+      }
+    } catch {
+      // A store that cannot be read is not an answer; fall through.
+    }
+    for (const state of manager.allStates()) {
+      if (state.phase !== 'running') continue
+      const existing = await known(state.workspaceId)
+      if (existing !== undefined) return await routeDefault(existing)
+    }
+    return undefined
+  }
+
   return {
     isWorkspace,
+    resolveDefault,
     resolveEndpoint: async (workspaceId: string): Promise<string> => {
       // A path is not a workspace. Refuse to materialize one that no record
       // describes, before anything creates a PVC or a pod for it.
