@@ -29,12 +29,12 @@ beforeAll(async () => {
       commandEnded: (id) => ended.push(id),
     },
   })
-})
+}, 60_000)
 
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()))
   await rm(root, { recursive: true, force: true })
-})
+}, 60_000)
 
 const spec = (over: Partial<SubprocessSpawnSpec>): SubprocessSpawnSpec => ({
   argv: ['sh', '-c', 'echo out; echo err >&2; exit 3'],
