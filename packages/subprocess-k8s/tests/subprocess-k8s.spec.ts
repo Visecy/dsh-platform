@@ -242,6 +242,24 @@ describe('SubprocessK8s', () => {
     await t.terminate()
   })
 
+  it('terminal handles implement the full 0.2.1 handle seam (resize / inspectActivity / control)', async () => {
+    // The terminal wrapper calls handle.resize on attach and handle.inspectActivity
+    // for retention; missing members surface as runtime errors in the panel.
+    const t = await sub.spawnTerminal({ argv: ['/bin/sh'], cwd: root, rows: 24, cols: 80, graceMs: 500 })
+    expect(typeof t.resize).toBe('function')
+    expect(typeof t.inspectActivity).toBe('function')
+    await t.resize(100, 30) // live PTY: ioctl must succeed
+    const activity = await t.inspectActivity()
+    expect(activity.state).toBe('unknown')
+    expect(typeof activity.revision).toBe('number')
+    await t.terminate().catch(() => undefined)
+
+    const h = sub.spawn(spec({}))
+    expect('control' in h).toBe(true)
+    expect(h.control).toBeUndefined()
+    await h.done
+  })
+
   it('routes cwd-less shell resolution and root-cwd terminals through the default workspace', async () => {
     // The live v0.1.92 failure: the official terminal controller resolves the
     // shell BEFORE it knows the terminal's cwd, so resolveExecutable('/bin/sh')

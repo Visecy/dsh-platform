@@ -6,6 +6,25 @@
 需要两次 tag 之间的具体改动请直接看 `git log` 与对应 tag 的 diff。
 DSH 基线由 `scripts/check-dsh-version.mjs` 强制，与平台版本的对应关系见 README 的兼容性矩阵。
 
+## v0.1.95（预览）
+
+`v0.1.95` 相对 `v0.1.94`：修复**终端创建后报 `this.handle.resize is not a function`**。
+无依赖/DSH 基线变化。
+
+### 修复：终端 handle 缺少 0.2.1 seam 成员
+
+- 0.2.1 的 `SubprocessTerminalHandle` 要求 `resize(cols, rows)` 与
+  `inspectActivity()`；官方 terminal wrapper 在 attach / retention 时调用它们。平台的
+  `RemoteTerminalHandle` 只实现了 0.2.0 的成员，于是终端 tab 建出来后 resize 立刻
+  TypeError（`this.handle.resize is not a function`）。
+- 补齐：`resize` 走 daemon PTY ioctl；`inspectActivity` 报告 `unknown`（daemon 没有
+  prompt/前台作业探测，声称 idle 会让 host 回收用户仍在用的终端）；同时补上
+  `SubprocessHandle.control` 属性（本 provider 不提供该通道，属性必须存在）。
+- 回归测试：resize 在活 PTY 上成功、`inspectActivity()` 返回 unknown、`control` 属性存在。
+- 说明：这一轮是**真实浏览器 E2E**（headless Chrome + 真实登录 dex）逐个暴露出来的：
+  v0.1.93 先报 zsh、v0.1.94 修掉 shell 发现后终端能创建，但 attach 时暴露 resize 缺失。
+  本版后浏览器里新建终端可正常输入并执行命令。
+
 ## v0.1.94（预览）
 
 `v0.1.94` 相对 `v0.1.93`：修复**新建终端报 `executable not found in PATH: zsh`**。

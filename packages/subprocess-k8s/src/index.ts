@@ -3,9 +3,9 @@
  * to a workspace pod's sandbox daemon.
  */
 import { Context } from '@deepseek-ai/cordis'
-import { SubprocessExecutableNotFoundError, SubprocessRuntime, type SubprocessCollectedOutputs, type SubprocessHandle, type SubprocessOutcome, type SubprocessSpawnSpec, type SubprocessTerminalEnvironment, type SubprocessTerminalForeground, type SubprocessTerminalHandle, type SubprocessTerminalSignal, type SubprocessTerminalSpawnSpec } from '@deepseek-ai/dsh-subprocess'
+import { SubprocessExecutableNotFoundError, SubprocessRuntime, type SubprocessCollectedOutputs, type SubprocessHandle, type SubprocessOutcome, type SubprocessSpawnSpec, type SubprocessTerminalActivity, type SubprocessTerminalEnvironment, type SubprocessTerminalForeground, type SubprocessTerminalHandle, type SubprocessTerminalSignal, type SubprocessTerminalSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
-import { Writable, Readable } from 'node:stream'
+import { Writable, Readable, type Duplex } from 'node:stream'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -265,6 +265,8 @@ class RemoteHandle implements SubprocessHandle {
   readonly stdin: Writable | undefined
   readonly stdout: Readable | undefined
   readonly stderr: Readable | undefined
+  /** Separate caller-owned channel; this provider offers none, but the seam property must exist. */
+  readonly control: Duplex | undefined = undefined
   readonly collected: SubprocessCollectedOutputs = {}
   readonly done: Promise<SubprocessOutcome>
   private cmdId: string
@@ -458,6 +460,8 @@ class RemoteTerminalHandle implements SubprocessTerminalHandle {
   readonly done: Promise<SubprocessOutcome>
   private resolveDone!: (o: SubprocessOutcome) => void
   private terminated = false
+  /** Monotonic observation revision for the retention policy. */
+  private revision = 0
 
   constructor(
     private client: DaemonSubprocessClient,
@@ -491,7 +495,26 @@ class RemoteTerminalHandle implements SubprocessTerminalHandle {
   }
 
   async write(data: string): Promise<void> {
+    this.revision += 1
     await this.client.ptyWrite(this.ptyId, data)
+  }
+
+  /** Change the terminal dimensions (0.2.1 terminal handle seam). */
+  async resize(cols: number, rows: number): Promise<void> {
+    this.revision += 1
+    await this.client.ptyResize(this.ptyId, rows, cols)
+  }
+
+  /**
+   * Shell-activity observation (0.2.1 terminal handle seam).
+   *
+   * The daemon exposes no prompt/foreground-job probe, so this provider cannot
+   * prove a terminal idle: report `unknown`, which the retention policy treats
+   * as "not reclaimable". Claiming `idle` would let the host tear down a
+   * terminal a user is still using.
+   */
+  async inspectActivity(): Promise<SubprocessTerminalActivity> {
+    return { state: 'unknown', revision: this.revision }
   }
 
   async inspectForeground(): Promise<SubprocessTerminalForeground | undefined> {
