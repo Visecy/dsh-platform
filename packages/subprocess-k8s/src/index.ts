@@ -3,13 +3,13 @@
  * to a workspace pod's sandbox daemon.
  */
 import { Context } from '@deepseek-ai/cordis'
-import { SubprocessRuntime, type SubprocessCollectedOutputs, type SubprocessHandle, type SubprocessOutcome, type SubprocessSpawnSpec, type SubprocessTerminalEnvironment, type SubprocessTerminalForeground, type SubprocessTerminalHandle, type SubprocessTerminalSignal, type SubprocessTerminalSpawnSpec } from '@deepseek-ai/dsh-subprocess'
+import { SubprocessExecutableNotFoundError, SubprocessRuntime, type SubprocessCollectedOutputs, type SubprocessHandle, type SubprocessOutcome, type SubprocessSpawnSpec, type SubprocessTerminalEnvironment, type SubprocessTerminalForeground, type SubprocessTerminalHandle, type SubprocessTerminalSignal, type SubprocessTerminalSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { Writable, Readable } from 'node:stream'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
-import { DaemonSubprocessClient } from './client.ts'
+import { DaemonError, DaemonSubprocessClient } from './client.ts'
 import { CollectPoller, CollectReader, makePipe } from './output.ts'
 
 export const name = '@visecy/dsh-subprocess-k8s'
@@ -157,7 +157,20 @@ export class SubprocessK8s extends SubprocessRuntime {
     const endpoint = workspaceId !== undefined
       ? await this.endpointForWorkspace(workspaceId)
       : (await this.defaultRoute())?.endpoint ?? this.client.defaultEndpoint
-    return this.client.withEndpoint(endpoint).resolveExecutable(command)
+    try {
+      return await this.client.withEndpoint(endpoint).resolveExecutable(command)
+    } catch (error) {
+      // The seam has a dedicated "lookup completed, no executable" error and
+      // the official consumers rely on its NAME, not a message: the terminal
+      // shell discovery skips absent candidates (zsh/fish/pwsh) only when the
+      // rejection is a SubprocessExecutableNotFoundError. The daemon reports
+      // code NOT_FOUND; translate it here instead of leaking DaemonError, which
+      // turned "zsh is not installed" into a hard terminal error.
+      if (error instanceof DaemonError && error.code === 'NOT_FOUND') {
+        throw new SubprocessExecutableNotFoundError(error.message, { cause: error })
+      }
+      throw error
+    }
   }
 
   /**

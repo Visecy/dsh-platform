@@ -6,6 +6,23 @@
 需要两次 tag 之间的具体改动请直接看 `git log` 与对应 tag 的 diff。
 DSH 基线由 `scripts/check-dsh-version.mjs` 强制，与平台版本的对应关系见 README 的兼容性矩阵。
 
+## v0.1.94（预览）
+
+`v0.1.94` 相对 `v0.1.93`：修复**新建终端报 `executable not found in PATH: zsh`**。
+无依赖/DSH 基线变化。
+
+### 修复：缺失的 shell 候选被当成硬错误
+
+- 官方 terminal controller 用 `shellCandidates`（默认 `zsh,bash,fish,pwsh,powershell,cmd`）
+  逐个调用 `resolveExecutable()` 发现可用 shell，并**只**跳过名字为
+  `SubprocessExecutableNotFoundError` 的拒绝；其它错误整体抛出。平台的 daemon 对不存在的
+  命令返回 `NOT_FOUND`，客户端包成 `DaemonError`，于是 zsh 未安装时整个终端创建失败。
+- `subprocess-k8s` 现在把 daemon 的 `NOT_FOUND` 翻译成官方
+  `SubprocessExecutableNotFoundError`（带 cause），shell 发现因此会跳过 zsh/fish/pwsh，
+  只列出镜像里真实存在的 shell。
+- 回归测试：`resolveExecutable('zsh')` 必须以官方 not-found 错误拒绝。
+- live 验证：真实浏览器登录 → 新建终端 → 创建 PTY 并执行命令（见部署记录）。
+
 ## v0.1.93（预览）
 
 `v0.1.93` 相对 `v0.1.92`：修复**新建终端仍然失败**（`sandbox daemon unreachable: fetch failed`）。

@@ -50,6 +50,17 @@ describe('SubprocessK8s', () => {
     expect(p).toContain('/echo')
   })
 
+  it('reports a missing executable with the official not-found error (terminal shell discovery)', async () => {
+    // The official terminal controller lists shells by resolving zsh/bash/fish/...
+    // and skips a candidate ONLY when the rejection is named
+    // SubprocessExecutableNotFoundError. The daemon answers code NOT_FOUND; the
+    // provider must translate it, or a missing zsh becomes a hard terminal error
+    // ("executable not found in PATH: zsh").
+    await expect(sub.resolveExecutable('zsh')).rejects.toMatchObject({
+      name: 'SubprocessExecutableNotFoundError',
+    })
+  })
+
   it('reports the pod terminal environment and satisfies the full 0.2.1 seam', async () => {
     // 0.2.1 added `terminalEnvironment()` to SubprocessRuntime (the official
     // terminal controller calls it when no shell is configured). A provider
